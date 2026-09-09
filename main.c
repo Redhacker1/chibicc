@@ -1,6 +1,7 @@
 #include "chibicc.h"
 
-typedef enum {
+typedef enum
+{
   FILE_NONE, FILE_C, FILE_ASM, FILE_OBJ, FILE_AR, FILE_DSO,
 } FileType;
 
@@ -34,12 +35,12 @@ static char *output_file;
 static StringArray input_paths;
 static StringArray tmpfiles;
 
-static void usage(int status) {
+static void usage(const int status) {
   fprintf(stderr, "chibicc [ -o <path> ] <file>\n");
   exit(status);
 }
 
-static bool take_arg(char *arg) {
+static bool take_arg(const char *arg) {
   char *x[] = {
     "-o", "-I", "-idirafter", "-include", "-x", "-MF", "-MT", "-Xlinker",
   };
@@ -50,7 +51,7 @@ static bool take_arg(char *arg) {
   return false;
 }
 
-static void add_default_include_paths(char *argv0) {
+static void add_default_include_paths(const char *argv0) {
   // We expect that chibicc-specific include files are installed
   // to ./include relative to argv[0].
   strarray_push(&include_paths, format("%s/include", dirname(strdup(argv0))));
@@ -67,7 +68,6 @@ static void add_default_include_paths(char *argv0) {
 
 static void define(char *str) 
 {
-
 #ifndef _WIN32
   char *eq = strchr(str, '=');
   if (eq)
@@ -93,7 +93,8 @@ static FileType parse_opt_x(char *s) {
   error("<command line>: unknown argument for -x: %s", s);
 }
 
-static char *quote_makefile(char *s) {
+static char *quote_makefile(const char *s)
+{
   char *buf = calloc(1, strlen(s) * 2 + 1);
 
   for (int i = 0, j = 0; s[i]; i++) {
@@ -121,7 +122,7 @@ static char *quote_makefile(char *s) {
   return buf;
 }
 
-static void parse_args(int argc, char **argv) {
+static void parse_args(const int argc, char **argv) {
   // Make sure that all command line options that take an argument
   // have an argument.
   for (int i = 1; i < argc; i++)
@@ -367,14 +368,14 @@ static FILE *open_file(char *path) {
   return out;
 }
 
-static bool endswith(char *p, char *q) {
-  int len1 = strlen(p);
-  int len2 = strlen(q);
+static bool endswith(const char *p, const char *q) {
+  const int len1 = strlen(p);
+  const int len2 = strlen(q);
   return (len1 >= len2) && !strcmp(p + len1 - len2, q);
 }
 
 // Replace file extension
-static char *replace_extn(char *tmpl, char *extn) {
+static char *replace_extn(const char *tmpl, char *extn) {
   char *filename = basename(strdup(tmpl));
   char *dot = strrchr(filename, '.');
   if (dot)
@@ -458,7 +459,7 @@ static void run_cc1(int argc, char **argv, char *input, char *output) {
 }
 
 // Print tokens to stdout. Used for -E.
-static void print_tokens(Token *tok) {
+static void print_tokens(const Token *tok) {
   FILE *out = open_file(opt_o ? opt_o : "-");
 
   int line = 1;
@@ -473,10 +474,10 @@ static void print_tokens(Token *tok) {
   fprintf(out, "\n");
 }
 
-static bool in_std_include_path(char *path) {
+static bool in_std_include_path(const char *path) {
   for (int i = 0; i < std_include_paths.len; i++) {
-    char *dir = std_include_paths.data[i];
-    int len = strlen(dir);
+    const char *dir = std_include_paths.data[i];
+    const int len = strlen(dir);
     if (strncmp(dir, path, len) == 0 && path[len] == '/')
       return true;
   }
@@ -603,7 +604,7 @@ static void cc1(void) {
   if (fseek(output_buf, 0, SEEK_END) != 0)
     error("failed to seek temporary output buffer");
 
-  long file_size = ftell(output_buf);
+  const long file_size = ftell(output_buf);
   if (file_size < 0)
     error("failed to determine temporary output buffer size");
 
@@ -641,7 +642,7 @@ static void assemble(char *input, char *output) {
   run_subprocess(cmd);
 }
 
-static char *find_file(char *pattern) {
+static char *find_file(const char *pattern) {
   char *path = NULL;
   glob_t buf = {};
   glob(pattern, 0, NULL, &buf);
@@ -652,7 +653,7 @@ static char *find_file(char *pattern) {
 }
 
 // Returns true if a given file exists.
-bool file_exists(char *path) {
+bool file_exists(const char *path) {
   struct stat st;
   return !stat(path, &st);
 }
@@ -681,7 +682,7 @@ static char *find_gcc_libpath(void) {
   error("gcc library path is not found");
 }
 
-static void run_linker(StringArray *inputs, char *output) {
+static void run_linker(const StringArray *inputs, char *output) {
   StringArray arr = {};
 
   strarray_push(&arr, "ld");
@@ -766,7 +767,8 @@ static FileType get_file_type(char *filename) {
   error("<command line>: unknown file extension: %s", filename);
 }
 
-int main(int argc, char **argv) {
+int main(const int argc, char **argv)
+{
   atexit(cleanup);
   init_macros();
   parse_args(argc, argv);
@@ -808,7 +810,7 @@ int main(int argc, char **argv) {
     else
       output = replace_extn(input, ".o");
 
-    FileType type = get_file_type(input);
+    const FileType type = get_file_type(input);
 
     // Handle .o or .a
     if (type == FILE_OBJ || type == FILE_AR || type == FILE_DSO) {
@@ -851,8 +853,7 @@ int main(int argc, char **argv) {
     run_cc1(argc, argv, input, tmp1);
     assemble(tmp1, tmp2);
     strarray_push(&ld_args, tmp2);
-    continue;
-  }
+ }
 
   if (ld_args.len > 0)
     run_linker(&ld_args, opt_o ? opt_o : "a.out");

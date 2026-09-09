@@ -9,3 +9,5 @@
 /test/*.exe
 /stage2
 /build_test_cmake
+/build-msvc
+/.idea

@@ -14,15 +14,11 @@ add_executable(chibicc-cli
 	unicode.c
 )
 
-target_include_directories(chibicc-cli PRIVATE host_include_86 compiler_includes)
+target_include_directories(chibicc-cli PRIVATE compiler_include ${CMAKE_CURRENT_LIST_DIR})
 
 if(WIN32)
 
-target_sources(chibicc-cli PUBLIC
-	win_src/glob.c
-	win_src/wait.c
-	win_src/win_shims.c
-)
+target_sources(chibicc-cli PUBLIC win_src/glob.c win_src/wait.c win_src/win_shims.c win_src/unistd.c)
 
 target_include_directories(chibicc-cli PRIVATE win_includes)
-end
+endif()

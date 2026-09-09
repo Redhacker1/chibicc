@@ -470,7 +470,7 @@ void hashmap_test(void);
 // main.c
 //
 
-bool file_exists(char *path);
+bool file_exists(const char *path);
 
 extern StringArray include_paths;
 extern bool opt_fpic;
