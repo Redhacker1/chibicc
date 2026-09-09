@@ -45,7 +45,9 @@ typedef struct {
   bool is_extern;
   bool is_inline;
   bool is_tls;
+  bool is_packed;
   int align;
+  ABI *abi;
 } VarAttr;
 
 // This struct represents a variable initializer. Since initializers
@@ -106,6 +108,7 @@ static Node *current_switch;
 
 static Obj *builtin_alloca;
 
+int64_t const_expr(Token **rest, Token *tok);
 static bool is_typename(Token *tok);
 static Type *declspec(Token **rest, Token *tok, VarAttr *attr);
 static Type *typename(Token **rest, Token *tok);
@@ -358,6 +361,194 @@ static void push_tag_scope(Token *tok, Type *ty) {
   hashmap_put2(&scope->tags, tok->loc, tok->len, ty);
 }
 
+static Token *skip_parentheses(Token *tok) {
+  int level = 1;
+  while (tok && level > 0) {
+    if (equal(tok, "("))
+      level++;
+    else if (equal(tok, ")"))
+      level--;
+    tok = tok->next;
+  }
+  return tok;
+}
+
+static bool is_attribute_token(Token *tok) {
+  if (!tok)
+    return false;
+  return equal(tok, "__attribute__") || equal(tok, "__attribute") ||
+         equal(tok, "__declspec") || equal(tok, "__callingconv") ||
+         equal(tok, "__cdecl") || equal(tok, "__stdcall") ||
+         equal(tok, "__fastcall") || equal(tok, "__thiscall") ||
+         equal(tok, "__vectorcall") || equal(tok, "_cdecl") ||
+         equal(tok, "_stdcall") || equal(tok, "_fastcall") ||
+         equal(tok, "__pascal") || equal(tok, "pascal") ||
+         equal(tok, "__ms_abi") || equal(tok, "__sysv_abi") ||
+         equal(tok, "__forceinline") || equal(tok, "__inline") ||
+         equal(tok, "__inline__") || equal(tok, "__restrict") ||
+         equal(tok, "__restrict__") || equal(tok, "__ptr32") ||
+         equal(tok, "__ptr64") || equal(tok, "__unaligned") ||
+         equal(tok, "__w64");
+}
+
+static Token *consume_attributes(Token *tok, VarAttr *attr) {
+  while (tok && is_attribute_token(tok)) {
+    if (equal(tok, "__callingconv")) {
+      tok = skip(tok->next, "(");
+      char name[64] = {0};
+      if (tok->kind == TK_STR) {
+        strncpy(name, tok->str, sizeof(name) - 1);
+      } else if (tok->kind == TK_IDENT) {
+        int len = tok->len < (int)sizeof(name) - 1 ? tok->len : (int)sizeof(name) - 1;
+        strncpy(name, tok->loc, len);
+      }
+      tok = tok->next;
+      tok = skip(tok, ")");
+      ABI *target_abi = get_abi(name);
+      if (attr)
+        attr->abi = target_abi;
+      continue;
+    }
+
+    if (equal(tok, "__attribute__") || equal(tok, "__attribute")) {
+      tok = tok->next;
+      while (equal(tok, "("))
+        tok = tok->next;
+      while (tok && !equal(tok, ")")) {
+        if (consume(&tok, tok, "packed") || consume(&tok, tok, "__packed__")) {
+          if (attr) attr->is_packed = true;
+        } else if (consume(&tok, tok, "aligned") || consume(&tok, tok, "__aligned__")) {
+          if (equal(tok, "(")) {
+            tok = tok->next;
+            int align = (int)const_expr(&tok, tok);
+            if (attr) attr->align = align;
+            tok = skip(tok, ")");
+          }
+        } else if (consume(&tok, tok, "callingconv") || consume(&tok, tok, "__callingconv__")) {
+          tok = skip(tok, "(");
+          char name[64] = {0};
+          if (tok->kind == TK_STR) {
+            strncpy(name, tok->str, sizeof(name) - 1);
+          } else if (tok->kind == TK_IDENT) {
+            int len = tok->len < (int)sizeof(name) - 1 ? tok->len : (int)sizeof(name) - 1;
+            strncpy(name, tok->loc, len);
+          }
+          tok = tok->next;
+          tok = skip(tok, ")");
+          ABI *target_abi = get_abi(name);
+          if (attr)
+            attr->abi = target_abi;
+        } else if (consume(&tok, tok, "ms_abi") || consume(&tok, tok, "__ms_abi__")) {
+          if (attr) attr->abi = get_abi("win64");
+        } else if (consume(&tok, tok, "sysv_abi") || consume(&tok, tok, "__sysv_abi__")) {
+          if (attr) attr->abi = get_abi("sysv64");
+        } else if (consume(&tok, tok, "pascal") || consume(&tok, tok, "__pascal__")) {
+          if (attr) attr->abi = get_abi("pascal");
+        } else if (consume(&tok, tok, "cdecl") || consume(&tok, tok, "__cdecl__")) {
+          if (attr) attr->abi = get_abi("win32");
+        } else if (consume(&tok, tok, "stdcall") || consume(&tok, tok, "__stdcall__")) {
+          if (attr) attr->abi = get_abi("win32");
+        } else if (consume(&tok, tok, ",")) {
+          continue;
+        } else {
+          tok = tok->next;
+          if (equal(tok, "(")) {
+            tok = tok->next;
+            tok = skip_parentheses(tok);
+          }
+        }
+      }
+      while (equal(tok, ")"))
+        tok = tok->next;
+      continue;
+    }
+
+    if (equal(tok, "__declspec")) {
+      tok = tok->next;
+      if (equal(tok, "(")) {
+        tok = tok->next;
+        while (tok && !equal(tok, ")")) {
+          if (consume(&tok, tok, "align")) {
+            if (equal(tok, "(")) {
+              tok = tok->next;
+              int align = (int)const_expr(&tok, tok);
+              if (attr) attr->align = align;
+              tok = skip(tok, ")");
+            }
+          } else if (consume(&tok, tok, "callingconv")) {
+            tok = skip(tok, "(");
+            char name[64] = {0};
+            if (tok->kind == TK_STR) {
+              strncpy(name, tok->str, sizeof(name) - 1);
+            } else if (tok->kind == TK_IDENT) {
+              int len = tok->len < (int)sizeof(name) - 1 ? tok->len : (int)sizeof(name) - 1;
+              strncpy(name, tok->loc, len);
+            }
+            tok = tok->next;
+            tok = skip(tok, ")");
+            ABI *target_abi = get_abi(name);
+            if (attr)
+              attr->abi = target_abi;
+          } else if (consume(&tok, tok, "pascal")) {
+            if (attr) attr->abi = get_abi("pascal");
+          } else if (consume(&tok, tok, ",")) {
+            continue;
+          } else {
+            tok = tok->next;
+            if (equal(tok, "(")) {
+              tok = tok->next;
+              tok = skip_parentheses(tok);
+            }
+          }
+        }
+        if (equal(tok, ")"))
+          tok = tok->next;
+      }
+      continue;
+    }
+
+    if (equal(tok, "__pascal") || equal(tok, "pascal")) {
+      if (attr) attr->abi = get_abi("pascal");
+      tok = tok->next;
+      continue;
+    }
+
+    if (equal(tok, "__ms_abi")) {
+      if (attr) attr->abi = get_abi("win64");
+      tok = tok->next;
+      continue;
+    }
+
+    if (equal(tok, "__sysv_abi")) {
+      if (attr) attr->abi = get_abi("sysv64");
+      tok = tok->next;
+      continue;
+    }
+
+    if (equal(tok, "__cdecl") || equal(tok, "_cdecl")) {
+      if (attr) attr->abi = get_abi("win32");
+      tok = tok->next;
+      continue;
+    }
+
+    if (equal(tok, "__stdcall") || equal(tok, "_stdcall")) {
+      if (attr) attr->abi = get_abi("win32");
+      tok = tok->next;
+      continue;
+    }
+
+    if (equal(tok, "__forceinline") || equal(tok, "__inline") || equal(tok, "__inline__")) {
+      if (attr) attr->is_inline = true;
+      tok = tok->next;
+      continue;
+    }
+
+    // Skip calling conventions and other qualifiers
+    tok = tok->next;
+  }
+  return tok;
+}
+
 // declspec = ("void" | "_Bool" | "char" | "short" | "int" | "long"
 //             | "typedef" | "static" | "extern" | "inline"
 //             | "_Thread_local" | "__thread"
@@ -402,6 +593,12 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
   bool is_atomic = false;
 
   while (is_typename(tok)) {
+    // Handle attributes and calling conventions
+    if (is_attribute_token(tok)) {
+      tok = consume_attributes(tok, attr);
+      continue;
+    }
+
     // Handle storage class specifiers.
     if (equal(tok, "typedef") || equal(tok, "static") || equal(tok, "extern") ||
         equal(tok, "inline") || equal(tok, "_Thread_local") || equal(tok, "__thread")) {
@@ -430,8 +627,7 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
     // These keywords are recognized but ignored.
     if (consume(&tok, tok, "const") || consume(&tok, tok, "volatile") ||
         consume(&tok, tok, "auto") || consume(&tok, tok, "register") ||
-        consume(&tok, tok, "restrict") || consume(&tok, tok, "__restrict") ||
-        consume(&tok, tok, "__restrict__") || consume(&tok, tok, "_Noreturn"))
+        consume(&tok, tok, "restrict") || consume(&tok, tok, "_Noreturn"))
       continue;
 
     if (equal(tok, "_Atomic")) {
@@ -540,19 +736,23 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
       break;
     case LONG:
     case LONG + INT:
-    case LONG + LONG:
-    case LONG + LONG + INT:
     case SIGNED + LONG:
     case SIGNED + LONG + INT:
+      ty = ty_long;
+      break;
+    case LONG + LONG:
+    case LONG + LONG + INT:
     case SIGNED + LONG + LONG:
     case SIGNED + LONG + LONG + INT:
-      ty = ty_long;
+      ty = ty_llong;
       break;
     case UNSIGNED + LONG:
     case UNSIGNED + LONG + INT:
+      ty = ty_ulong;
+      break;
     case UNSIGNED + LONG + LONG:
     case UNSIGNED + LONG + LONG + INT:
-      ty = ty_ulong;
+      ty = ty_ullong;
       break;
     case FLOAT:
       ty = ty_float;
@@ -665,13 +865,16 @@ static Type *type_suffix(Token **rest, Token *tok, Type *ty) {
   return ty;
 }
 
-// pointers = ("*" ("const" | "volatile" | "restrict")*)*
+// pointers = ("*" ("const" | "volatile" | "restrict" | attribute)*)*
 static Type *pointers(Token **rest, Token *tok, Type *ty) {
   while (consume(&tok, tok, "*")) {
     ty = pointer_to(ty);
-    while (equal(tok, "const") || equal(tok, "volatile") || equal(tok, "restrict") ||
-           equal(tok, "__restrict") || equal(tok, "__restrict__"))
-      tok = tok->next;
+    while (equal(tok, "const") || equal(tok, "volatile") || equal(tok, "restrict") || is_attribute_token(tok)) {
+      if (is_attribute_token(tok))
+        tok = consume_attributes(tok, NULL);
+      else
+        tok = tok->next;
+    }
   }
   *rest = tok;
   return ty;
@@ -679,7 +882,12 @@ static Type *pointers(Token **rest, Token *tok, Type *ty) {
 
 // declarator = pointers ("(" ident ")" | "(" declarator ")" | ident) type-suffix
 static Type *declarator(Token **rest, Token *tok, Type *ty) {
+  VarAttr attr = {};
+  tok = consume_attributes(tok, &attr);
+
   ty = pointers(&tok, tok, ty);
+
+  tok = consume_attributes(tok, &attr);
 
   if (equal(tok, "(")) {
     Token *start = tok;
@@ -687,6 +895,10 @@ static Type *declarator(Token **rest, Token *tok, Type *ty) {
     declarator(&tok, start->next, &dummy);
     tok = skip(tok, ")");
     ty = type_suffix(rest, tok, ty);
+    if (attr.abi) {
+      if (ty->kind == TY_FUNC) ty->abi = attr.abi;
+      else if (ty->kind == TY_PTR && ty->base && ty->base->kind == TY_FUNC) ty->base->abi = attr.abi;
+    }
     return declarator(&tok, start->next, ty);
   }
 
@@ -698,15 +910,26 @@ static Type *declarator(Token **rest, Token *tok, Type *ty) {
     tok = tok->next;
   }
 
+  tok = consume_attributes(tok, &attr);
+
   ty = type_suffix(rest, tok, ty);
   ty->name = name;
   ty->name_pos = name_pos;
+  if (attr.abi) {
+    if (ty->kind == TY_FUNC) ty->abi = attr.abi;
+    else if (ty->kind == TY_PTR && ty->base && ty->base->kind == TY_FUNC) ty->base->abi = attr.abi;
+  }
   return ty;
 }
 
 // abstract-declarator = pointers ("(" abstract-declarator ")")? type-suffix
 static Type *abstract_declarator(Token **rest, Token *tok, Type *ty) {
+  VarAttr attr = {};
+  tok = consume_attributes(tok, &attr);
+
   ty = pointers(&tok, tok, ty);
+
+  tok = consume_attributes(tok, &attr);
 
   if (equal(tok, "(")) {
     Token *start = tok;
@@ -714,10 +937,21 @@ static Type *abstract_declarator(Token **rest, Token *tok, Type *ty) {
     abstract_declarator(&tok, start->next, &dummy);
     tok = skip(tok, ")");
     ty = type_suffix(rest, tok, ty);
+    if (attr.abi) {
+      if (ty->kind == TY_FUNC) ty->abi = attr.abi;
+      else if (ty->kind == TY_PTR && ty->base && ty->base->kind == TY_FUNC) ty->base->abi = attr.abi;
+    }
     return abstract_declarator(&tok, start->next, ty);
   }
 
-  return type_suffix(rest, tok, ty);
+  tok = consume_attributes(tok, &attr);
+
+  ty = type_suffix(rest, tok, ty);
+  if (attr.abi) {
+    if (ty->kind == TY_FUNC) ty->abi = attr.abi;
+    else if (ty->kind == TY_PTR && ty->base && ty->base->kind == TY_FUNC) ty->base->abi = attr.abi;
+  }
+  return ty;
 }
 
 // type-name = declspec abstract-declarator
@@ -1002,8 +1236,8 @@ static Member *struct_designator(Token **rest, Token *tok, Type *ty) {
     error_tok(tok, "expected a field designator");
 
   for (Member *mem = ty->members; mem; mem = mem->next) {
-    // Anonymous struct member
-    if (mem->ty->kind == TY_STRUCT && !mem->name) {
+    // Anonymous struct or union member
+    if ((mem->ty->kind == TY_STRUCT || mem->ty->kind == TY_UNION) && !mem->name) {
       if (get_struct_member(mem->ty, tok)) {
         *rest = start;
         return mem;
@@ -1011,8 +1245,8 @@ static Member *struct_designator(Token **rest, Token *tok, Type *ty) {
       continue;
     }
 
-    // Regular struct member
-    if (mem->name->len == tok->len && !strncmp(mem->name->loc, tok->loc, tok->len)) {
+    // Regular struct member (ensure mem->name is valid)
+    if (mem->name && mem->name->len == tok->len && !strncmp(mem->name->loc, tok->loc, tok->len)) {
       *rest = tok->next;
       return mem;
     }
@@ -1137,10 +1371,14 @@ static void array_initializer2(Token **rest, Token *tok, Initializer *init, int 
     *init = *new_initializer(array_of(init->ty->base, len), false);
   }
 
+  bool first = true;
+
   for (; i < init->ty->array_len && !is_end(tok); i++) {
     Token *start = tok;
-    if (i > 0)
+
+    if (!first || equal(tok, ","))
       tok = skip(tok, ",");
+    first = false;
 
     if (equal(tok, "[") || equal(tok, ".")) {
       *rest = start;
@@ -1187,7 +1425,7 @@ static void struct_initializer2(Token **rest, Token *tok, Initializer *init, Mem
   for (; mem && !is_end(tok); mem = mem->next) {
     Token *start = tok;
 
-    if (!first)
+    if (!first || equal(tok, ","))
       tok = skip(tok, ",");
     first = false;
 
@@ -1262,7 +1500,21 @@ static void initializer2(Token **rest, Token *tok, Initializer *init) {
   }
 
   if (init->ty->kind == TY_UNION) {
-    union_initializer(rest, tok, init);
+    if (equal(tok, "{")) {
+      union_initializer(rest, tok, init);
+      return;
+    }
+
+    // A union can be initialized with another union of the same type.
+    Node *expr = assign(rest, tok);
+    add_type(expr);
+    if (expr->ty->kind == TY_UNION) {
+      init->expr = expr;
+      return;
+    }
+
+    init->mem = init->ty->members;
+    init->children[0]->expr = expr;
     return;
   }
 
@@ -1350,7 +1602,7 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
     return node;
   }
 
-  if (ty->kind == TY_UNION) {
+  if (ty->kind == TY_UNION && !init->expr) {
     Member *mem = init->mem ? init->mem : ty->members;
     InitDesg desg2 = {desg, 0, mem};
     return create_lvar_init(init->children[mem->idx], mem->ty, &desg2, tok);
@@ -1510,7 +1762,7 @@ static bool is_typename(Token *tok) {
       hashmap_put(&map, kw[i], (void *)1);
   }
 
-  return hashmap_get2(&map, tok->loc, tok->len) || find_typedef(tok);
+  return hashmap_get2(&map, tok->loc, tok->len) || find_typedef(tok) || is_attribute_token(tok);
 }
 
 // asm-stmt = "asm" ("volatile" | "inline")* "(" string-literal ")"
@@ -2595,44 +2847,13 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
   ty->members = head.next;
 }
 
-// attribute = ("__attribute__" "(" "(" "packed" ")" ")")*
-static Token *attribute_list(Token *tok, Type *ty) {
-  while (consume(&tok, tok, "__attribute__")) {
-    tok = skip(tok, "(");
-    tok = skip(tok, "(");
-
-    bool first = true;
-
-    while (!consume(&tok, tok, ")")) {
-      if (!first)
-        tok = skip(tok, ",");
-      first = false;
-
-      if (consume(&tok, tok, "packed")) {
-        ty->is_packed = true;
-        continue;
-      }
-
-      if (consume(&tok, tok, "aligned")) {
-        tok = skip(tok, "(");
-        ty->align = const_expr(&tok, tok);
-        tok = skip(tok, ")");
-        continue;
-      }
-
-      error_tok(tok, "unknown attribute");
-    }
-
-    tok = skip(tok, ")");
-  }
-
-  return tok;
-}
-
 // struct-union-decl = attribute? ident? ("{" struct-members)?
 static Type *struct_union_decl(Token **rest, Token *tok) {
   Type *ty = struct_type();
-  tok = attribute_list(tok, ty);
+  VarAttr attr = {};
+  tok = consume_attributes(tok, &attr);
+  if (attr.is_packed) ty->is_packed = true;
+  if (attr.align) ty->align = attr.align;
 
   // Read a tag.
   Token *tag = NULL;
@@ -2657,7 +2878,10 @@ static Type *struct_union_decl(Token **rest, Token *tok) {
 
   // Construct a struct object.
   struct_members(&tok, tok, ty);
-  *rest = attribute_list(tok, ty);
+  VarAttr attr2 = {};
+  *rest = consume_attributes(tok, &attr2);
+  if (attr2.is_packed) ty->is_packed = true;
+  if (attr2.align) ty->align = attr2.align;
 
   if (tag) {
     // If this is a redefinition, overwrite a previous type.
@@ -2746,7 +2970,7 @@ static Member *get_struct_member(Type *ty, Token *tok) {
     }
 
     // Regular struct member
-    if (mem->name->len == tok->len &&
+    if (mem->name && mem->name->len == tok->len &&
         !strncmp(mem->name->loc, tok->loc, tok->len))
       return mem;
   }
@@ -3050,6 +3274,9 @@ static Node *primary(Token **rest, Token *tok) {
     Type *ty = typename(&tok, tok);
     *rest = skip(tok, ")");
 
+    ABI *fn_abi = current_fn ? get_fn_abi(current_fn) : current_abi;
+    if (fn_abi && fn_abi->classify_reg)
+      return new_num(fn_abi->classify_reg(ty), start);
     if (is_integer(ty) || ty->kind == TY_PTR)
       return new_num(0, start);
     if (is_flonum(ty))
@@ -3202,6 +3429,9 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
     error_tok(ty->name_pos, "function name omitted");
   char *name_str = get_ident(ty->name);
 
+  ABI *fn_abi = (attr && attr->abi) ? attr->abi : (ty->abi ? ty->abi : current_abi);
+  ty->abi = fn_abi;
+
   Obj *fn = find_func(name_str);
   if (fn) {
     // Redeclaration
@@ -3212,12 +3442,14 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
     if (!fn->is_static && attr->is_static)
       error_tok(tok, "static declaration follows a non-static declaration");
     fn->is_definition = fn->is_definition || equal(tok, "{");
+    fn->abi = fn_abi;
   } else {
     fn = new_gvar(name_str, ty);
     fn->is_function = true;
     fn->is_definition = equal(tok, "{");
     fn->is_static = attr->is_static || (attr->is_inline && !attr->is_extern);
     fn->is_inline = attr->is_inline;
+    fn->abi = fn_abi;
   }
 
   fn->is_root = !(fn->is_static && fn->is_inline);
@@ -3233,13 +3465,13 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
   // A buffer for a struct/union return value is passed
   // as the hidden first parameter.
   Type *rty = ty->return_ty;
-  if ((rty->kind == TY_STRUCT || rty->kind == TY_UNION) && rty->size > 16)
+  if ((rty->kind == TY_STRUCT || rty->kind == TY_UNION) && (fn_abi ? fn_abi->returns_by_reference(rty) : rty->size > 16))
     new_lvar("", pointer_to(rty));
 
   fn->params = locals;
 
   if (ty->is_variadic)
-    fn->va_area = new_lvar("__va_area__", array_of(ty_char, 136));
+    fn->va_area = new_lvar("__va_area__", array_of(ty_char, fn_abi ? fn_abi->va_area_size : 136));
   fn->alloca_bottom = new_lvar("__alloca_size__", pointer_to(ty_char));
 
   tok = skip(tok, "{");

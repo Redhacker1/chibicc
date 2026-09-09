@@ -4,7 +4,6 @@ set( CMAKE_C_STANDARD 11 )
 
 add_executable(chibicc-cli
 	main.c
-	codegen.c
 	hashmap.c
 	parse.c
 	preprocess.c
@@ -12,6 +11,21 @@ add_executable(chibicc-cli
 	tokenize.c
 	type.c
 	unicode.c
+	ir/ir.c
+	ir/opt.c
+	ir/regalloc.c
+	codegen/codegen.c
+	codegen/common/common.c
+	codegen/x86_64/x86_64.c
+	codegen/m68k/m68k.c
+	codegen/z80/z80.c
+	abi/abi.c
+	abi/objfmt.c
+	abi/sysV64/sysv64.c
+	abi/win64/win64.c
+	abi/win32/win32.c
+	abi/sys6/sys6.c
+	abi/z80/z80.c
 )
 
 target_include_directories(chibicc-cli PRIVATE compiler_include ${CMAKE_CURRENT_LIST_DIR})

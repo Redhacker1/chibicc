@@ -1,6 +1,6 @@
 CFLAGS=-std=c11 -g -fno-common -Wall -Wno-switch
 
-SRCS=$(wildcard *.c)
+SRCS=$(filter-out codegen.c, $(wildcard *.c)) $(wildcard codegen/*.c) $(wildcard codegen/*/*.c) $(wildcard abi/*.c) $(wildcard abi/*/*.c)
 OBJS=$(SRCS:.c=.o)
 
 TEST_SRCS=$(wildcard test/*.c)

@@ -143,6 +143,8 @@ Token *preprocess(Token *tok);
 // parse.c
 //
 
+typedef struct ABI ABI;
+
 // Variable or function
 typedef struct Obj Obj;
 struct Obj {
@@ -175,6 +177,7 @@ struct Obj {
   Obj *va_area;
   Obj *alloca_bottom;
   int stack_size;
+  ABI *abi; // Specific ABI / calling convention override for this function
 
   // Static inline function
   bool is_live;
@@ -326,6 +329,7 @@ typedef enum {
   TY_SHORT,
   TY_INT,
   TY_LONG,
+  TY_LONGLONG,
   TY_FLOAT,
   TY_DOUBLE,
   TY_LDOUBLE,
@@ -377,6 +381,7 @@ struct Type {
   Type *params;
   bool is_variadic;
   Type *next;
+  ABI *abi; // Specific ABI / calling convention for this function type
 };
 
 // Struct member
@@ -402,11 +407,13 @@ extern Type *ty_char;
 extern Type *ty_short;
 extern Type *ty_int;
 extern Type *ty_long;
+extern Type *ty_llong;
 
 extern Type *ty_uchar;
 extern Type *ty_ushort;
 extern Type *ty_uint;
 extern Type *ty_ulong;
+extern Type *ty_ullong;
 
 extern Type *ty_float;
 extern Type *ty_double;
@@ -426,11 +433,30 @@ Type *struct_type(void);
 void add_type(Node *node);
 
 //
-// codegen.c
+// codegen and ABI
 //
 
+#include "abi/abi.h"
+#include "codegen/codegen.h"
+#include "codegen/common/common.h"
+
 void codegen(Obj *prog, FILE *out);
-int align_to(int n, int align);
+void init_target(const char *target_name, const char *abi_name);
+void init_all_targets_and_abis(void);
+
+static inline ABI *get_node_abi(Node *node) {
+  if (node && node->func_ty && node->func_ty->abi)
+    return node->func_ty->abi;
+  return current_abi;
+}
+
+static inline ABI *get_fn_abi(Obj *fn) {
+  if (fn && fn->abi)
+    return fn->abi;
+  if (fn && fn->ty && fn->ty->abi)
+    return fn->ty->abi;
+  return current_abi;
+}
 
 //
 // unicode.c

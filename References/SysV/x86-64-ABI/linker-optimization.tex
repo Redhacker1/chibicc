@@ -1,0 +1,143 @@
+\chapter{Linker Optimization}
+
+This chapter describes optimizations which may be performed by linker.
+
+\section{Combine GOTPLT and GOT Slots}
+In the small and medium models, when there are both PLT and GOT references
+to the same function symbol, normally linker creates a GOTPLT slot for PLT
+entry and a GOT slot for GOT reference.  A run-time JUMP_SLOT relocation is
+created to update the GOTPLT slot and a run-time GLOB_DAT relocation is
+created to update the GOT slot.  Both JUMP_SLOT and GLOB_DAT relocations
+apply the same symbol value to GOTPLT and GOT slots, respectively, at
+run-time.
+
+As an optimization, linker may combine GOTPLT and GOT slots into a single
+GOT slot and remove the run-time JUMP_SLOT relocation.  It replaces the
+regular PLT entry:
+
+\begin{figure}[H]
+\Hrule
+\caption{Procedure Linkage Table Entry Via GOTPLT Slot}
+\label{gotplt_plt}
+\begin{footnotesize}
+\begin{verbatim}
+  .PLT: jmp      [GOTPLT slot]
+        pushq    relocation index
+        jmp      .PLT0
+\end{verbatim}
+\end{footnotesize}
+\Hrule
+\end{figure}
+
+\noindent
+with an GOT PLT entry with an indirect jump via the GOT slot:
+\indent
+
+\begin{figure}[H]
+\Hrule
+\caption{Procedure Linkage Table Entry Via GOT Slot}
+\label{got_plt}
+\begin{footnotesize}
+\begin{verbatim}
+  .PLT: jmp      [GOT slot]
+        nop
+\end{verbatim}
+\end{footnotesize}
+\Hrule
+\end{figure}
+
+\noindent
+and resolves the PLT reference to the GOT PLT entry.  Indirect \code{jmp}
+is an 5-byte instruction.  \code{nop} can be encoded as a 3-byte
+instruction or a 11-byte instruction for 8-byte or 16-byte PLT slot.
+A separate PLT with 8-byte slots may be used for this optimization.
+\indent
+
+This optimization isn't applicable to the \texttt{STT_GNU_IFUNC} symbols
+since their GOTPLT slots are resolved to the selected implementation and
+their GOT slots are resolved to their PLT entries.
+
+This optimization must be avoided if pointer equality is needed since
+the symbol value won't be cleared in this case and the dynamic linker
+won't update the GOT slot.  Otherwise, the resulting binary will get
+into an infinite loop at run-time.
+
+\section{Optimize GOTPCRELX Relocations}
+\label{opt_gotpcrelx}
+
+The \xARCH instruction encoding supports converting certain instructions
+on memory operand with \texttt{R_X86_64_GOTPCRELX},
+\texttt{R_X86_64_REX_GOTPCRELX} or \texttt{R_X86_64_CODE_4_GOTPCRELX}
+if the first byte of the instruction at the relocation offset - 4 is 0xd5,
+relocations against symbol, \texttt{foo}, into a different form on
+immediate operand if
+\texttt{foo} is defined locally and the relocation addend is -4.
+
+\begin{description}
+\item[\textindex{Convert call and jmp}]
+  Convert memory operand of \code{call} and \code{jmp} into
+  immediate operand.
+
+\begin{table}[H]
+\Hrule
+\caption{Call and Jmp Conversion}
+\begin{center}
+\small\code{
+\begin{tabular}{l|l}
+\multicolumn{1}{c}{Memory Operand} & \multicolumn{1}{c}{Immediate Operand} \\
+\hline
+call *foo@GOTPCREL(\%rip) & nop call foo \\
+call *foo@GOTPCREL(\%rip) & call foo nop \\
+jmp  *foo@GOTPCREL(\%rip) & jmp foo nop \\
+\end{tabular}
+}
+\end{center}
+\Hrule
+\end{table}
+
+\item[\textindex{Convert mov}]
+  Convert memory operand of \code{mov} into immediate operand.  When
+  position-independent code is disabled and \texttt{foo} is defined
+  locally in the lower 32-bit address space, memory operand in \code{mov}
+  can be converted into immediate operand.  Otherwise, \code{mov} must
+  be changed to \code{lea}.
+
+\begin{table}[H]
+\Hrule
+\caption{Mov Conversion}
+\begin{center}
+\small\code{
+\begin{tabular}{l|l}
+\multicolumn{1}{c}{Memory Operand} & \multicolumn{1}{c}{Immediate Operand} \\
+\hline
+mov  foo@GOTPCREL(\%rip), \%reg & mov \$foo, \%reg \\
+mov  foo@GOTPCREL(\%rip), \%reg & lea foo(\%rip), \%reg \\
+\end{tabular}
+}
+\end{center}
+\Hrule
+\end{table}
+
+\item[\textindex{Convert Test and Binop}]
+  Convert memory operand of \code{test} and \code{binop} into immediate
+  operand, where \code{binop} is one of \code{adc}, \code{add},
+  \code{and}, \code{cmp}, \code{or}, \code{sbb}, \code{sub}, \code{xor}
+  instructions, when position-independent code is disabled.
+
+\begin{table}[H]
+\Hrule
+\caption{Test and Binop Conversion}
+\begin{center}
+\small\code{
+\begin{tabular}{l|l}
+\multicolumn{1}{c}{Memory Operand} & \multicolumn{1}{c}{Immediate Operand} \\
+\hline
+test \%reg, foo@GOTPCREL(\%rip) & test \$foo, \%reg \\
+binop foo@GOTPCREL(\%rip), \%reg & binop \$foo, \%reg \\
+\end{tabular}
+}
+\end{center}
+\Hrule
+\end{table}
+
+\end{description}

@@ -354,7 +354,7 @@ static bool convert_pp_int(Token *tok) {
     base = 8;
   }
 
-  int64_t val = strtoul(p, &p, base);
+  int64_t val = strtoull(p, &p, base);
 
   // Read U, L or LL suffixes.
   bool l = false;
@@ -639,6 +639,9 @@ Token *tokenize(File *file) {
 // Returns the contents of a given file.
 static char *read_file(char *path)
 {
+  if (!path)
+    return NULL;
+
   FILE *fp;
 
   if (strcmp(path, "-") == 0) {

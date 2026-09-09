@@ -1110,6 +1110,9 @@ void init_macros(void) {
   struct tm *tm = localtime(&now);
   define_macro("__DATE__", format_date(tm));
   define_macro("__TIME__", format_time(tm));
+
+  if (current_abi && current_abi->define_macros)
+    current_abi->define_macros();
 }
 
 typedef enum {

@@ -7,11 +7,13 @@ Type *ty_char = &(Type){TY_CHAR, 1, 1};
 Type *ty_short = &(Type){TY_SHORT, 2, 2};
 Type *ty_int = &(Type){TY_INT, 4, 4};
 Type *ty_long = &(Type){TY_LONG, 8, 8};
+Type *ty_llong = &(Type){TY_LONGLONG, 8, 8};
 
 Type *ty_uchar = &(Type){TY_CHAR, 1, 1, true};
 Type *ty_ushort = &(Type){TY_SHORT, 2, 2, true};
 Type *ty_uint = &(Type){TY_INT, 4, 4, true};
 Type *ty_ulong = &(Type){TY_LONG, 8, 8, true};
+Type *ty_ullong = &(Type){TY_LONGLONG, 8, 8, true};
 
 Type *ty_float = &(Type){TY_FLOAT, 4, 4};
 Type *ty_double = &(Type){TY_DOUBLE, 8, 8};
@@ -28,7 +30,7 @@ static Type *new_type(TypeKind kind, int size, int align) {
 bool is_integer(Type *ty) {
   TypeKind k = ty->kind;
   return k == TY_BOOL || k == TY_CHAR || k == TY_SHORT ||
-         k == TY_INT  || k == TY_LONG || k == TY_ENUM;
+         k == TY_INT  || k == TY_LONG || k == TY_LONGLONG || k == TY_ENUM;
 }
 
 bool is_flonum(Type *ty) {
@@ -58,6 +60,7 @@ bool is_compatible(Type *t1, Type *t2) {
   case TY_SHORT:
   case TY_INT:
   case TY_LONG:
+  case TY_LONGLONG:
     return t1->is_unsigned == t2->is_unsigned;
   case TY_FLOAT:
   case TY_DOUBLE:
@@ -95,7 +98,9 @@ Type *copy_type(Type *ty) {
 }
 
 Type *pointer_to(Type *base) {
-  Type *ty = new_type(TY_PTR, 8, 8);
+  int sz = current_abi ? current_abi->size_ptr : 8;
+  int al = current_abi ? current_abi->align_ptr : 8;
+  Type *ty = new_type(TY_PTR, sz, al);
   ty->base = base;
   ty->is_unsigned = true;
   return ty;
@@ -117,7 +122,9 @@ Type *array_of(Type *base, int len) {
 }
 
 Type *vla_of(Type *base, Node *len) {
-  Type *ty = new_type(TY_VLA, 8, 8);
+  int sz = current_abi ? current_abi->size_ptr : 8;
+  int al = current_abi ? current_abi->align_ptr : 8;
+  Type *ty = new_type(TY_VLA, sz, al);
   ty->base = base;
   ty->vla_len = len;
   return ty;

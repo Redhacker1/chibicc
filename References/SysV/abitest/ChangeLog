@@ -1,0 +1,290 @@
+2005-07-11  Michael Matz  <matz@suse.de>
+
+	__int128 checking.
+	* args.h (check___int128_arguments): New.
+	* defines.h (__int128, __uint128): New.
+	(CHECK_INT128): Define.
+	(CI128_RET): Define.
+	* make_passing_tests (make_checking_define): New argument for_int128.
+	Change callers.  Use new argument.
+	(make_test_defs): Create new defs.
+	(make_test_int128): New.
+	(make_int_tests): Use it.
+	* test_basic_alignment.c (main): Split unsigned/signed test.
+	* test_basic_array_size_and_align.c: Ditto.
+	* test_basic_sizes.c: Ditto.
+	* test_basic_struct_size_and_align.c: Ditto.
+	* test_basic_union_size_and_align.c: Ditto.
+
+2005-07-08  Michael Matz  <matz@suse.de>
+
+	Better medium model check.
+	* abitest (check_medium): New.
+	(medium_test): Use it.
+
+	Test passing and returning of vector and complex types.
+	* args.h (XMM_T): New members _m64 and _m128.
+	* asm-support.S (snapshot_ret): Use frame pointer, and move over
+	128 byte of callers stack.
+	* defines.h (CHECK_M64_M128): Define.
+	(toplevel): Include xmmintrin.h.
+	(CI128_TES, CLD_TES, CF128_TES, CMM_TES): Define.
+	* make_returning.c (make_test_functions): Use NO_AUTORETURN flag
+	to control generating tests per type.
+	(make_test_scalar_returning): Ditto.
+	* test_complex_returning.c (BUILD_{F,D,LD}_COMPLEX): Initialize
+	variable.
+	(aj_{f,d,ld}_times2): Same.  Save away passed registers.
+	(main): Check passed and returned registers.
+	* test_m64m128_returning.c: New file.
+	* test_passing_m64m128.c: New file.
+	* typelist.c (testflags): New array.
+	* typelist.h (testflags): Declare.
+
+2005-06-27  Michael Matz  <matz@suse.de>
+
+	* test_struct_returning.c: Change return-in-memory tests to
+	not compare the passed return address with struct_addr.
+	* abi-x86_64.exp: Add target test.
+
+2005-06-20  Michael Matz  <matz@suse.de>
+
+	* medium-test.c: New test.
+	* abitest: Recognize -m option.  Do a loop over medium-test.c
+	checking with various settings.
+
+	* abi-x86_64.exp: New file.  Can be used in GCC testsuite.
+
+	* TOCHECK: Update.
+	* README: Update.
+
+2005-06-16  Michael Matz  <matz@suse.de>
+
+	* args.h (volatile_var): Declare.
+	* asm-support.S (volatile_var): Define.
+	(snapshot_ret): Add a 'ret' to the function. ;-)
+	* make_returning (make_testing_callee): Use volatile_var.
+	(make_testing_caller): Also check the actual return value.
+
+2005-06-15  Michael Matz  <matz@suse.de>
+
+	Support for testing returning of structs.
+
+	* abitest: Use $CC as default for $LD.
+	* args.h (XMM_T._ulong): New member.
+	* asm-support.S (snapshot_ret): Save %rdi away before calling.
+	* defines.h (PACKED): New macro.
+	* make_returning.c (make_test_struct_returning): Remove.
+	(main): Don't call it.
+	* test_struct_returning.c: New file.
+
+2005-06-10  Michael Matz  <matz@suse.de>
+
+	Support for testing passing of floating point types.
+
+	* defines.h (ulong, ldouble): New typedefs.
+	(CHECK_FLOAT_DOUBLE_PASSING, CHECK_LARGE_SCALAR_PASSING): Define.
+	(CLD_RET): Adjust for new member name.
+	* args.h (XMM_T, X87_T): Rename members to "_type" form.
+	(FloatRegisters): Use XMM_T for xmm* members.
+	(check_char_arguments, check_short_arguments, check_long_arguments):
+	New macros.
+	(clear_struct_registers): Use memset instead of individual accesses.
+	(check_f_arguments): New macro.
+	(check_float_arguments): Use it.
+	(check_double_arguments, check_ldouble_arguments): New macros.
+	(clear_x87_hardware_registers, clear_x87_registers): New macros.
+	* asm-support.S (snapshot): Also save contents of xmm* registers.
+	* make_passing_tests.c (toplevel): Include defines.h.
+	(X87_TEST): New test type.
+	(test_setting): Enlarge to three elements.
+	(init_test_setting): Only 8 float args are passed in registers.
+	(open_file): Create separate values structure for each type.
+	(make_checking_function): Use it.
+	(make_checking_define): Add new parameter 'TYPE'.  Change code for
+	float tests.
+	(make_test_defs): Add new tests for type X87_TEST.
+	(make_test, make_test2): Call macro with additional type argument.
+	(make_float_tests): The long double test is called ldouble and is
+	a X87_TEST.
+	* typelist.c (returns): Adjust for new member names.
+	
+2005-06-08  Michael Matz  <matz@suse.de>
+
+	* args.h (XMM_T, X87_T): New types.
+	(xmm_regs, x87_regs): New arrays.
+	(WRAP_RET): New macro.
+	(clear_struct_registers): Clear new arrays.
+	* asm-support.S (snapshot_ret): New.
+	* defines.h (CI128_RET, CLD_RET, CF128_RET, CMM_RET): New defines.
+	* make_returning.c: Generated file now uses WRAP_RET to check the
+	return value.
+	* typelist.c (returns): New array.
+	* typelist.h (returns): Declare.
+
+2005-06-01  Michael Matz  <matz@suse.de>
+
+	* Authors: Mention myself.
+	* TOCHECK: New file containing things to check for.
+	* asm-support.S: New file.
+	* Makefile (asm-support.o): New target.
+	* abitest: Add asm-support.o to link command.
+	Let user override CC and LD, list failed tests at the end.
+
+	* args.h: Support for the asm wrapper.
+	(WRAP_CALL): New macro.
+	(callthis, rax - r15): Declare.
+	(check_int_register_contents): Remove.
+	(check_int_arguments): Adjust for asm wrapper.
+	* make_passing_tests.c (make_checking_define): Use WRAP_CALL.
+	* test_passing_structs.c: Adjust for asm wrapper.
+	* test_passing_structs_and_unions.c: Ditto.
+	* test_passing_unions.c: Ditto.
+
+2005-06-01  Michael Matz  <matz@suse.de>
+
+	* macros.h (check_align_lv): New macro.
+	(check_basic_struct_size_and_align, check_array_size_and_align,
+	check_basic_union_size_and_align): Use it.
+	* test_bitfields.c (main): Use check_align_lv.
+
+2005-06-01  Michael Matz  <matz@suse.de>
+
+	Cleanup, support -W -Wall, make all testcases work also with
+	-O1 and -O2.
+
+2005-05-24  Michael Matz  <matz@suse.de>
+
+	* Makefile: Don't expect PATH to contain "." .
+	* args.h (check_int_register_contents): Don't use a general operand.
+	* abitest: Don't use Simics.
+	* abitest.simics: Old abitest using Simics.
+
+2001-05-16  Bo Thorsen  <bo@suse.co.uk>
+
+	* abitest: Tests which can not run when optimized can now with
+	a comment make sure not to be run with certain optimization levels.
+	Also, -O3 levels have been removed. Inlining doesn't make sense for
+	most tests.
+	* test_passing_structs.c: Removed test from optimization levels -O1
+	and -O2.
+	* test_passing_unions.c: Likewise.
+	* test_passing_structs_and_unions.c: Likewise.
+
+2001-05-15  Bo Thorsen  <bo@suse.co.uk>
+
+	* Nearly all files: Complete reorganization to run tests
+	individually in simics instead of as one big executable.
+
+2001-04-11  Bo Thorsen  <bo@suse.co.uk>
+
+	* defines.h: Add setting for checks of float and double passing.
+	Add setting for checks of returning complex types.
+	Disabled these two tests.
+	* returning.c (test_complex_returning): Added test for returning
+	complex numbers. Complex numbers with float, double and long double
+	types are tested. Test originally written by Andreas Jaeger.
+
+2001-02-28  Bo Thorsen  <bo@suse.de>
+
+	* struniargs.c (test_struct_passing): Hardware registers should be
+	cleared after setting the struct entries.
+	(struniargs): Enable union passing test.
+	* make_returning2.c: Bugfixed two-words types. Previously there was
+	a workaround that only worked for long long. Now it works for other
+	types too.
+	* defines.h: Enable all long double tests.
+	* Makefile: Change to using simics
+	* runtime.abitest: Simics script added.
+	* abitest.conf: Simics runtime configuration file added.
+	* abitest: Script to run the abitest in simics added.
+
+2001-02-15  Bo Thorsen  <bo@suse.de>
+
+	* make_returning2.c: Added file. Used to construct the return value
+	test.
+	* returning.c: Add return value test file.
+	* Makefile: Add return value test.
+
+2001-02-14  Bo Thorsen  <bo@suse.de>
+
+	* Makefile: Add reloc2.s compilation and linking test.
+	* reloc2.s: Added file to test compilation and linking of relocations.
+	* reloc.c (reloc): Fix the comments to show that this is for now
+	just a compiling and linking test.
+
+2001-02-01  Bo Thorsen  <bo@suse.de>
+
+	* struniargs.c (struniargs): Temporarily disabled union test.
+	* scalarargs.c: Move all tests to the autogenerated scalarargs2.c.
+	* make_scalarargs2.c: Added file. Will produce a scalarargs2.c which
+		tests scalar argument passing.
+	* args.h: Fix formatting.
+	Start split to do both integer and float testing.
+	Add float passing check - for the moment just no-op macros.
+	* funcs.h (test_return): Add autogenerated tests from make_scalarargs2.
+	* typelist.c: File added. Sets the lists for autogenerated types tests.
+	* typelist.h: File added.
+	* make_sizal2.c: Use typelist files.
+	* defines.h: Added defines for building lists of types to be checked.
+	* main.c: Fix formatting.
+
+2001-01-26  Bo Thorsen  <bo@suse.de>
+
+	* sizal.c: Rearrange to increase granularity of the tests.
+	* macros.h (check_array_size_and_align): Fix for arrays of pointers.
+	(check_array_size_and_align): Add array in struct size and align test.
+	* defines.h: Make defines with size and alignment of scalar types.
+
+2001-01-25  Bo Thorsen  <bo@suse.de>
+
+	* Multiple files: Fix formatting.
+
+	* funcs.h (sizal2): Add sizal2 forward declaration.
+
+	* sizal.c (check_struct_and_union3): Remove CHECK_STRUCT_SIZE check.
+	* make_sizal2.c (main): Fix calculation of struct size.
+	(calculate_struct_size): Do calculation of struct size.
+	(main): Change output format to that of a complete c source file.
+
+	* defines.h: Removed no longer used CHECK_STRUCT_SIZE.
+
+2001-01-23  Bo Thorsen  <bo@suse.de>
+
+	* macros.h: Added file. Moved a couple of macros to this file.
+	* bitfields.c: Added test for bitfield structs and unions.
+	* main.c (main): Added bitfield test.
+	* funcs.h: Likewise.
+	* sizal.c: Removed bitfield test.
+
+2000-12-17  Bo Thorsen  <bo@suse.de>
+
+	* defines.h: Enabled more tests and added new CHECK_STRUCT_SIZE.
+	* sizal.c: Fixed alignment/size testing for arrays and structs.
+	* struniargs.c: Fix testing larger structs, larger unions and
+	mixed passing.
+
+2000-12-15  Bo Thorsen  <bo@suse.de>
+
+	* variargs.c, defines.h: Enable varargs test
+
+2000-12-13  Bo Thorsen  <bo@dsuse.de>
+
+	* struniargs.c (test_union_passing): Added union passing test
+
+	* variargs.c: Bugfixed; now works with gcc2.95.2 on ia32 but still
+	fails on x86-64. Probably not a varargs related problem any more.
+
+	* make_sizal2.c (main): Implemented union size tests
+	* struniargs.c: Moved structargs.c to struniargs.c, cleanup and
+	expansion of the test
+
+	* defines.h: Defines for dis-/enabling parts of the test
+
+2000-12-10  Bo Thorsen  <bo@suse.de>
+
+	* Small changes that should have made it for the initial release.
+
+2000-12-07  Bo Thorsen  <bo@suse.de>
+
+	* Initial release.

@@ -43,6 +43,7 @@ static void usage(const int status) {
 static bool take_arg(const char *arg) {
   char *x[] = {
     "-o", "-I", "-idirafter", "-include", "-x", "-MF", "-MT", "-Xlinker",
+    "-target", "--target", "-mabi", "-march", "-D", "-U",
   };
 
   for (int i = 0; i < sizeof(x) / sizeof(*x); i++)
@@ -133,6 +134,52 @@ static void parse_args(const int argc, char **argv) {
   StringArray idirafter = {};
 
   for (int i = 1; i < argc; i++) {
+    if (!strcmp(argv[i], "-target") || !strcmp(argv[i], "--target")) {
+      char *t = argv[++i];
+      char *dash = strchr(t, '-');
+      if (dash) {
+        char *arch = strndup(t, dash - t);
+        char *abi = dash + 1;
+        init_target(arch, abi);
+      } else {
+        init_target(t, NULL);
+      }
+      continue;
+    }
+
+    if (!strncmp(argv[i], "--target=", 9)) {
+      char *t = argv[i] + 9;
+      char *dash = strchr(t, '-');
+      if (dash) {
+        char *arch = strndup(t, dash - t);
+        char *abi = dash + 1;
+        init_target(arch, abi);
+      } else {
+        init_target(t, NULL);
+      }
+      continue;
+    }
+
+    if (!strcmp(argv[i], "-mabi")) {
+      set_abi(argv[++i]);
+      continue;
+    }
+
+    if (!strncmp(argv[i], "-mabi=", 6)) {
+      set_abi(argv[i] + 6);
+      continue;
+    }
+
+    if (!strcmp(argv[i], "-march")) {
+      set_codegen(argv[++i]);
+      continue;
+    }
+
+    if (!strncmp(argv[i], "-march=", 7)) {
+      set_codegen(argv[i] + 7);
+      continue;
+    }
+
     if (!strcmp(argv[i], "-###")) {
       opt_hash_hash_hash = true;
       continue;
@@ -350,7 +397,7 @@ static void parse_args(const int argc, char **argv) {
   for (int i = 0; i < idirafter.len; i++)
     strarray_push(&include_paths, idirafter.data[i]);
 
-  if (input_paths.len == 0)
+  if (input_paths.len == 0 && !base_file)
     error("no input files");
 
   // -E implies that the input is the C macro language.
@@ -543,6 +590,12 @@ static Token *append_tokens(Token *tok1, Token *tok2) {
 
 static void cc1(void) {
   Token *tok = NULL;
+
+  if (!base_file && input_paths.len > 0)
+    base_file = input_paths.data[0];
+
+  if (!base_file)
+    error("no input file provided to cc1");
 
   // Process -include option
   for (int i = 0; i < opt_include.len; i++) {
@@ -770,6 +823,7 @@ static FileType get_file_type(char *filename) {
 int main(const int argc, char **argv)
 {
   atexit(cleanup);
+  init_all_targets_and_abis();
   init_macros();
   parse_args(argc, argv);
 
