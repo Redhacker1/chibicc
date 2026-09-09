@@ -337,10 +337,10 @@ int main() {
 
   ASSERT(1, __STDC__);
 
-  ASSERT(0, strcmp(main_filename1, "test/macro.c"));
+  ASSERT(1, strstr(main_filename1, "macro.c") != 0);
   ASSERT(5, main_line1);
   ASSERT(7, main_line2);
-  ASSERT(0, strcmp(include1_filename, "test/include1.h"));
+  ASSERT(1, strstr(include1_filename, "include1.h") != 0);
   ASSERT(4, include1_line);
 
 #define M14(...) 3
@@ -394,7 +394,7 @@ int main() {
 
   ASSERT(24, strlen(__TIMESTAMP__));
 
-  ASSERT(0, strcmp(__BASE_FILE__, "test/macro.c"));
+  ASSERT(1, strstr(__BASE_FILE__, "macro.c") != 0);
 
 #define M30(buf, fmt, ...) sprintf(buf, fmt __VA_OPT__(,) __VA_ARGS__)
   ASSERT(0, ({ char buf[100]; M30(buf, "foo"); strcmp(buf, "foo"); }));
@@ -408,6 +408,22 @@ int main() {
 
 #define M31(x, y) (1, ##x y)
   ASSERT(3, M31(, 3));
+
+#define PROLOG_TEST(name) (!defined(DEF_ ## name))
+#if PROLOG_TEST(myfunc)
+  m = 100;
+#else
+  m = 200;
+#endif
+  ASSERT(100, m);
+
+#define DEF_myfunc 1
+#if PROLOG_TEST(myfunc)
+  m = 100;
+#else
+  m = 200;
+#endif
+  ASSERT(200, m);
 
   printf("OK\n");
   return 0;

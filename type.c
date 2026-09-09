@@ -246,8 +246,10 @@ void add_type(Node *node) {
     node->ty = node->lhs->ty;
     return;
   case ND_VAR:
-  case ND_VLA_PTR:
     node->ty = node->var->ty;
+    return;
+  case ND_VLA_PTR:
+    node->ty = pointer_to(ty_void);
     return;
   case ND_COND:
     if (node->then->ty->kind == TY_VOID || node->els->ty->kind == TY_VOID) {
@@ -302,8 +304,6 @@ void add_type(Node *node) {
 
     if (node->cas_addr->ty->kind != TY_PTR)
       error_tok(node->cas_addr->tok, "pointer expected");
-    if (node->cas_old->ty->kind != TY_PTR)
-      error_tok(node->cas_old->tok, "pointer expected");
     return;
   case ND_EXCH:
     if (node->lhs->ty->kind != TY_PTR)

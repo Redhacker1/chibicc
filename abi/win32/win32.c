@@ -167,6 +167,18 @@ static void win32_define_macros(void) {
   define_macro("_M_IX86", "600");
   define_macro("__i386", "1");
   define_macro("__i386__", "1");
+  define_macro("__SIZEOF_LONG__", "4");
+  define_macro("__SIZEOF_POINTER__", "4");
+  define_macro("__SIZEOF_PTRDIFF_T__", "4");
+  define_macro("__SIZEOF_SIZE_T__", "4");
+  define_macro("__SIZE_TYPE__", "unsigned int");
+  define_macro("__PTRDIFF_TYPE__", "int");
+  define_macro("__INTPTR_TYPE__", "int");
+  define_macro("__UINTPTR_TYPE__", "unsigned int");
+  define_macro("__INTMAX_TYPE__", "long long");
+  define_macro("__UINTMAX_TYPE__", "unsigned long long");
+  define_macro("__WCHAR_TYPE__", "unsigned short");
+  define_macro("__WINT_TYPE__", "unsigned short");
 }
 
 static void win32_init_types(void) {

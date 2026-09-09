@@ -18,16 +18,16 @@ int main() {
   ASSERT(47, 0B101111);
 
   ASSERT(4, sizeof(0));
-  ASSERT(8, sizeof(0L));
-  ASSERT(8, sizeof(0LU));
-  ASSERT(8, sizeof(0UL));
+  ASSERT(sizeof(long), sizeof(0L));
+  ASSERT(sizeof(long), sizeof(0LU));
+  ASSERT(sizeof(long), sizeof(0UL));
   ASSERT(8, sizeof(0LL));
   ASSERT(8, sizeof(0LLU));
   ASSERT(8, sizeof(0Ull));
-  ASSERT(8, sizeof(0l));
+  ASSERT(sizeof(long), sizeof(0l));
   ASSERT(8, sizeof(0ll));
-  ASSERT(8, sizeof(0x0L));
-  ASSERT(8, sizeof(0b0L));
+  ASSERT(sizeof(long), sizeof(0x0L));
+  ASSERT(sizeof(long), sizeof(0b0L));
   ASSERT(4, sizeof(2147483647));
   ASSERT(8, sizeof(2147483648));
   ASSERT(-1, 0xffffffffffffffff);
@@ -36,7 +36,7 @@ int main() {
   ASSERT(8, sizeof(4294967296U));
 
   ASSERT(3, -1U>>30);
-  ASSERT(3, -1Ul>>62);
+  ASSERT(3, -1Ull>>62);
   ASSERT(3, -1ull>>62);
 
   ASSERT(1, 0xffffffffffffffffl>>63);
@@ -88,8 +88,8 @@ int main() {
   ASSERT(4, sizeof(0.3F));
   ASSERT(8, sizeof(0.));
   ASSERT(8, sizeof(.0));
-  ASSERT(16, sizeof(5.l));
-  ASSERT(16, sizeof(2.0L));
+  ASSERT(sizeof(long double), sizeof(5.l));
+  ASSERT(sizeof(long double), sizeof(2.0L));
 
   assert(1, size\
 of(char), \

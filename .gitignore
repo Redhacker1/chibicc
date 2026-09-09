@@ -11,3 +11,4 @@
 /build_test_cmake
 /build-msvc
 /.idea
+/bootstrap-test

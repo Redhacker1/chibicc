@@ -72,6 +72,11 @@ static int include_next_idx;
 
 static Token *preprocess2(Token *tok);
 static Macro *find_macro(Token *tok);
+static bool expand_macro(Token **rest, Token *tok);
+
+static bool is_ident(Token *tok) {
+  return tok && (tok->kind == TK_IDENT || tok->kind == TK_KEYWORD);
+}
 
 static bool is_hash(Token *tok) {
   return tok->at_bol && equal(tok, "#");
@@ -244,19 +249,19 @@ static Token *new_num_token(int val, Token *tmpl) {
 }
 
 static Token *read_const_expr(Token **rest, Token *tok) {
-  tok = copy_line(rest, tok);
+  return copy_line(rest, tok);
+}
 
+static Token *preprocess_const_expr(Token *tok) {
   Token head = {};
   Token *cur = &head;
 
   while (tok->kind != TK_EOF) {
-    // "defined(foo)" or "defined foo" becomes "1" if macro "foo"
-    // is defined. Otherwise "0".
     if (equal(tok, "defined")) {
       Token *start = tok;
       bool has_paren = consume(&tok, tok->next, "(");
 
-      if (tok->kind != TK_IDENT)
+      if (!is_ident(tok))
         error_tok(start, "macro name must be an identifier");
       Macro *m = find_macro(tok);
       tok = tok->next;
@@ -268,10 +273,12 @@ static Token *read_const_expr(Token **rest, Token *tok) {
       continue;
     }
 
+    if (expand_macro(&tok, tok))
+      continue;
+
     cur = cur->next = tok;
     tok = tok->next;
   }
-
   cur->next = tok;
   return head.next;
 }
@@ -280,7 +287,7 @@ static Token *read_const_expr(Token **rest, Token *tok) {
 static long eval_const_expr(Token **rest, Token *tok) {
   Token *start = tok;
   Token *expr = read_const_expr(rest, tok->next);
-  expr = preprocess2(expr);
+  expr = preprocess_const_expr(expr);
 
   if (expr->kind == TK_EOF)
     error_tok(start, "no expression");
@@ -290,7 +297,7 @@ static long eval_const_expr(Token **rest, Token *tok) {
   // evaluating a constant expression. For example, `#if foo` is
   // equivalent to `#if 0` if foo is not defined.
   for (Token *t = expr; t->kind != TK_EOF; t = t->next) {
-    if (t->kind == TK_IDENT) {
+    if (is_ident(t)) {
       Token *next = t->next;
       *t = *new_num_token(0, t);
       t->next = next;
@@ -318,7 +325,7 @@ static CondIncl *push_cond_incl(Token *tok, bool included) {
 }
 
 static Macro *find_macro(Token *tok) {
-  if (tok->kind != TK_IDENT)
+  if (!is_ident(tok))
     return NULL;
   return hashmap_get2(&macros, tok->loc, tok->len);
 }
@@ -346,7 +353,7 @@ static MacroParam *read_macro_params(Token **rest, Token *tok, char **va_args_na
       return head.next;
     }
 
-    if (tok->kind != TK_IDENT)
+    if (!is_ident(tok))
       error_tok(tok, "expected an identifier");
 
     if (equal(tok->next, "...")) {
@@ -366,7 +373,7 @@ static MacroParam *read_macro_params(Token **rest, Token *tok, char **va_args_na
 }
 
 static void read_macro_definition(Token **rest, Token *tok) {
-  if (tok->kind != TK_IDENT)
+  if (!is_ident(tok))
     error_tok(tok, "macro name must be an identifier");
   char *name = strndup(tok->loc, tok->len);
   tok = tok->next;
@@ -745,7 +752,7 @@ static char *read_include_filename(Token **rest, Token *tok, bool *is_dquote) {
   // Pattern 3: #include FOO
   // In this case FOO must be macro-expanded to either
   // a single string token or a sequence of "<" ... ">".
-  if (tok->kind == TK_IDENT) {
+  if (is_ident(tok)) {
     Token *tok2 = preprocess2(copy_line(rest, tok));
     return read_include_filename(&tok2, tok2, is_dquote);
   }
@@ -765,7 +772,7 @@ static char *detect_include_guard(Token *tok) {
     return NULL;
   tok = tok->next->next;
 
-  if (tok->kind != TK_IDENT)
+  if (!is_ident(tok))
     return NULL;
 
   char *macro = strndup(tok->loc, tok->len);
@@ -792,16 +799,36 @@ static char *detect_include_guard(Token *tok) {
   return NULL;
 }
 
+static char *clean_path(char *path) {
+  if (!path)
+    return NULL;
+#ifdef _WIN32
+  char full[4096];
+  if (_fullpath(full, path, sizeof(full)))
+    path = full;
+#endif
+  char *p = strdup(path);
+  for (char *s = p; *s; s++) {
+    if (*s == '\\')
+      *s = '/';
+#ifdef _WIN32
+    *s = tolower((unsigned char)*s);
+#endif
+  }
+  return p;
+}
+
 static Token *include_file(Token *tok, char *path, Token *filename_tok) {
+  char *cpath = clean_path(path);
   // Check for "#pragma once"
-  if (hashmap_get(&pragma_once, path))
+  if (hashmap_get(&pragma_once, cpath))
     return tok;
 
   // If we read the same file before, and if the file was guarded
   // by the usual #ifndef ... #endif pattern, we may be able to
   // skip the file without opening it.
   static HashMap include_guards;
-  char *guard_name = hashmap_get(&include_guards, path);
+  char *guard_name = hashmap_get(&include_guards, cpath);
   if (guard_name && hashmap_get(&macros, guard_name))
     return tok;
 
@@ -811,7 +838,7 @@ static Token *include_file(Token *tok, char *path, Token *filename_tok) {
 
   guard_name = detect_include_guard(tok2);
   if (guard_name)
-    hashmap_put(&include_guards, path, guard_name);
+    hashmap_put(&include_guards, cpath, guard_name);
 
   return append(tok2, tok);
 }
@@ -889,7 +916,7 @@ static Token *preprocess2(Token *tok) {
 
     if (equal(tok, "undef")) {
       tok = tok->next;
-      if (tok->kind != TK_IDENT)
+      if (!is_ident(tok))
         error_tok(tok, "macro name must be an identifier");
       undef_macro(strndup(tok->loc, tok->len));
       tok = skip_line(tok->next);
@@ -964,7 +991,7 @@ static Token *preprocess2(Token *tok) {
     }
 
     if (equal(tok, "pragma") && equal(tok->next, "once")) {
-      hashmap_put(&pragma_once, tok->file->name, (void *)1);
+      hashmap_put(&pragma_once, clean_path(tok->file->name), (void *)1);
       tok = skip_line(tok->next->next);
       continue;
     }
@@ -1059,10 +1086,7 @@ static char *format_time(struct tm *tm) {
 
 void init_macros(void) {
   // Define predefined macros
-  define_macro("_LP64", "1");
   define_macro("__C99_MACRO_WITH_VA_ARGS", "1");
-  define_macro("__ELF__", "1");
-  define_macro("__LP64__", "1");
   define_macro("__SIZEOF_DOUBLE__", "8");
   define_macro("__SIZEOF_FLOAT__", "4");
   define_macro("__SIZEOF_INT__", "4");
@@ -1074,6 +1098,13 @@ void init_macros(void) {
   define_macro("__SIZEOF_SHORT__", "2");
   define_macro("__SIZEOF_SIZE_T__", "8");
   define_macro("__SIZE_TYPE__", "unsigned long");
+  define_macro("__PTRDIFF_TYPE__", "long");
+  define_macro("__INTPTR_TYPE__", "long");
+  define_macro("__UINTPTR_TYPE__", "unsigned long");
+  define_macro("__INTMAX_TYPE__", "long long");
+  define_macro("__UINTMAX_TYPE__", "unsigned long long");
+  define_macro("__WCHAR_TYPE__", "int");
+  define_macro("__WINT_TYPE__", "unsigned int");
   define_macro("__STDC_HOSTED__", "1");
   define_macro("__STDC_NO_COMPLEX__", "1");
   define_macro("__STDC_UTF_16__", "1");
@@ -1086,19 +1117,17 @@ void init_macros(void) {
   define_macro("__amd64__", "1");
   define_macro("__chibicc__", "1");
   define_macro("__const__", "const");
-  define_macro("__gnu_linux__", "1");
   define_macro("__inline__", "inline");
-  define_macro("__linux", "1");
-  define_macro("__linux__", "1");
   define_macro("__signed__", "signed");
   define_macro("__typeof__", "typeof");
-  define_macro("__unix", "1");
-  define_macro("__unix__", "1");
   define_macro("__volatile__", "volatile");
   define_macro("__x86_64", "1");
   define_macro("__x86_64__", "1");
-  define_macro("linux", "1");
-  define_macro("unix", "1");
+
+  if (!current_abi || current_abi->size_long == 8) {
+    define_macro("_LP64", "1");
+    define_macro("__LP64__", "1");
+  }
 
   add_builtin("__FILE__", file_macro);
   add_builtin("__LINE__", line_macro);

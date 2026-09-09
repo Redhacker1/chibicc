@@ -49,7 +49,7 @@ int main() {
   ASSERT(8, ({ struct t {int a; int b;} x; struct t y; sizeof(y); }));
   ASSERT(8, ({ struct t {int a; int b;}; struct t y; sizeof(y); }));
 
-  ASSERT(16, ({ struct {char a; long b;} x; sizeof(x); }));
+  ASSERT(16, ({ struct {char a; long long b;} x; sizeof(x); }));
   ASSERT(4, ({ struct {char a; short b;} x; sizeof(x); }));
 
   ASSERT(8, ({ struct foo *bar; sizeof(bar); }));

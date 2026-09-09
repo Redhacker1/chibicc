@@ -48,6 +48,7 @@ typedef struct {
   bool is_packed;
   int align;
   ABI *abi;
+  char *asm_name;
 } VarAttr;
 
 // This struct represents a variable initializer. Since initializers
@@ -373,26 +374,151 @@ static Token *skip_parentheses(Token *tok) {
   return tok;
 }
 
+static void apply_attr_to_type(Type *ty, const VarAttr *attr) {
+  if (!attr || !ty)
+    return;
+  if (attr->is_packed)
+    ty->is_packed = true;
+  if (attr->abi) {
+    if (ty->kind == TY_FUNC)
+      ty->abi = attr->abi;
+    else if (ty->kind == TY_PTR && ty->base && ty->base->kind == TY_FUNC)
+      ty->base->abi = attr->abi;
+  }
+}
+
 static bool is_attribute_token(Token *tok) {
   if (!tok)
     return false;
-  return equal(tok, "__attribute__") || equal(tok, "__attribute") ||
-         equal(tok, "__declspec") || equal(tok, "__callingconv") ||
-         equal(tok, "__cdecl") || equal(tok, "__stdcall") ||
-         equal(tok, "__fastcall") || equal(tok, "__thiscall") ||
-         equal(tok, "__vectorcall") || equal(tok, "_cdecl") ||
-         equal(tok, "_stdcall") || equal(tok, "_fastcall") ||
-         equal(tok, "__pascal") || equal(tok, "pascal") ||
-         equal(tok, "__ms_abi") || equal(tok, "__sysv_abi") ||
-         equal(tok, "__forceinline") || equal(tok, "__inline") ||
-         equal(tok, "__inline__") || equal(tok, "__restrict") ||
-         equal(tok, "__restrict__") || equal(tok, "__ptr32") ||
-         equal(tok, "__ptr64") || equal(tok, "__unaligned") ||
-         equal(tok, "__w64");
+  static HashMap map;
+  if (map.capacity == 0) {
+    static char *kw[] = {
+      "__attribute__", "__attribute", "__declspec", "__callingconv",
+      "__cdecl", "__stdcall", "__fastcall", "__thiscall", "__vectorcall",
+      "_cdecl", "_stdcall", "_fastcall", "__pascal", "pascal",
+      "__ms_abi", "__sysv_abi", "__forceinline", "__inline", "__inline__",
+      "__gnu_inline", "__gnu_inline__", "gnu_inline",
+      "__restrict", "__restrict__", "__ptr32", "__ptr64", "__unaligned", "__w64",
+    };
+    for (int i = 0; i < sizeof(kw) / sizeof(*kw); i++)
+      hashmap_put(&map, kw[i], (void *)1);
+  }
+  return hashmap_get2(&map, tok->loc, tok->len);
+}
+
+static bool attr_is(Token *tok, const char *name) {
+  if (!tok)
+    return false;
+  char *loc = tok->loc;
+  int len = tok->len;
+
+  if (len > 2 && loc[0] == '_' && loc[1] == '_') {
+    loc += 2;
+    len -= 2;
+  } else if (len > 1 && loc[0] == '_') {
+    loc += 1;
+    len -= 1;
+  }
+
+  if (len > 2 && loc[len - 2] == '_' && loc[len - 1] == '_')
+    len -= 2;
+  else if (len > 1 && loc[len - 1] == '_')
+    len -= 1;
+
+  return (int)strlen(name) == len && strncmp(loc, name, len) == 0;
+}
+
+static bool parse_single_attribute(Token **rest, Token *tok, VarAttr *attr) {
+  if (attr_is(tok, "packed")) {
+    if (attr) attr->is_packed = true;
+    *rest = tok->next;
+    return true;
+  }
+  if (attr_is(tok, "aligned") || attr_is(tok, "align")) {
+    tok = tok->next;
+    if (equal(tok, "(")) {
+      tok = tok->next;
+      int align = (int)const_expr(&tok, tok);
+      if (attr) attr->align = align;
+      tok = skip(tok, ")");
+    }
+    *rest = tok;
+    return true;
+  }
+  if (attr_is(tok, "callingconv")) {
+    tok = skip(tok->next, "(");
+    char name[64] = {0};
+    if (tok->kind == TK_STR) {
+      strncpy(name, tok->str, sizeof(name) - 1);
+    } else if (tok->kind == TK_IDENT) {
+      int len = tok->len < (int)sizeof(name) - 1 ? tok->len : (int)sizeof(name) - 1;
+      strncpy(name, tok->loc, len);
+    }
+    tok = tok->next;
+    tok = skip(tok, ")");
+    if (attr) attr->abi = get_abi(name);
+    *rest = tok;
+    return true;
+  }
+  if (attr_is(tok, "ms_abi")) {
+    if (attr) attr->abi = get_abi("win64");
+    *rest = tok->next;
+    return true;
+  }
+  if (attr_is(tok, "sysv_abi")) {
+    if (attr) attr->abi = get_abi("sysv64");
+    *rest = tok->next;
+    return true;
+  }
+  if (attr_is(tok, "pascal")) {
+    if (attr) attr->abi = get_abi("pascal");
+    *rest = tok->next;
+    return true;
+  }
+  if (attr_is(tok, "cdecl") || attr_is(tok, "stdcall") ||
+      attr_is(tok, "fastcall") || attr_is(tok, "thiscall") || attr_is(tok, "vectorcall")) {
+    if (current_abi && current_abi->size_ptr == 4) {
+      if (attr) attr->abi = get_abi("win32");
+    }
+    *rest = tok->next;
+    return true;
+  }
+  if (attr_is(tok, "always_inline") || attr_is(tok, "inline") || attr_is(tok, "forceinline") || attr_is(tok, "gnu_inline")) {
+    if (attr) attr->is_inline = true;
+    *rest = tok->next;
+    return true;
+  }
+  if (attr_is(tok, "restrict") || attr_is(tok, "ptr32") || attr_is(tok, "ptr64") ||
+      attr_is(tok, "unaligned") || attr_is(tok, "w64")) {
+    *rest = tok->next;
+    return true;
+  }
+  return false;
 }
 
 static Token *consume_attributes(Token *tok, VarAttr *attr) {
-  while (tok && is_attribute_token(tok)) {
+  while (tok && (is_attribute_token(tok) || equal(tok, "asm") || equal(tok, "__asm__") || equal(tok, "__asm"))) {
+    if (equal(tok, "asm") || equal(tok, "__asm__") || equal(tok, "__asm")) {
+      tok = tok->next;
+      while (equal(tok, "volatile") || equal(tok, "__volatile") || equal(tok, "__volatile__") ||
+             equal(tok, "inline") || equal(tok, "__inline") || equal(tok, "__inline__") ||
+             equal(tok, "goto"))
+        tok = tok->next;
+      if (equal(tok, "(")) {
+        tok = tok->next;
+        if (tok->kind == TK_STR) {
+          if (attr)
+            attr->asm_name = tok->str;
+          tok = tok->next;
+          if (equal(tok, ")"))
+            tok = tok->next;
+        } else {
+          tok = skip_parentheses(tok);
+        }
+      }
+      continue;
+    }
+
     if (equal(tok, "__callingconv")) {
       tok = skip(tok->next, "(");
       char name[64] = {0};
@@ -404,9 +530,7 @@ static Token *consume_attributes(Token *tok, VarAttr *attr) {
       }
       tok = tok->next;
       tok = skip(tok, ")");
-      ABI *target_abi = get_abi(name);
-      if (attr)
-        attr->abi = target_abi;
+      if (attr) attr->abi = get_abi(name);
       continue;
     }
 
@@ -415,42 +539,9 @@ static Token *consume_attributes(Token *tok, VarAttr *attr) {
       while (equal(tok, "("))
         tok = tok->next;
       while (tok && !equal(tok, ")")) {
-        if (consume(&tok, tok, "packed") || consume(&tok, tok, "__packed__")) {
-          if (attr) attr->is_packed = true;
-        } else if (consume(&tok, tok, "aligned") || consume(&tok, tok, "__aligned__")) {
-          if (equal(tok, "(")) {
-            tok = tok->next;
-            int align = (int)const_expr(&tok, tok);
-            if (attr) attr->align = align;
-            tok = skip(tok, ")");
-          }
-        } else if (consume(&tok, tok, "callingconv") || consume(&tok, tok, "__callingconv__")) {
-          tok = skip(tok, "(");
-          char name[64] = {0};
-          if (tok->kind == TK_STR) {
-            strncpy(name, tok->str, sizeof(name) - 1);
-          } else if (tok->kind == TK_IDENT) {
-            int len = tok->len < (int)sizeof(name) - 1 ? tok->len : (int)sizeof(name) - 1;
-            strncpy(name, tok->loc, len);
-          }
-          tok = tok->next;
-          tok = skip(tok, ")");
-          ABI *target_abi = get_abi(name);
-          if (attr)
-            attr->abi = target_abi;
-        } else if (consume(&tok, tok, "ms_abi") || consume(&tok, tok, "__ms_abi__")) {
-          if (attr) attr->abi = get_abi("win64");
-        } else if (consume(&tok, tok, "sysv_abi") || consume(&tok, tok, "__sysv_abi__")) {
-          if (attr) attr->abi = get_abi("sysv64");
-        } else if (consume(&tok, tok, "pascal") || consume(&tok, tok, "__pascal__")) {
-          if (attr) attr->abi = get_abi("pascal");
-        } else if (consume(&tok, tok, "cdecl") || consume(&tok, tok, "__cdecl__")) {
-          if (attr) attr->abi = get_abi("win32");
-        } else if (consume(&tok, tok, "stdcall") || consume(&tok, tok, "__stdcall__")) {
-          if (attr) attr->abi = get_abi("win32");
-        } else if (consume(&tok, tok, ",")) {
+        if (consume(&tok, tok, ","))
           continue;
-        } else {
+        if (!parse_single_attribute(&tok, tok, attr)) {
           tok = tok->next;
           if (equal(tok, "(")) {
             tok = tok->next;
@@ -468,32 +559,9 @@ static Token *consume_attributes(Token *tok, VarAttr *attr) {
       if (equal(tok, "(")) {
         tok = tok->next;
         while (tok && !equal(tok, ")")) {
-          if (consume(&tok, tok, "align")) {
-            if (equal(tok, "(")) {
-              tok = tok->next;
-              int align = (int)const_expr(&tok, tok);
-              if (attr) attr->align = align;
-              tok = skip(tok, ")");
-            }
-          } else if (consume(&tok, tok, "callingconv")) {
-            tok = skip(tok, "(");
-            char name[64] = {0};
-            if (tok->kind == TK_STR) {
-              strncpy(name, tok->str, sizeof(name) - 1);
-            } else if (tok->kind == TK_IDENT) {
-              int len = tok->len < (int)sizeof(name) - 1 ? tok->len : (int)sizeof(name) - 1;
-              strncpy(name, tok->loc, len);
-            }
-            tok = tok->next;
-            tok = skip(tok, ")");
-            ABI *target_abi = get_abi(name);
-            if (attr)
-              attr->abi = target_abi;
-          } else if (consume(&tok, tok, "pascal")) {
-            if (attr) attr->abi = get_abi("pascal");
-          } else if (consume(&tok, tok, ",")) {
+          if (consume(&tok, tok, ","))
             continue;
-          } else {
+          if (!parse_single_attribute(&tok, tok, attr)) {
             tok = tok->next;
             if (equal(tok, "(")) {
               tok = tok->next;
@@ -507,43 +575,13 @@ static Token *consume_attributes(Token *tok, VarAttr *attr) {
       continue;
     }
 
-    if (equal(tok, "__pascal") || equal(tok, "pascal")) {
-      if (attr) attr->abi = get_abi("pascal");
-      tok = tok->next;
+    Token *next_tok = tok;
+    if (parse_single_attribute(&next_tok, tok, attr)) {
+      tok = next_tok;
       continue;
     }
 
-    if (equal(tok, "__ms_abi")) {
-      if (attr) attr->abi = get_abi("win64");
-      tok = tok->next;
-      continue;
-    }
-
-    if (equal(tok, "__sysv_abi")) {
-      if (attr) attr->abi = get_abi("sysv64");
-      tok = tok->next;
-      continue;
-    }
-
-    if (equal(tok, "__cdecl") || equal(tok, "_cdecl")) {
-      if (attr) attr->abi = get_abi("win32");
-      tok = tok->next;
-      continue;
-    }
-
-    if (equal(tok, "__stdcall") || equal(tok, "_stdcall")) {
-      if (attr) attr->abi = get_abi("win32");
-      tok = tok->next;
-      continue;
-    }
-
-    if (equal(tok, "__forceinline") || equal(tok, "__inline") || equal(tok, "__inline__")) {
-      if (attr) attr->is_inline = true;
-      tok = tok->next;
-      continue;
-    }
-
-    // Skip calling conventions and other qualifiers
+    // Skip unhandled attribute keyword token
     tok = tok->next;
   }
   return tok;
@@ -625,9 +663,12 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
     }
 
     // These keywords are recognized but ignored.
-    if (consume(&tok, tok, "const") || consume(&tok, tok, "volatile") ||
+    if (consume(&tok, tok, "const") || consume(&tok, tok, "__const") || consume(&tok, tok, "__const__") ||
+        consume(&tok, tok, "volatile") || consume(&tok, tok, "__volatile") || consume(&tok, tok, "__volatile__") ||
         consume(&tok, tok, "auto") || consume(&tok, tok, "register") ||
-        consume(&tok, tok, "restrict") || consume(&tok, tok, "_Noreturn"))
+        consume(&tok, tok, "restrict") || consume(&tok, tok, "__restrict") || consume(&tok, tok, "__restrict__") ||
+        consume(&tok, tok, "_Noreturn") ||
+        consume(&tok, tok, "__extension__") || consume(&tok, tok, "__extension"))
       continue;
 
     if (equal(tok, "_Atomic")) {
@@ -656,7 +697,7 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
     // Handle user-defined types.
     Type *ty2 = find_typedef(tok);
     if (equal(tok, "struct") || equal(tok, "union") || equal(tok, "enum") ||
-        equal(tok, "typeof") || ty2) {
+        equal(tok, "typeof") || equal(tok, "__typeof") || equal(tok, "__typeof__") || ty2) {
       if (counter)
         break;
 
@@ -666,7 +707,7 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
         ty = union_decl(&tok, tok->next);
       } else if (equal(tok, "enum")) {
         ty = enum_specifier(&tok, tok->next);
-      } else if (equal(tok, "typeof")) {
+      } else if (equal(tok, "typeof") || equal(tok, "__typeof") || equal(tok, "__typeof__")) {
         ty = typeof_specifier(&tok, tok->next);
       } else {
         ty = ty2;
@@ -682,21 +723,23 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
       counter += VOID;
     else if (equal(tok, "_Bool"))
       counter += BOOL;
-    else if (equal(tok, "char"))
+    else if (equal(tok, "char") || equal(tok, "__int8"))
       counter += CHAR;
-    else if (equal(tok, "short"))
+    else if (equal(tok, "short") || equal(tok, "__int16"))
       counter += SHORT;
-    else if (equal(tok, "int"))
+    else if (equal(tok, "int") || equal(tok, "__int32"))
       counter += INT;
     else if (equal(tok, "long"))
       counter += LONG;
+    else if (equal(tok, "__int64"))
+      counter += LONG + LONG;
     else if (equal(tok, "float"))
       counter += FLOAT;
     else if (equal(tok, "double"))
       counter += DOUBLE;
-    else if (equal(tok, "signed"))
+    else if (equal(tok, "signed") || equal(tok, "__signed") || equal(tok, "__signed__"))
       counter |= SIGNED;
-    else if (equal(tok, "unsigned"))
+    else if (equal(tok, "unsigned") || equal(tok, "__unsigned") || equal(tok, "__unsigned__"))
       counter |= UNSIGNED;
     else
       unreachable();
@@ -895,10 +938,7 @@ static Type *declarator(Token **rest, Token *tok, Type *ty) {
     declarator(&tok, start->next, &dummy);
     tok = skip(tok, ")");
     ty = type_suffix(rest, tok, ty);
-    if (attr.abi) {
-      if (ty->kind == TY_FUNC) ty->abi = attr.abi;
-      else if (ty->kind == TY_PTR && ty->base && ty->base->kind == TY_FUNC) ty->base->abi = attr.abi;
-    }
+    apply_attr_to_type(ty, &attr);
     return declarator(&tok, start->next, ty);
   }
 
@@ -915,10 +955,7 @@ static Type *declarator(Token **rest, Token *tok, Type *ty) {
   ty = type_suffix(rest, tok, ty);
   ty->name = name;
   ty->name_pos = name_pos;
-  if (attr.abi) {
-    if (ty->kind == TY_FUNC) ty->abi = attr.abi;
-    else if (ty->kind == TY_PTR && ty->base && ty->base->kind == TY_FUNC) ty->base->abi = attr.abi;
-  }
+  apply_attr_to_type(ty, &attr);
   return ty;
 }
 
@@ -937,20 +974,14 @@ static Type *abstract_declarator(Token **rest, Token *tok, Type *ty) {
     abstract_declarator(&tok, start->next, &dummy);
     tok = skip(tok, ")");
     ty = type_suffix(rest, tok, ty);
-    if (attr.abi) {
-      if (ty->kind == TY_FUNC) ty->abi = attr.abi;
-      else if (ty->kind == TY_PTR && ty->base && ty->base->kind == TY_FUNC) ty->base->abi = attr.abi;
-    }
+    apply_attr_to_type(ty, &attr);
     return abstract_declarator(&tok, start->next, ty);
   }
 
   tok = consume_attributes(tok, &attr);
 
   ty = type_suffix(rest, tok, ty);
-  if (attr.abi) {
-    if (ty->kind == TY_FUNC) ty->abi = attr.abi;
-    else if (ty->kind == TY_PTR && ty->base && ty->base->kind == TY_FUNC) ty->base->abi = attr.abi;
-  }
+  apply_attr_to_type(ty, &attr);
   return ty;
 }
 
@@ -978,12 +1009,16 @@ static bool consume_end(Token **rest, Token *tok) {
   return false;
 }
 
-// enum-specifier = ident? "{" enum-list? "}"
-//                | ident ("{" enum-list? "}")?
+// enum-specifier = attribute? ident? attribute? "{" enum-list? "}" attribute?
+//                | attribute? ident attribute? ("{" enum-list? "}" attribute?)?
 //
 // enum-list      = ident ("=" num)? ("," ident ("=" num)?)* ","?
 static Type *enum_specifier(Token **rest, Token *tok) {
   Type *ty = enum_type();
+
+  VarAttr attr = {};
+  tok = consume_attributes(tok, &attr);
+  apply_attr_to_type(ty, &attr);
 
   // Read a struct tag.
   Token *tag = NULL;
@@ -992,14 +1027,18 @@ static Type *enum_specifier(Token **rest, Token *tok) {
     tok = tok->next;
   }
 
+  VarAttr attr_mid = {};
+  tok = consume_attributes(tok, &attr_mid);
+  apply_attr_to_type(ty, &attr_mid);
+
   if (tag && !equal(tok, "{")) {
-    Type *ty = find_tag(tag);
-    if (!ty)
+    Type *ty2 = find_tag(tag);
+    if (!ty2)
       error_tok(tag, "unknown enum type");
-    if (ty->kind != TY_ENUM)
+    if (ty2->kind != TY_ENUM)
       error_tok(tag, "not an enum tag");
     *rest = tok;
-    return ty;
+    return ty2;
   }
 
   tok = skip(tok, "{");
@@ -1021,6 +1060,10 @@ static Type *enum_specifier(Token **rest, Token *tok) {
     sc->enum_ty = ty;
     sc->enum_val = val++;
   }
+
+  VarAttr attr_post = {};
+  *rest = consume_attributes(*rest, &attr_post);
+  apply_attr_to_type(ty, &attr_post);
 
   if (tag)
     push_tag_scope(tag, ty);
@@ -1090,6 +1133,9 @@ static Node *declaration(Token **rest, Token *tok, Type *basety, VarAttr *attr) 
     if (!ty->name)
       error_tok(ty->name_pos, "variable name omitted");
 
+    tok = consume_attributes(tok, attr);
+    apply_attr_to_type(ty, attr);
+
     if (attr && attr->is_static) {
       // static local variable
       Obj *var = new_anon_gvar(ty);
@@ -1122,6 +1168,8 @@ static Node *declaration(Token **rest, Token *tok, Type *basety, VarAttr *attr) 
     }
 
     Obj *var = new_lvar(get_ident(ty->name), ty);
+    if (attr && attr->asm_name)
+      var->name = attr->asm_name;
     if (attr && attr->align)
       var->align = attr->align;
 
@@ -1752,10 +1800,15 @@ static bool is_typename(Token *tok) {
   if (map.capacity == 0) {
     static char *kw[] = {
       "void", "_Bool", "char", "short", "int", "long", "struct", "union",
-      "typedef", "enum", "static", "extern", "_Alignas", "signed", "unsigned",
-      "const", "volatile", "auto", "register", "restrict", "__restrict",
-      "__restrict__", "_Noreturn", "float", "double", "typeof", "inline",
+      "typedef", "enum", "static", "extern", "_Alignas", "signed", "__signed", "__signed__",
+      "unsigned", "__unsigned", "__unsigned__",
+      "const", "__const", "__const__", "volatile", "__volatile", "__volatile__",
+      "auto", "register", "restrict", "__restrict",
+      "__restrict__", "_Noreturn", "float", "double", "typeof", "__typeof", "__typeof__",
+      "inline", "__inline", "__inline__",
       "_Thread_local", "__thread", "_Atomic",
+      "__int8", "__int16", "__int32", "__int64",
+      "__extension__", "__extension",
     };
 
     for (int i = 0; i < sizeof(kw) / sizeof(*kw); i++)
@@ -1765,19 +1818,32 @@ static bool is_typename(Token *tok) {
   return hashmap_get2(&map, tok->loc, tok->len) || find_typedef(tok) || is_attribute_token(tok);
 }
 
-// asm-stmt = "asm" ("volatile" | "inline")* "(" string-literal ")"
+// asm-stmt = ("asm" | "__asm__" | "__asm") ("volatile" | "inline")* "(" string-literal ... ")"
 static Node *asm_stmt(Token **rest, Token *tok) {
   Node *node = new_node(ND_ASM, tok);
   tok = tok->next;
 
-  while (equal(tok, "volatile") || equal(tok, "inline"))
+  while (equal(tok, "volatile") || equal(tok, "inline") ||
+         equal(tok, "__volatile__") || equal(tok, "__volatile") ||
+         equal(tok, "__inline__") || equal(tok, "__inline") ||
+         equal(tok, "goto"))
     tok = tok->next;
 
   tok = skip(tok, "(");
   if (tok->kind != TK_STR || tok->ty->base->kind != TY_CHAR)
     error_tok(tok, "expected string literal");
   node->asm_str = tok->str;
-  *rest = skip(tok->next, ")");
+  tok = tok->next;
+  while (tok && !equal(tok, ")")) {
+    if (equal(tok, "(")) {
+      tok = skip_parentheses(tok->next);
+      continue;
+    }
+    tok = tok->next;
+  }
+  tok = skip(tok, ")");
+  consume(&tok, tok, ";");
+  *rest = tok;
   return node;
 }
 
@@ -1957,7 +2023,7 @@ static Node *stmt(Token **rest, Token *tok) {
     return node;
   }
 
-  if (equal(tok, "asm"))
+  if (equal(tok, "asm") || equal(tok, "__asm__") || equal(tok, "__asm"))
     return asm_stmt(rest, tok);
 
   if (equal(tok, "goto")) {
@@ -2100,16 +2166,24 @@ static int64_t eval2(Node *node, char ***label) {
     return eval2(node->lhs, label) - eval(node->rhs);
   case ND_MUL:
     return eval(node->lhs) * eval(node->rhs);
-  case ND_DIV:
+  case ND_DIV: {
+    int64_t rhs = eval(node->rhs);
+    if (rhs == 0)
+      return 0;
     if (node->ty->is_unsigned)
-      return (uint64_t)eval(node->lhs) / eval(node->rhs);
-    return eval(node->lhs) / eval(node->rhs);
+      return (uint64_t)eval(node->lhs) / (uint64_t)rhs;
+    return eval(node->lhs) / rhs;
+  }
   case ND_NEG:
     return -eval(node->lhs);
-  case ND_MOD:
+  case ND_MOD: {
+    int64_t rhs = eval(node->rhs);
+    if (rhs == 0)
+      return 0;
     if (node->ty->is_unsigned)
-      return (uint64_t)eval(node->lhs) % eval(node->rhs);
-    return eval(node->lhs) % eval(node->rhs);
+      return (uint64_t)eval(node->lhs) % (uint64_t)rhs;
+    return eval(node->lhs) % rhs;
+  }
   case ND_BITAND:
     return eval(node->lhs) & eval(node->rhs);
   case ND_BITOR:
@@ -2206,6 +2280,7 @@ static bool is_const_expr(Node *node) {
   case ND_SUB:
   case ND_MUL:
   case ND_DIV:
+  case ND_MOD:
   case ND_BITAND:
   case ND_BITOR:
   case ND_BITXOR:
@@ -2624,7 +2699,8 @@ static Node *new_add(Node *lhs, Node *rhs, Token *tok) {
   }
 
   // ptr + num
-  rhs = new_binary(ND_MUL, rhs, new_long(lhs->ty->base->size, tok), tok);
+  rhs = new_cast(rhs, ty_llong);
+  rhs = new_binary(ND_MUL, rhs, new_num(lhs->ty->base->size, tok), tok);
   return new_binary(ND_ADD, lhs, rhs, tok);
 }
 
@@ -2648,7 +2724,8 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
 
   // ptr - num
   if (lhs->ty->base && is_integer(rhs->ty)) {
-    rhs = new_binary(ND_MUL, rhs, new_long(lhs->ty->base->size, tok), tok);
+    rhs = new_cast(rhs, ty_llong);
+    rhs = new_binary(ND_MUL, rhs, new_num(lhs->ty->base->size, tok), tok);
     add_type(rhs);
     Node *node = new_binary(ND_SUB, lhs, rhs, tok);
     node->ty = lhs->ty;
@@ -2658,7 +2735,7 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
   // ptr - ptr, which returns how many elements are between the two.
   if (lhs->ty->base && rhs->ty->base) {
     Node *node = new_binary(ND_SUB, lhs, rhs, tok);
-    node->ty = ty_long;
+    node->ty = ty_llong;
     return new_binary(ND_DIV, node, new_num(lhs->ty->base->size, tok), tok);
   }
 
@@ -2847,13 +2924,14 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
   ty->members = head.next;
 }
 
-// struct-union-decl = attribute? ident? ("{" struct-members)?
+// struct-union-decl = attribute? ident? attribute? ("{" struct-members)? attribute?
 static Type *struct_union_decl(Token **rest, Token *tok) {
   Type *ty = struct_type();
   VarAttr attr = {};
   tok = consume_attributes(tok, &attr);
-  if (attr.is_packed) ty->is_packed = true;
-  if (attr.align) ty->align = attr.align;
+  apply_attr_to_type(ty, &attr);
+  if (attr.align)
+    ty->align = attr.align;
 
   // Read a tag.
   Token *tag = NULL;
@@ -2861,6 +2939,12 @@ static Type *struct_union_decl(Token **rest, Token *tok) {
     tag = tok;
     tok = tok->next;
   }
+
+  VarAttr attr_mid = {};
+  tok = consume_attributes(tok, &attr_mid);
+  apply_attr_to_type(ty, &attr_mid);
+  if (attr_mid.align)
+    ty->align = attr_mid.align;
 
   if (tag && !equal(tok, "{")) {
     *rest = tok;
@@ -2880,8 +2964,9 @@ static Type *struct_union_decl(Token **rest, Token *tok) {
   struct_members(&tok, tok, ty);
   VarAttr attr2 = {};
   *rest = consume_attributes(tok, &attr2);
-  if (attr2.is_packed) ty->is_packed = true;
-  if (attr2.align) ty->align = attr2.align;
+  apply_attr_to_type(ty, &attr2);
+  if (attr2.align)
+    ty->align = attr2.align;
 
   if (tag) {
     // If this is a redefinition, overwrite a previous type.
@@ -3260,6 +3345,56 @@ static Node *primary(Token **rest, Token *tok) {
   if (equal(tok, "_Generic"))
     return generic_selection(rest, tok->next);
 
+  if (equal(tok, "__builtin_offsetof")) {
+    tok = skip(tok->next, "(");
+    Type *ty = typename(&tok, tok);
+    tok = skip(tok, ",");
+
+    int offset = 0;
+    while (tok->kind != TK_EOF) {
+      if (tok->kind == TK_IDENT) {
+        Member *mem = get_struct_member(ty, tok);
+        if (!mem)
+          error_tok(tok, "no such member");
+        offset += mem->offset;
+        ty = mem->ty;
+        tok = tok->next;
+      } else if (equal(tok, ".")) {
+        tok = tok->next;
+        Member *mem = get_struct_member(ty, tok);
+        if (!mem)
+          error_tok(tok, "no such member");
+        offset += mem->offset;
+        ty = mem->ty;
+        tok = tok->next;
+      } else if (equal(tok, "->")) {
+        tok = tok->next;
+        if (ty->kind == TY_PTR)
+          ty = ty->base;
+        Member *mem = get_struct_member(ty, tok);
+        if (!mem)
+          error_tok(tok, "no such member");
+        offset += mem->offset;
+        ty = mem->ty;
+        tok = tok->next;
+      } else if (equal(tok, "[")) {
+        tok = tok->next;
+        int idx = const_expr(&tok, tok);
+        tok = skip(tok, "]");
+        if (!ty->base)
+          error_tok(tok, "subscripted value is not an array or pointer");
+        offset += idx * ty->base->size;
+        ty = ty->base;
+      } else {
+        break;
+      }
+    }
+    *rest = skip(tok, ")");
+    Node *node = new_num(offset, start);
+    node->ty = ty_ulong;
+    return node;
+  }
+
   if (equal(tok, "__builtin_types_compatible_p")) {
     tok = skip(tok->next, "(");
     Type *t1 = typename(&tok, tok);
@@ -3284,7 +3419,9 @@ static Node *primary(Token **rest, Token *tok) {
     return new_num(2, start);
   }
 
-  if (equal(tok, "__builtin_compare_and_swap")) {
+  if (equal(tok, "__builtin_compare_and_swap") ||
+      equal(tok, "__sync_val_compare_and_swap") ||
+      equal(tok, "__sync_bool_compare_and_swap")) {
     Node *node = new_node(ND_CAS, tok);
     tok = skip(tok->next, "(");
     node->cas_addr = assign(&tok, tok);
@@ -3296,7 +3433,8 @@ static Node *primary(Token **rest, Token *tok) {
     return node;
   }
 
-  if (equal(tok, "__builtin_atomic_exchange")) {
+  if (equal(tok, "__builtin_atomic_exchange") ||
+      equal(tok, "__sync_lock_test_and_set")) {
     Node *node = new_node(ND_EXCH, tok);
     tok = skip(tok->next, "(");
     node->lhs = assign(&tok, tok);
@@ -3304,6 +3442,221 @@ static Node *primary(Token **rest, Token *tok) {
     node->rhs = assign(&tok, tok);
     *rest = skip(tok, ")");
     return node;
+  }
+
+  if (equal(tok, "__sync_synchronize")) {
+    tok = skip(tok->next, "(");
+    *rest = skip(tok, ")");
+    Node *node = new_node(ND_NULL_EXPR, start);
+    node->ty = ty_void;
+    return node;
+  }
+
+  if (equal(tok, "__sync_lock_release")) {
+    tok = skip(tok->next, "(");
+    Node *ptr = assign(&tok, tok);
+    *rest = skip(tok, ")");
+    Node *deref = new_unary(ND_DEREF, ptr, start);
+    return new_binary(ND_ASSIGN, deref, new_num(0, start), start);
+  }
+
+  if (equal(tok, "__sync_fetch_and_add") ||
+      equal(tok, "__sync_fetch_and_sub") ||
+      equal(tok, "__sync_fetch_and_or") ||
+      equal(tok, "__sync_fetch_and_and") ||
+      equal(tok, "__sync_fetch_and_xor") ||
+      equal(tok, "__sync_fetch_and_nand") ||
+      equal(tok, "__sync_add_and_fetch") ||
+      equal(tok, "__sync_sub_and_fetch") ||
+      equal(tok, "__sync_or_and_fetch") ||
+      equal(tok, "__sync_and_and_fetch") ||
+      equal(tok, "__sync_xor_and_fetch") ||
+      equal(tok, "__sync_nand_and_fetch")) {
+    char *name = tok->loc;
+    int len = tok->len;
+    tok = skip(tok->next, "(");
+    Node *ptr = assign(&tok, tok);
+    tok = skip(tok, ",");
+    Node *val = assign(&tok, tok);
+    *rest = skip(tok, ")");
+
+    Node *deref = new_unary(ND_DEREF, ptr, start);
+    NodeKind op;
+    if (strncmp(name, "__sync_fetch_and_add", len) == 0 || strncmp(name, "__sync_add_and_fetch", len) == 0)
+      op = ND_ADD;
+    else if (strncmp(name, "__sync_fetch_and_sub", len) == 0 || strncmp(name, "__sync_sub_and_fetch", len) == 0)
+      op = ND_SUB;
+    else if (strncmp(name, "__sync_fetch_and_or", len) == 0 || strncmp(name, "__sync_or_and_fetch", len) == 0)
+      op = ND_BITOR;
+    else if (strncmp(name, "__sync_fetch_and_and", len) == 0 || strncmp(name, "__sync_and_and_fetch", len) == 0)
+      op = ND_BITAND;
+    else
+      op = ND_BITXOR;
+
+    bool is_fetch_and_op = (strncmp(name, "__sync_fetch_and_", 17) == 0);
+    if (!is_fetch_and_op) {
+      return new_binary(ND_ASSIGN, deref, new_binary(op, deref, val, start), start);
+    } else {
+      if (op == ND_ADD)
+        return new_binary(ND_SUB, new_binary(ND_ASSIGN, deref, new_binary(ND_ADD, deref, val, start), start), val, start);
+      if (op == ND_SUB)
+        return new_binary(ND_ADD, new_binary(ND_ASSIGN, deref, new_binary(ND_SUB, deref, val, start), start), val, start);
+      if (op == ND_BITXOR)
+        return new_binary(ND_BITXOR, new_binary(ND_ASSIGN, deref, new_binary(ND_BITXOR, deref, val, start), start), val, start);
+      return new_binary(ND_ASSIGN, deref, new_binary(op, deref, val, start), start);
+    }
+  }
+
+  if (equal(tok, "__builtin_unreachable")) {
+    tok = skip(tok->next, "(");
+    *rest = skip(tok, ")");
+    Node *node = new_node(ND_NULL_EXPR, start);
+    node->ty = ty_void;
+    return node;
+  }
+
+  if (equal(tok, "__builtin_expect")) {
+    tok = skip(tok->next, "(");
+    Node *exp = assign(&tok, tok);
+    tok = skip(tok, ",");
+    (void)assign(&tok, tok);
+    *rest = skip(tok, ")");
+    return exp;
+  }
+
+  if (equal(tok, "__builtin_assume")) {
+    tok = skip(tok->next, "(");
+    (void)assign(&tok, tok);
+    *rest = skip(tok, ")");
+    Node *node = new_node(ND_NULL_EXPR, start);
+    node->ty = ty_void;
+    return node;
+  }
+
+  if (equal(tok, "__builtin_trap")) {
+    tok = skip(tok->next, "(");
+    *rest = skip(tok, ")");
+    Node *node = new_node(ND_NULL_EXPR, start);
+    node->ty = ty_void;
+    return node;
+  }
+
+  if (equal(tok, "__builtin_ia32_sfence") ||
+      equal(tok, "__builtin_ia32_lfence") ||
+      equal(tok, "__builtin_ia32_mfence") ||
+      equal(tok, "__builtin_ia32_pause")) {
+    tok = skip(tok->next, "(");
+    *rest = skip(tok, ")");
+    Node *node = new_node(ND_NULL_EXPR, start);
+    node->ty = ty_void;
+    return node;
+  }
+
+  if (equal(tok, "__builtin_ia32_rdtsc")) {
+    tok = skip(tok->next, "(");
+    *rest = skip(tok, ")");
+    Node *node = new_node(ND_NUM, start);
+    node->val = 0;
+    node->ty = ty_ulong;
+    return node;
+  }
+
+  if (equal(tok, "__builtin_abs") || equal(tok, "__builtin_labs") || equal(tok, "__builtin_llabs") ||
+      equal(tok, "__builtin_fabs") || equal(tok, "__builtin_fabsf") || equal(tok, "__builtin_fabsl")) {
+    tok = skip(tok->next, "(");
+    Node *val = assign(&tok, tok);
+    *rest = skip(tok, ")");
+    add_type(val);
+    Node *cond = new_binary(ND_LT, val, new_num(0, start), start);
+    Node *neg = new_unary(ND_NEG, val, start);
+    Node *node = new_node(ND_COND, start);
+    node->cond = cond;
+    node->then = neg;
+    node->els = val;
+    node->ty = val->ty;
+    return node;
+  }
+
+  if (equal(tok, "__builtin_prefetch")) {
+    tok = skip(tok->next, "(");
+    (void)assign(&tok, tok);
+    if (consume(&tok, tok, ",")) {
+      (void)assign(&tok, tok);
+      if (consume(&tok, tok, ","))
+        (void)assign(&tok, tok);
+    }
+    *rest = skip(tok, ")");
+    Node *node = new_node(ND_NULL_EXPR, start);
+    node->ty = ty_void;
+    return node;
+  }
+
+  if (equal(tok, "__builtin_debugbreak")) {
+    tok = skip(tok->next, "(");
+    *rest = skip(tok, ")");
+    Node *node = new_node(ND_NULL_EXPR, start);
+    node->ty = ty_void;
+    return node;
+  }
+
+  if (equal(tok, "__builtin_constant_p")) {
+    tok = skip(tok->next, "(");
+    Node *node = assign(&tok, tok);
+    *rest = skip(tok, ")");
+    return new_num(is_const_expr(node), start);
+  }
+
+  if (equal(tok, "__builtin_va_start")) {
+    tok = skip(tok->next, "(");
+    Node *ap = assign(&tok, tok);
+    tok = skip(tok, ",");
+    (void)assign(&tok, tok);
+    *rest = skip(tok, ")");
+
+    VarScope *sc = find_var(&(Token){.loc = "__va_area__", .len = 11});
+    if (!sc || !sc->var)
+      error_tok(start, "__builtin_va_start used outside variadic function");
+    Node *va_var = new_var_node(sc->var, start);
+    add_type(ap);
+    if (ap->ty->kind == TY_PTR && (ap->ty->base->kind != TY_STRUCT && ap->ty->base->kind != TY_UNION)) {
+      // Pointer va_list (e.g. Win64 char *va_list)
+      Node *addr = new_unary(ND_ADDR, va_var, start);
+      Node *offset_ptr = new_binary(ND_ADD, addr, new_num(8, start), start);
+      Node *val = new_unary(ND_DEREF, new_cast(offset_ptr, pointer_to(ap->ty)), start);
+      return new_binary(ND_ASSIGN, ap, val, start);
+    } else {
+      VarScope *va_elem_sc = find_var(&(Token){.loc = "__va_elem", .len = 9});
+      Type *va_elem_ty = (va_elem_sc && va_elem_sc->type_def) ? va_elem_sc->type_def : ty_void;
+      Node *cast = new_cast(new_unary(ND_ADDR, va_var, start), pointer_to(va_elem_ty));
+      Node *deref_va = new_unary(ND_DEREF, cast, start);
+      Node *deref_ap = new_unary(ND_DEREF, ap, start);
+      return new_binary(ND_ASSIGN, deref_ap, deref_va, start);
+    }
+  }
+
+  if (equal(tok, "__builtin_va_end")) {
+    tok = skip(tok->next, "(");
+    (void)assign(&tok, tok);
+    *rest = skip(tok, ")");
+    Node *node = new_node(ND_NULL_EXPR, start);
+    node->ty = ty_void;
+    return node;
+  }
+
+  if (equal(tok, "__builtin_va_copy")) {
+    tok = skip(tok->next, "(");
+    Node *dest = assign(&tok, tok);
+    tok = skip(tok, ",");
+    Node *src = assign(&tok, tok);
+    *rest = skip(tok, ")");
+    add_type(dest);
+    if (dest->ty->kind == TY_PTR && (dest->ty->base->kind != TY_STRUCT && dest->ty->base->kind != TY_UNION)) {
+      return new_binary(ND_ASSIGN, dest, src, start);
+    } else {
+      Node *deref_dest = new_unary(ND_DEREF, dest, start);
+      Node *deref_src = new_unary(ND_DEREF, src, start);
+      return new_binary(ND_ASSIGN, deref_dest, deref_src, start);
+    }
   }
 
   if (tok->kind == TK_IDENT) {
@@ -3326,8 +3679,18 @@ static Node *primary(Token **rest, Token *tok) {
         return new_num(sc->enum_val, tok);
     }
 
-    if (equal(tok->next, "("))
+    if (equal(tok->next, "(")) {
+      if (tok->len > 10 && strncmp(tok->loc, "__builtin_", 10) == 0) {
+        char *name = strndup(tok->loc + 10, tok->len - 10);
+        Type *ty = func_type(ty_int);
+        ty->is_variadic = true;
+        Obj *fn = new_gvar(name, ty);
+        fn->is_function = true;
+        fn->is_definition = false;
+        return new_var_node(fn, tok);
+      }
       error_tok(tok, "implicit declaration of a function");
+    }
     error_tok(tok, "undefined variable");
   }
 
@@ -3401,9 +3764,14 @@ static void resolve_goto_labels(void) {
 }
 
 static Obj *find_func(char *name) {
+  if (!name || !*name)
+    return NULL;
+
   Scope *sc = scope;
-  while (sc->next)
+  while (sc && sc->next)
     sc = sc->next;
+  if (!sc)
+    return NULL;
 
   VarScope *sc2 = hashmap_get(&sc->vars, name);
   if (sc2 && sc2->var && sc2->var->is_function)
@@ -3429,6 +3797,9 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
     error_tok(ty->name_pos, "function name omitted");
   char *name_str = get_ident(ty->name);
 
+  tok = consume_attributes(tok, attr);
+  apply_attr_to_type(ty, attr);
+
   ABI *fn_abi = (attr && attr->abi) ? attr->abi : (ty->abi ? ty->abi : current_abi);
   ty->abi = fn_abi;
 
@@ -3439,20 +3810,29 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
       error_tok(tok, "redeclared as a different kind of symbol");
     if (fn->is_definition && equal(tok, "{"))
       error_tok(tok, "redefinition of %s", name_str);
-    if (!fn->is_static && attr->is_static)
+    if (!fn->is_static && attr->is_static && !attr->is_inline)
       error_tok(tok, "static declaration follows a non-static declaration");
     fn->is_definition = fn->is_definition || equal(tok, "{");
+    if (attr->is_static || attr->is_inline)
+      fn->is_static = true;
+    if (attr->is_inline)
+      fn->is_inline = true;
+    if (attr->asm_name)
+      fn->name = attr->asm_name;
     fn->abi = fn_abi;
   } else {
     fn = new_gvar(name_str, ty);
     fn->is_function = true;
     fn->is_definition = equal(tok, "{");
-    fn->is_static = attr->is_static || (attr->is_inline && !attr->is_extern);
+    fn->is_static = attr->is_static || attr->is_inline;
     fn->is_inline = attr->is_inline;
+    if (attr->asm_name)
+      fn->name = attr->asm_name;
     fn->abi = fn_abi;
   }
 
-  fn->is_root = !(fn->is_static && fn->is_inline);
+  // Root functions are non-inline, non-static definitions
+  fn->is_root = fn->is_definition && !fn->is_inline && !fn->is_static;
 
   if (consume(&tok, tok, ";"))
     return tok;
@@ -3505,10 +3885,15 @@ static Token *global_variable(Token *tok, Type *basety, VarAttr *attr) {
     if (!ty->name)
       error_tok(ty->name_pos, "variable name omitted");
 
+    tok = consume_attributes(tok, attr);
+    apply_attr_to_type(ty, attr);
+
     Obj *var = new_gvar(get_ident(ty->name), ty);
     var->is_definition = !attr->is_extern;
     var->is_static = attr->is_static;
     var->is_tls = attr->is_tls;
+    if (attr->asm_name)
+      var->name = attr->asm_name;
     if (attr->align)
       var->align = attr->align;
 
@@ -3528,6 +3913,7 @@ static bool is_function(Token *tok) {
 
   Type dummy = {};
   Type *ty = declarator(&tok, tok, &dummy);
+  tok = consume_attributes(tok, NULL);
   return ty->kind == TY_FUNC;
 }
 
@@ -3565,12 +3951,64 @@ static void declare_builtin_functions(void) {
   builtin_alloca->is_definition = false;
 }
 
+static void declare_builtin_types(void) {
+  if (current_abi == &abi_win64 || current_abi == &abi_win32) {
+    push_scope("__builtin_va_list")->type_def = pointer_to(ty_char);
+    return;
+  }
+
+  Type *va_elem = struct_type();
+  Member *m1 = calloc(1, sizeof(Member));
+  m1->ty = ty_uint;
+  m1->name = &(Token){.loc = "gp_offset", .len = 9};
+  m1->offset = 0;
+
+  Member *m2 = calloc(1, sizeof(Member));
+  m2->ty = ty_uint;
+  m2->name = &(Token){.loc = "fp_offset", .len = 9};
+  m2->offset = 4;
+
+  Member *m3 = calloc(1, sizeof(Member));
+  m3->ty = pointer_to(ty_void);
+  m3->name = &(Token){.loc = "overflow_arg_area", .len = 17};
+  m3->offset = 8;
+
+  Member *m4 = calloc(1, sizeof(Member));
+  m4->ty = pointer_to(ty_void);
+  m4->name = &(Token){.loc = "reg_save_area", .len = 13};
+  m4->offset = 16;
+
+  m1->next = m2;
+  m2->next = m3;
+  m3->next = m4;
+  va_elem->members = m1;
+  va_elem->size = 24;
+  va_elem->align = 8;
+
+  Type *va_list_ty = array_of(va_elem, 1);
+
+  push_scope("__builtin_va_list")->type_def = va_list_ty;
+  push_scope("__va_elem")->type_def = va_elem;
+}
+
 // program = (typedef | function-definition | global-variable)*
 Obj *parse(Token *tok) {
+  scope = &(Scope){};
   declare_builtin_functions();
+  declare_builtin_types();
   globals = NULL;
 
   while (tok->kind != TK_EOF) {
+    if (equal(tok, "__extension__") || equal(tok, "__extension")) {
+      tok = tok->next;
+      continue;
+    }
+
+    if (equal(tok, "asm") || equal(tok, "__asm__") || equal(tok, "__asm")) {
+      asm_stmt(&tok, tok);
+      continue;
+    }
+
     VarAttr attr = {};
     Type *basety = declspec(&tok, tok, &attr);
 
@@ -3590,9 +4028,19 @@ Obj *parse(Token *tok) {
     tok = global_variable(tok, basety, &attr);
   }
 
-  for (Obj *var = globals; var; var = var->next)
+  for (Obj *var = globals; var; var = var->next) {
     if (var->is_root)
       mark_live(var);
+    if (!var->is_function) {
+      for (Relocation *rel = var->rel; rel; rel = rel->next) {
+        if (rel->label && *rel->label && (*rel->label)[0] != '.') {
+          Obj *fn = find_func(*rel->label);
+          if (fn)
+            mark_live(fn);
+        }
+      }
+    }
+  }
 
   // Remove redundant tentative definitions.
   scan_globals();

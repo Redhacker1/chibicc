@@ -72,7 +72,12 @@ void init_target(const char *target_name, const char *abi_name) {
 void init_all_targets_and_abis(void) {
   init_abis();
   init_codegens();
+
+#if _WIN32
+  init_target("x86_64", "win64");
+#else
   init_target("x86_64", "sysv64");
+#endif
 }
 
 void codegen(Obj *prog, FILE *out) {

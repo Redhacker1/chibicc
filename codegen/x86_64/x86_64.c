@@ -518,6 +518,9 @@ static void gen_expr(Node *node, FILE *out) {
     println("  mov $0, %%al");
     println("  rep stosb");
     return;
+  case ND_LABEL_VAL:
+    println("  lea %s(%%rip), %%rax", node->unique_label);
+    return;
   case ND_COND: {
     int c = count();
     gen_expr(node->cond, output_file);
@@ -580,13 +583,21 @@ static void gen_expr(Node *node, FILE *out) {
       return;
     }
 
+    if (node->lhs->kind != ND_VAR) {
+      gen_expr(node->lhs, output_file);
+      println("  mov %%rax, %%r10");
+    }
+
     int stack = 0;
     if (fn_abi && fn_abi->push_args)
       stack = fn_abi->push_args(node, output_file, &depth);
 
-    gen_expr(node->lhs, output_file);
-
-    println("  mov %%rax, %%r11");
+    if (node->lhs->kind != ND_VAR) {
+      println("  mov %%r10, %%r11");
+    } else {
+      gen_expr(node->lhs, output_file);
+      println("  mov %%rax, %%r11");
+    }
 
     if (fn_abi && fn_abi->pre_call)
       fn_abi->pre_call(node, output_file);
@@ -595,6 +606,20 @@ static void gen_expr(Node *node, FILE *out) {
     if (stack > 0) {
       println("  add $%d, %%rsp", stack * 8);
       depth -= stack;
+    }
+
+    if (node->ty->kind == TY_BOOL)
+      println("  movzb %%al, %%eax");
+    else if (node->ty->size == 1) {
+      if (node->ty->is_unsigned)
+        println("  movzbl %%al, %%eax");
+      else
+        println("  movsbl %%al, %%eax");
+    } else if (node->ty->size == 2) {
+      if (node->ty->is_unsigned)
+        println("  movzwl %%ax, %%eax");
+      else
+        println("  movswl %%ax, %%eax");
     }
 
     if (node->ret_buffer && fn_abi && fn_abi->copy_ret_buffer) {
@@ -606,19 +631,25 @@ static void gen_expr(Node *node, FILE *out) {
     return;
   }
   case ND_CAS: {
-    gen_expr(node->cas_old, output_file);
+    gen_expr(node->cas_addr, output_file);
     push();
     gen_expr(node->cas_new, output_file);
     push();
-    gen_expr(node->cas_addr, output_file);
-    pop("%rdx"); // new
-    pop("%rcx"); // old
-    pop("%rdi"); // addr
+    gen_expr(node->cas_old, output_file);
+    push();
 
     int sz = node->cas_addr->ty->base->size;
-    println("  mov %s, %s", reg_cx(sz), reg_ax(sz));
+    if (node->cas_old->ty->kind == TY_PTR)
+      println("  mov (%%rax), %s", reg_ax(sz));
+
+    pop("%r8");  // old (ptr)
+    pop("%rdx"); // new
+    pop("%rdi"); // addr
+
     println("  lock cmpxchg %s, (%%rdi)", reg_dx(sz));
     println("  sete %%cl");
+    if (node->cas_old->ty->kind == TY_PTR)
+      println("  mov %s, (%%r8)", reg_ax(sz));
     println("  movzbl %%cl, %%eax");
     return;
   }
@@ -819,6 +850,26 @@ static void gen_expr(Node *node, FILE *out) {
   error_tok(node->tok, "invalid expression");
 }
 
+static char *format_asm_str(char *s) {
+  if (!s) return "";
+  char *buf = calloc(1, strlen(s) + 1);
+  char *d = buf;
+  for (char *p = s; *p; p++) {
+    if (*p == '{') {
+      p++;
+      while (*p && *p != '}' && *p != '|')
+        *d++ = *p++;
+      while (*p && *p != '}')
+        p++;
+      if (!*p) break;
+    } else {
+      *d++ = *p;
+    }
+  }
+  *d = '\0';
+  return buf;
+}
+
 static void gen_stmt(Node *node, FILE *out) {
   (void)out;
   println("  .loc %d %d", node->tok->file->file_no, node->tok->line_no);
@@ -938,7 +989,7 @@ static void gen_stmt(Node *node, FILE *out) {
     gen_expr(node->lhs, output_file);
     return;
   case ND_ASM:
-    println("  %s", node->asm_str);
+    println("  %s", format_asm_str(node->asm_str));
     return;
   }
 
@@ -967,10 +1018,14 @@ static void emit_data(Obj *prog, FILE *out) {
 
     // .data or .tdata
     if (var->init_data) {
-      if (var->is_tls)
-        println("  .section .tdata,\"awT\",@progbits");
-      else
+      if (var->is_tls) {
+        if (current_objfmt == &objfmt_coff)
+          println("  .section .tls$");
+        else
+          println("  .section .tdata,\"awT\",@progbits");
+      } else {
         println("  .data");
+      }
 
       if (current_objfmt && current_objfmt->emit_var_type_size)
         current_objfmt->emit_var_type_size(var, output_file);
@@ -993,10 +1048,14 @@ static void emit_data(Obj *prog, FILE *out) {
     }
 
     // .bss or .tbss
-    if (var->is_tls)
-      println("  .section .tbss,\"awT\",@nobits");
-    else
+    if (var->is_tls) {
+      if (current_objfmt == &objfmt_coff)
+        println("  .section .tls$");
+      else
+        println("  .section .tbss,\"awT\",@nobits");
+    } else {
       println("  .bss");
+    }
 
     println("  .align %d", align);
     println("%s:", var->name);
@@ -1086,7 +1145,8 @@ static void x86_64_codegen(Obj *prog, FILE *out) {
   emit_text(prog, out);
 }
 
-Codegen codegen_x86_64 = {
+Codegen codegen_x86_64 =
+{
   .name = "x86_64",
   .description = "x86-64 code generator",
   .default_abi_name = "sysv64",

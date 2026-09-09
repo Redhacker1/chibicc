@@ -77,7 +77,7 @@ void warn_tok(Token *tok, char *fmt, ...) {
 
 // Consumes the current token if it matches `op`.
 bool equal(Token *tok, char *op) {
-  return memcmp(tok->loc, op, tok->len) == 0 && op[tok->len] == '\0';
+  return tok && memcmp(tok->loc, op, tok->len) == 0 && op[tok->len] == '\0';
 }
 
 // Ensure that the current token is `op`.
@@ -152,7 +152,7 @@ static int read_punct(char *p) {
     if (startswith(p, kw[i]))
       return strlen(kw[i]);
 
-  return ispunct(*p) ? 1 : 0;
+  return ispunct((unsigned char)*p) ? 1 : 0;
 }
 
 static bool is_keyword(Token *tok) {
@@ -193,11 +193,11 @@ static int read_escaped_char(char **new_pos, char *p) {
   if (*p == 'x') {
     // Read a hexadecimal number.
     p++;
-    if (!isxdigit(*p))
+    if (!isxdigit((unsigned char)*p))
       error_at(p, "invalid hex escape sequence");
 
     int c = 0;
-    for (; isxdigit(*p); p++)
+    for (; isxdigit((unsigned char)*p); p++)
       c = (c << 4) + from_hex(*p);
     *new_pos = p;
     return c;
@@ -344,7 +344,7 @@ static bool convert_pp_int(Token *tok) {
 
   // Read a binary, octal, decimal or hexadecimal number.
   int base = 10;
-  if (!strncasecmp(p, "0x", 2) && isxdigit(p[2])) {
+  if (!strncasecmp(p, "0x", 2) && isxdigit((unsigned char)p[2])) {
     p += 2;
     base = 16;
   } else if (!strncasecmp(p, "0b", 2) && (p[2] == '0' || p[2] == '1')) {
@@ -358,6 +358,7 @@ static bool convert_pp_int(Token *tok) {
 
   // Read U, L or LL suffixes.
   bool l = false;
+  bool ll = false;
   bool u = false;
 
   if (startswith(p, "LLU") || startswith(p, "LLu") ||
@@ -365,13 +366,13 @@ static bool convert_pp_int(Token *tok) {
       startswith(p, "ULL") || startswith(p, "Ull") ||
       startswith(p, "uLL") || startswith(p, "ull")) {
     p += 3;
-    l = u = true;
+    ll = u = true;
   } else if (!strncasecmp(p, "lu", 2) || !strncasecmp(p, "ul", 2)) {
     p += 2;
     l = u = true;
   } else if (startswith(p, "LL") || startswith(p, "ll")) {
     p += 2;
-    l = true;
+    ll = true;
   } else if (*p == 'L' || *p == 'l') {
     p++;
     l = true;
@@ -386,25 +387,33 @@ static bool convert_pp_int(Token *tok) {
   // Infer a type.
   Type *ty;
   if (base == 10) {
-    if (l && u)
+    if (ll && u)
+      ty = ty_ullong;
+    else if (ll)
+      ty = ty_llong;
+    else if (l && u)
       ty = ty_ulong;
     else if (l)
       ty = ty_long;
     else if (u)
-      ty = (val >> 32) ? ty_ulong : ty_uint;
+      ty = (val >> 32) ? ty_ullong : ty_uint;
     else
-      ty = (val >> 31) ? ty_long : ty_int;
+      ty = (val >> 31) ? ty_llong : ty_int;
   } else {
-    if (l && u)
+    if (ll && u)
+      ty = ty_ullong;
+    else if (ll)
+      ty = (val >> 63) ? ty_ullong : ty_llong;
+    else if (l && u)
       ty = ty_ulong;
     else if (l)
-      ty = (val >> 63) ? ty_ulong : ty_long;
+      ty = (val >> 32) ? ((val >> 63) ? ty_ullong : ty_llong) : ty_long;
     else if (u)
-      ty = (val >> 32) ? ty_ulong : ty_uint;
+      ty = (val >> 32) ? ty_ullong : ty_uint;
     else if (val >> 63)
-      ty = ty_ulong;
+      ty = ty_ullong;
     else if (val >> 32)
-      ty = ty_long;
+      ty = ty_llong;
     else if (val >> 31)
       ty = ty_uint;
     else
@@ -431,7 +440,7 @@ static void convert_pp_number(Token *tok) {
 
   // If it's not an integer, it must be a floating point constant.
   char *end;
-  long double val = strtold(tok->loc, &end);
+  double val = strtod(tok->loc, &end);
 
   Type *ty;
   if (*end == 'f' || *end == 'F') {
@@ -526,19 +535,19 @@ Token *tokenize(File *file) {
     }
 
     // Skip whitespace characters.
-    if (isspace(*p)) {
+    if (isspace((unsigned char)*p)) {
       p++;
       has_space = true;
       continue;
     }
 
     // Numeric literal
-    if (isdigit(*p) || (*p == '.' && isdigit(p[1]))) {
+    if (isdigit((unsigned char)*p) || (*p == '.' && isdigit((unsigned char)p[1]))) {
       char *q = p++;
       for (;;) {
         if (p[0] && p[1] && strchr("eEpP", p[0]) && strchr("+-", p[1]))
           p += 2;
-        else if (isalnum(*p) || *p == '.')
+        else if (isalnum((unsigned char)*p) || *p == '.')
           p++;
         else
           break;
@@ -788,7 +797,7 @@ static void remove_backslash_newline(char *p) {
 static uint32_t read_universal_char(char *p, int len) {
   uint32_t c = 0;
   for (int i = 0; i < len; i++) {
-    if (!isxdigit(p[i]))
+    if (!isxdigit((unsigned char)p[i]))
       return 0;
     c = (c << 4) | from_hex(p[i]);
   }

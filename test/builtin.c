@@ -28,6 +28,17 @@ int main() {
 
   ASSERT(1, ({ struct {int a; int b;} x; __builtin_types_compatible_p(typeof(x.a), typeof(x.b)); }));
 
+  typedef __builtin_va_list my_va_list;
+  ASSERT(sizeof(my_va_list), sizeof(__builtin_va_list));
+  ASSERT(1, __builtin_constant_p(10 + 20));
+  ASSERT(0, ({ int x = 5; __builtin_constant_p(x); }));
+  ASSERT(42, (__builtin_expect(42, 0)));
+  ASSERT(8, sizeof(__int64));
+  ASSERT(4, sizeof(__int32));
+  ASSERT(2, sizeof(__int16));
+  ASSERT(1, sizeof(__int8));
+  ASSERT(8, sizeof(unsigned __int64));
+
   printf("OK\n");
   return 0;
 }

@@ -5,9 +5,9 @@ int main() {
   ASSERT(513, (short)8590066177);
   ASSERT(1, (char)8590066177);
   ASSERT(1, (long)1);
-  ASSERT(0, (long)&*(int *)0);
+  ASSERT(0, (long long)&*(int *)0);
   ASSERT(513, ({ int x=512; *(char *)&x=1; x; }));
-  ASSERT(5, ({ int x=5; long y=(long)&x; *(int*)y; }));
+  ASSERT(5, ({ int x=5; long long y=(long long)&x; *(int*)y; }));
 
   (void)1;
 
@@ -28,11 +28,11 @@ int main() {
   ASSERT(2147483647, ((unsigned)-1)>>1);
   ASSERT(-50, (-100)/2);
   ASSERT(2147483598, ((unsigned)-100)/2);
-  ASSERT(9223372036854775758, ((unsigned long)-100)/2);
-  ASSERT(0, ((long)-1)/(unsigned)100);
+  ASSERT(9223372036854775758, ((unsigned long long)-100)/2);
+  ASSERT(0, ((long long)-1)/(unsigned)100);
   ASSERT(-2, (-100)%7);
   ASSERT(2, ((unsigned)-100)%7);
-  ASSERT(6, ((unsigned long)-100)%9);
+  ASSERT(6, ((unsigned long long)-100)%9);
 
   ASSERT(65535, (int)(unsigned short)65535);
   ASSERT(65535, ({ unsigned short x = 65535; x; }));
@@ -46,7 +46,7 @@ int main() {
   ASSERT(3, (char)3.0);
   ASSERT(1000, (short)1000.3);
   ASSERT(3, (int)3.99);
-  ASSERT(2000000000000000, (long)2e15);
+  ASSERT(2000000000000000, (long long)2e15);
   ASSERT(3, (float)3.5);
   ASSERT(5, (double)(float)5.5);
   ASSERT(3, (float)3);

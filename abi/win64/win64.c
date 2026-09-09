@@ -145,10 +145,10 @@ static void win64_copy_bytes(char *src, char *dst, int size, FILE *out) {
  * Microsoft requires caller-created temporaries for indirect aggregate
  * arguments to be 16-byte aligned.
  */
-static int win64_temp_bytes(Node *args) {
+static int win64_temp_bytes(const Node *args) {
   int size = 0;
 
-  for (Node *arg = args; arg; arg = arg->next) {
+  for (const Node *arg = args; arg; arg = arg->next) {
     if ((arg->ty->kind == TY_STRUCT || arg->ty->kind == TY_UNION) &&
         win64_returns_by_reference(arg->ty)) {
       size = align_to(size, 16);
@@ -162,10 +162,10 @@ static int win64_temp_bytes(Node *args) {
 /*
  * Find the offset of ARG inside the temporary area.
  */
-static int win64_temp_offset(Node *args, Node *target) {
+static int win64_temp_offset(const Node *args, const Node *target) {
   int offset = 0;
 
-  for (Node *arg = args; arg; arg = arg->next) {
+  for (const Node *arg = args; arg; arg = arg->next) {
     if ((arg->ty->kind == TY_STRUCT || arg->ty->kind == TY_UNION) &&
         win64_returns_by_reference(arg->ty)) {
       offset = align_to(offset, 16);
@@ -233,7 +233,7 @@ static void win64_push_arg_expr(
    */
   if ((arg->ty->kind == TY_STRUCT || arg->ty->kind == TY_UNION) &&
       win64_returns_by_reference(arg->ty)) {
-    int temp_off = win64_temp_offset(all_args, arg);
+    const int temp_off = win64_temp_offset(all_args, arg);
 
     /*
      * At this point:
@@ -242,7 +242,7 @@ static void win64_push_arg_expr(
      *
      * points at the beginning of the temporary area.
      */
-    int dst_off = (extra_shadow + call_pad + pushed) * 8 + temp_off;
+    const int dst_off = (extra_shadow + call_pad + pushed) * 8 + temp_off;
 
     println_abi(out, "  mov %%rax, %%r10");
     println_abi(out, "  lea %d(%%rsp), %%r11", dst_off);
@@ -317,7 +317,7 @@ static int win64_count_params(Type *ty) {
   if (!ty)
     return 0;
 
-  for (Type *p = ty->params; p; p = p->next)
+  for (const Type *p = ty->params; p; p = p->next)
     count++;
 
   return count;
@@ -338,9 +338,11 @@ static void win64_assign_lvar_offsets(Obj *fn) {
    *
    * This also naturally handles the hidden sret parameter because it is
    * present in fn->params and therefore consumes argument position 0.
+   *
+   * Reserve 16 bytes for saved non-volatile registers (%rdi, %rsi) at 0..-16(%rbp).
    */
   int top = 48;
-  int bottom = 0;
+  int bottom = 16;
   int param_idx = 0;
 
   for (Obj *var = fn->params; var; var = var->next) {
@@ -351,7 +353,7 @@ static void win64_assign_lvar_offsets(Obj *fn) {
      */
     if ((var->ty->kind == TY_STRUCT || var->ty->kind == TY_UNION) &&
         win64_returns_by_reference(var->ty)) {
-      int align = var->align;
+      const int align = var->align;
 
       bottom += var->ty->size;
       bottom = align_to(bottom, align);
@@ -383,7 +385,7 @@ static void win64_assign_lvar_offsets(Obj *fn) {
     if (var->offset)
       continue;
 
-    int align = var->align;
+    const int align = var->align;
 
     bottom += var->ty->size;
     bottom = align_to(bottom, align);
@@ -395,8 +397,10 @@ static void win64_assign_lvar_offsets(Obj *fn) {
    *
    * win64_push_args() may allocate additional stack argument slots
    * dynamically when needed.
+   * Since 16 bytes are pushed by %rdi and %rsi in the prologue,
+   * subtract 16 from the stack allocation.
    */
-  fn->stack_size = align_to(bottom + WIN64_SHADOW_SPACE, 16);
+  fn->stack_size = align_to(bottom + WIN64_SHADOW_SPACE - 16, 16);
 }
 
 /*
@@ -417,7 +421,7 @@ static void win64_assign_lvar_offsets(Obj *fn) {
 static int win64_push_args(Node *node, FILE *out, int *depth) {
   int arg_count = 0;
 
-  for (Node *arg = node->args; arg; arg = arg->next)
+  for (const Node *arg = node->args; arg; arg = arg->next)
     arg_count++;
 
   bool ret_mem =
@@ -427,13 +431,13 @@ static int win64_push_args(Node *node, FILE *out, int *depth) {
   /*
    * The hidden sret pointer is argument position zero.
    */
-  int total_args = arg_count + (ret_mem ? 1 : 0);
+  const int total_args = arg_count + (ret_mem ? 1 : 0);
 
   /*
    * Caller-owned temporaries for indirect aggregates.
    */
-  int temp_bytes = win64_temp_bytes(node->args);
-  int temp_words = temp_bytes / 8;
+  const int temp_bytes = win64_temp_bytes(node->args);
+  const int temp_words = temp_bytes / 8;
 
   /*
    * If we have aggregate temporaries, make their base 16-byte aligned.
@@ -466,10 +470,10 @@ static int win64_push_args(Node *node, FILE *out, int *depth) {
    * We place the final alignment padding between the argument slots and
    * the temporary area.
    */
-  int total_arg_slots = total_args > WIN64_REG_MAX ? total_args : WIN64_REG_MAX;
-  int extra_shadow = total_arg_slots - total_args;
+  const int total_arg_slots = total_args > WIN64_REG_MAX ? total_args : WIN64_REG_MAX;
+  const int extra_shadow = total_arg_slots - total_args;
 
-  int call_pad =
+  const int call_pad =
       (*depth + total_arg_slots) & 1;
 
   if (call_pad) {
@@ -526,7 +530,7 @@ static int win64_push_args(Node *node, FILE *out, int *depth) {
       node->func_ty &&
       node->func_ty->is_variadic;
 
-  int named_args =
+  const int named_args =
       node->func_ty ?
       win64_count_params(node->func_ty) : 0;
 
@@ -544,11 +548,11 @@ static int win64_push_args(Node *node, FILE *out, int *depth) {
 
   int arg_index = 0;
 
-  for (Node *arg = node->args;
+  for (const Node *arg = node->args;
        arg && slot < WIN64_REG_MAX;
        arg = arg->next, arg_index++, slot++) {
 
-    int off = slot * 8;
+    const int off = slot * 8;
 
     /*
      * A floating point argument uses the XMM register corresponding to
@@ -612,7 +616,7 @@ static int win64_push_args(Node *node, FILE *out, int *depth) {
  * Copy an RAX integer aggregate result into the caller's return buffer.
  */
 static void win64_copy_ret_buffer(Obj *var, FILE *out) {
-  Type *ty = var->ty;
+  const Type *ty = var->ty;
 
   if (ty->size <= 8) {
     for (int i = 0; i < ty->size; i++) {
@@ -632,7 +636,7 @@ static void win64_copy_ret_buffer(Obj *var, FILE *out) {
  * Do NOT use RDI/RSI here. They are nonvolatile on Win64.
  */
 static void win64_copy_struct_reg(Obj *fn, FILE *out) {
-  Type *ty = fn->ty->return_ty;
+  const Type *ty = fn->ty->return_ty;
 
   println_abi(out, "  mov %%rax, %%r10");
   println_abi(out, "  xor %%eax, %%eax");
@@ -649,8 +653,8 @@ static void win64_copy_struct_reg(Obj *fn, FILE *out) {
  * fn->params->offset is the hidden sret parameter.
  */
 static void win64_copy_struct_mem(Obj *fn, FILE *out) {
-  Type *ty = fn->ty->return_ty;
-  Obj *var = fn->params;
+  const Type *ty = fn->ty->return_ty;
+  const Obj *var = fn->params;
 
   /*
    * RAX contains the source address.
@@ -680,12 +684,32 @@ static void win64_copy_struct_mem(Obj *fn, FILE *out) {
  * stable after the dynamic allocation.
  */
 static void win64_builtin_alloca(Obj *fn, FILE *out) {
-  (void)fn;
+  // Align size to 16 bytes
+  println_abi(out, "  add $15, %%rdi");
+  println_abi(out, "  and $0xfffffff0, %%edi");
 
-  println_abi(out, "  add $15, %%rcx");
-  println_abi(out, "  and $0xfffffff0, %%rcx");
-  println_abi(out, "  sub %%rcx, %%rsp");
+  // %rcx = current %rsp (old_rsp)
+  println_abi(out, "  mov %%rsp, %%rcx");
+  // sub %rdi from %rsp
+  println_abi(out, "  sub %%rdi, %%rsp");
+  // %rax = destination (%rsp)
   println_abi(out, "  mov %%rsp, %%rax");
+
+  // Copy temporary stack values from %rcx up to alloca_bottom to %rax
+  println_abi(out, "1:");
+  println_abi(out, "  cmp %d(%%rbp), %%rcx", fn->alloca_bottom->offset);
+  println_abi(out, "  je 2f");
+  println_abi(out, "  mov (%%rcx), %%r8");
+  println_abi(out, "  mov %%r8, (%%rax)");
+  println_abi(out, "  add $8, %%rcx");
+  println_abi(out, "  add $8, %%rax");
+  println_abi(out, "  jmp 1b");
+  println_abi(out, "2:");
+
+  // Update alloca_bottom = alloca_bottom - %rdi
+  println_abi(out, "  sub %%rdi, %d(%%rbp)", fn->alloca_bottom->offset);
+  // Return value is the start of the newly allocated buffer (new alloca_bottom)
+  println_abi(out, "  mov %d(%%rbp), %%rax", fn->alloca_bottom->offset);
 }
 
 /*
@@ -694,6 +718,8 @@ static void win64_builtin_alloca(Obj *fn, FILE *out) {
 static void win64_emit_prologue(Obj *fn, FILE *out) {
   println_abi(out, "  push %%rbp");
   println_abi(out, "  mov %%rsp, %%rbp");
+  println_abi(out, "  push %%rdi");
+  println_abi(out, "  push %%rsi");
 
   /*
    * Windows requires stack probing for sufficiently large fixed stack
@@ -704,9 +730,9 @@ static void win64_emit_prologue(Obj *fn, FILE *out) {
    */
   if (fn->stack_size >= 4096) {
     println_abi(out, "  mov $%d, %%rax", fn->stack_size);
-    println_abi(out, "  call __chkstk");
+    println_abi(out, "  call ___chkstk_ms");
     println_abi(out, "  sub %%rax, %%rsp");
-  } else {
+  } else if (fn->stack_size > 0) {
     println_abi(
         out,
         "  sub $%d, %%rsp",
@@ -745,7 +771,7 @@ static void win64_emit_prologue(Obj *fn, FILE *out) {
    */
   int idx = 0;
 
-  for (Obj *var = fn->params; var; var = var->next, idx++) {
+  for (const Obj *var = fn->params; var; var = var->next, idx++) {
     if (idx >= WIN64_REG_MAX)
       break;
 
@@ -812,7 +838,7 @@ static void win64_emit_prologue(Obj *fn, FILE *out) {
    */
   idx = 0;
 
-  for (Obj *var = fn->params; var; var = var->next, idx++) {
+  for (const Obj *var = fn->params; var; var = var->next, idx++) {
     if (idx < WIN64_REG_MAX)
       continue;
 
@@ -820,7 +846,7 @@ static void win64_emit_prologue(Obj *fn, FILE *out) {
          var->ty->kind == TY_UNION) &&
         win64_returns_by_reference(var->ty)) {
 
-      int stack_off =
+      const int stack_off =
           48 + (idx - WIN64_REG_MAX) * 8;
 
       println_abi(
@@ -857,11 +883,11 @@ static void win64_emit_prologue(Obj *fn, FILE *out) {
   if (fn->va_area) {
     int named = 0;
 
-    for (Obj *var = fn->params; var; var = var->next)
+    for (const Obj *var = fn->params; var; var = var->next)
       named++;
 
-    int first_off = 16 + named * 8;
-    int off = fn->va_area->offset;
+    const int first_off = 16 + named * 8;
+    const int off = fn->va_area->offset;
 
     println_abi(out, "  movl $48, %d(%%rbp)", off);
     println_abi(out, "  movl $176, %d(%%rbp)", off + 4);
@@ -873,7 +899,9 @@ static void win64_emit_prologue(Obj *fn, FILE *out) {
 
 static void win64_emit_epilogue(Obj *fn, FILE *out) {
   println_abi(out, ".L.return.%s:", fn->name);
-  println_abi(out, "  mov %%rbp, %%rsp");
+  println_abi(out, "  lea -16(%%rbp), %%rsp");
+  println_abi(out, "  pop %%rsi");
+  println_abi(out, "  pop %%rdi");
   println_abi(out, "  pop %%rbp");
   println_abi(out, "  ret");
 }
@@ -885,6 +913,20 @@ static void win64_define_macros(void) {
   define_macro("_M_AMD64", "100");
   define_macro("__x86_64", "1");
   define_macro("__x86_64__", "1");
+  define_macro("__amd64", "1");
+  define_macro("__amd64__", "1");
+  define_macro("__SIZEOF_LONG__", "4");
+  define_macro("__SIZEOF_POINTER__", "8");
+  define_macro("__SIZEOF_PTRDIFF_T__", "8");
+  define_macro("__SIZEOF_SIZE_T__", "8");
+  define_macro("__SIZE_TYPE__", "unsigned long long");
+  define_macro("__PTRDIFF_TYPE__", "long long");
+  define_macro("__INTPTR_TYPE__", "long long");
+  define_macro("__UINTPTR_TYPE__", "unsigned long long");
+  define_macro("__INTMAX_TYPE__", "long long");
+  define_macro("__UINTMAX_TYPE__", "unsigned long long");
+  define_macro("__WCHAR_TYPE__", "unsigned short");
+  define_macro("__WINT_TYPE__", "unsigned short");
 }
 
 static void win64_init_types(void) {

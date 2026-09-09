@@ -1,3 +1,4 @@
+cmake_policy(SET CMP0076 NEW)
 cmake_minimum_required( VERSION 3.10 )
 project( chibicc C )
 set( CMAKE_C_STANDARD 11 )
@@ -36,3 +37,13 @@ target_sources(chibicc-cli PUBLIC win_src/glob.c win_src/wait.c win_src/win_shim
 
 target_include_directories(chibicc-cli PRIVATE win_includes)
 endif()
+
+add_custom_target(copy_headers ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_BINARY_DIR}/sdk/include
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_BINARY_DIR}/include
+)
+add_dependencies(chibicc-cli copy_headers)

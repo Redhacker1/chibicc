@@ -12,6 +12,10 @@ int main() {
   ASSERT(4, ({ enum { zero, five=5, three=3, four }; four; }));
   ASSERT(4, ({ enum { zero, one, two } x; sizeof(x); }));
   ASSERT(4, ({ enum t { zero, one, two }; enum t y; sizeof(y); }));
+  ASSERT(1, ({ enum __attribute__((__packed__)) { ep0, ep1 } x; ep1; }));
+  ASSERT(1, ({ enum __attribute__((packed)) te1 { ea, eb }; eb; }));
+  ASSERT(1, ({ enum te2 __attribute__((__packed__)) { ec, ed }; ed; }));
+  ASSERT(1, ({ typedef enum __attribute__((__packed__)) { ee, ef } te3; ef; }));
 
   printf("OK\n");
   return 0;

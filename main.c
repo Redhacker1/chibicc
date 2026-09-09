@@ -1,5 +1,17 @@
 #include "chibicc.h"
 
+#ifdef _WIN32
+#include <windows.h>
+
+static LONG WINAPI crash_handler(EXCEPTION_POINTERS *ExceptionInfo) {
+  fprintf(stderr, "Fatal error: chibicc crashed with exception code 0x%08lX at address %p\n",
+          (unsigned long)ExceptionInfo->ExceptionRecord->ExceptionCode,
+          ExceptionInfo->ExceptionRecord->ExceptionAddress);
+  fflush(stderr);
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
 typedef enum
 {
   FILE_NONE, FILE_C, FILE_ASM, FILE_OBJ, FILE_AR, FILE_DSO,
@@ -30,10 +42,10 @@ static StringArray ld_extra_args;
 static StringArray std_include_paths;
 
 char *base_file;
-static char *output_file;
+static char *cc1_output_file;
 
 static StringArray input_paths;
-static StringArray tmpfiles;
+StringArray tmpfiles;
 
 static void usage(const int status) {
   fprintf(stderr, "chibicc [ -o <path> ] <file>\n");
@@ -335,7 +347,7 @@ static void parse_args(const int argc, char **argv) {
     }
 
     if (!strcmp(argv[i], "-cc1-output")) {
-      output_file = argv[++i];
+      cc1_output_file = argv[++i];
       continue;
     }
 
@@ -432,7 +444,7 @@ static char *replace_extn(const char *tmpl, char *extn) {
 
 static void cleanup(void) {
   for (int i = 0; i < tmpfiles.len; i++)
-    unlink(tmpfiles.data[i]);
+    remove(tmpfiles.data[i]);
 }
 
 #ifdef _WIN32
@@ -681,7 +693,7 @@ static void cc1(void) {
 #endif
 
   // Write the assembly text to a file.
-  FILE *out = open_file(output_file);
+  FILE *out = open_file(cc1_output_file);
   fwrite(buf, buflen, 1, out);
   fclose(out);
 
@@ -691,7 +703,7 @@ static void cc1(void) {
 }
 
 static void assemble(char *input, char *output) {
-  char *cmd[] = {"as", "-c", input, "-o", output, NULL};
+  char *cmd[] = {"as", input, "-o", output, NULL};
   run_subprocess(cmd);
 }
 
@@ -822,6 +834,9 @@ static FileType get_file_type(char *filename) {
 
 int main(const int argc, char **argv)
 {
+#ifdef _WIN32
+  // SetUnhandledExceptionFilter(crash_handler);
+#endif
   atexit(cleanup);
   init_all_targets_and_abis();
   init_macros();

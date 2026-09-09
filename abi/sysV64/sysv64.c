@@ -1007,7 +1007,7 @@ static void sysv64_builtin_alloca(Obj *fn, FILE *out) {
    * Align size to 16 bytes.
    */
   println_abi(out, "  add $15, %%rdi");
-  println_abi(out, "  and $0xfffffff0, %%rdi");
+  println_abi(out, "  and $-16, %%rdi");
 
   /*
    * Shift the temporary area by %rdi.

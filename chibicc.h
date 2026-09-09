@@ -64,6 +64,8 @@ typedef struct {
 
 void strarray_push(StringArray *arr, char *s);
 char *format(char *fmt, ...) __attribute__((format(printf, 1, 2)));
+extern StringArray tmpfiles;
+char *create_tmpfile(void);
 
 //
 // tokenize.c

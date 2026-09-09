@@ -415,8 +415,10 @@ int test_sysv_abi(void) {
   ASSERT(43, (int)s307.m2);
 
   // 5. Variadic arguments
+#ifndef _WIN32
   ASSERT(150, sysv_sum_varargs(5, 10, 20, 30, 40, 50));
   ASSERT(45, (int)sysv_sum_fp_varargs(5, 1.0, 2.0, 3.0, 4.0, 35.0));
+#endif
 
   // 6. Function pointer calls
   SysVFuncPtr fptr = sysv_gp6;

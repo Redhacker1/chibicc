@@ -5,7 +5,6 @@
 #include "chibicc.h"
 
 #ifdef _WIN32
-StringArray tmpfiles;
 void error(char *fmt, ...);
 
 char *create_tmpfile(void)
@@ -97,10 +96,13 @@ bool run_subprocess(char **argv)
         &pi
     );
 
-    free(command_line);
-
-    if (!ok)
+    if (!ok) {
+        fprintf(stderr, "CreateProcess failed: %lu for command: %s\n", GetLastError(), command_line);
+        free(command_line);
         return false;
+    }
+
+    free(command_line);
 
     WaitForSingleObject(pi.hProcess, INFINITE);
 
@@ -111,7 +113,10 @@ bool run_subprocess(char **argv)
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
 
-    return exit_code == 0;
+    if (exit_code != 0)
+        exit(exit_code);
+
+    return true;
 }
 
 #endif
