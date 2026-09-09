@@ -65,12 +65,22 @@ static void add_default_include_paths(char *argv0) {
     strarray_push(&std_include_paths, include_paths.data[i]);
 }
 
-static void define(char *str) {
+static void define(char *str) 
+{
+
+#ifndef _WIN32
   char *eq = strchr(str, '=');
   if (eq)
     define_macro(strndup(str, eq - str), eq + 1);
   else
     define_macro(str, "1");
+#else
+  char *eq = strchr(str, '=');
+  if (eq)
+    define_macro(chibicc_strndup(str, eq - str), eq + 1);
+  else
+    define_macro(str, "1");
+#endif
 }
 
 static FileType parse_opt_x(char *s) {
@@ -377,17 +387,34 @@ static void cleanup(void) {
     unlink(tmpfiles.data[i]);
 }
 
-static char *create_tmpfile(void) {
+#ifdef _WIN32
+
+char *create_tmpfile(void);
+
+#else
+
+static char *create_tmpfile(void)
+{
   char *path = strdup("/tmp/chibicc-XXXXXX");
+
   int fd = mkstemp(path);
+
   if (fd == -1)
     error("mkstemp failed: %s", strerror(errno));
+
   close(fd);
 
   strarray_push(&tmpfiles, path);
   return path;
 }
 
+#endif
+
+#ifdef _WIN32
+// Windows Subprocess implementation.
+bool run_subprocess(char **argv);
+#else
+// POSIX version of run_subprocess() for Linux and macOS.
 static void run_subprocess(char **argv) {
   // If -### is given, dump the subprocess's command line.
   if (opt_hash_hash_hash) {
@@ -410,6 +437,7 @@ static void run_subprocess(char **argv) {
   if (status != 0)
     exit(1);
 }
+#endif
 
 static void run_cc1(int argc, char **argv, char *input, char *output) {
   char **args = calloc(argc + 10, sizeof(char *));
@@ -555,16 +583,57 @@ static void cc1(void) {
   // Open a temporary output buffer.
   char *buf;
   size_t buflen;
+
+#ifdef _WIN32
+  FILE *output_buf = tmpfile();
+#else
   FILE *output_buf = open_memstream(&buf, &buflen);
+#endif
+
+  if (!output_buf)
+    error("failed to create temporary output buffer");
 
   // Traverse the AST to emit assembly.
   codegen(prog, output_buf);
-  fclose(output_buf);
 
-  // Write the asembly text to a file.
+#ifdef _WIN32
+  // tmpfile() doesn't give us a memory buffer, so read the file back.
+  fflush(output_buf);
+
+  if (fseek(output_buf, 0, SEEK_END) != 0)
+    error("failed to seek temporary output buffer");
+
+  long file_size = ftell(output_buf);
+  if (file_size < 0)
+    error("failed to determine temporary output buffer size");
+
+  buflen = (size_t)file_size;
+
+  if (fseek(output_buf, 0, SEEK_SET) != 0)
+    error("failed to rewind temporary output buffer");
+
+  buf = malloc(buflen + 1);
+  if (!buf)
+    error("out of memory");
+
+  if (fread(buf, 1, buflen, output_buf) != buflen)
+    error("failed to read temporary output buffer");
+
+  buf[buflen] = '\0';
+
+  fclose(output_buf);
+#else
+  fclose(output_buf);
+#endif
+
+  // Write the assembly text to a file.
   FILE *out = open_file(output_file);
   fwrite(buf, buflen, 1, out);
   fclose(out);
+
+#ifdef _WIN32
+  free(buf);
+#endif
 }
 
 static void assemble(char *input, char *output) {

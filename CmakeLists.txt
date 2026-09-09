@@ -1,0 +1,28 @@
+cmake_minimum_required( VERSION 3.10 )
+project( chibicc C )
+set( CMAKE_C_STANDARD 11 )
+
+add_executable(chibicc-cli
+	main.c
+	codegen.c
+	hashmap.c
+	parse.c
+	preprocess.c
+	strings.c
+	tokenize.c
+	type.c
+	unicode.c
+)
+
+target_include_directories(chibicc-cli PRIVATE host_include_86 compiler_includes)
+
+if(WIN32)
+
+target_sources(chibicc-cli PUBLIC
+	win_src/glob.c
+	win_src/wait.c
+	win_src/win_shims.c
+)
+
+target_include_directories(chibicc-cli PRIVATE win_includes)
+end

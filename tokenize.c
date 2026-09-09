@@ -637,7 +637,8 @@ Token *tokenize(File *file) {
 }
 
 // Returns the contents of a given file.
-static char *read_file(char *path) {
+static char *read_file(char *path)
+{
   FILE *fp;
 
   if (strcmp(path, "-") == 0) {
@@ -651,7 +652,15 @@ static char *read_file(char *path) {
 
   char *buf;
   size_t buflen;
+
+#ifdef _WIN32
+  FILE *out = tmpfile();
+#else
   FILE *out = open_memstream(&buf, &buflen);
+#endif
+
+  if (!out)
+    error("failed to create temporary output buffer");
 
   // Read the entire file.
   for (;;) {
@@ -659,19 +668,59 @@ static char *read_file(char *path) {
     int n = fread(buf2, 1, sizeof(buf2), fp);
     if (n == 0)
       break;
+
     fwrite(buf2, 1, n, out);
   }
 
   if (fp != stdin)
     fclose(fp);
 
+#ifdef _WIN32
+  fflush(out);
+
+  if (fseek(out, 0, SEEK_END) != 0)
+    error("failed to seek temporary output buffer");
+
+  long file_size = ftell(out);
+  if (file_size < 0)
+    error("failed to determine temporary output buffer size");
+
+  buflen = (size_t)file_size;
+
+  if (fseek(out, 0, SEEK_SET) != 0)
+    error("failed to rewind temporary output buffer");
+
+  buf = malloc(buflen + 2);
+  if (!buf)
+    error("out of memory");
+
+  if (buflen > 0 && fread(buf, 1, buflen, out) != buflen)
+    error("failed to read temporary output buffer");
+
+  fclose(out);
+#else
+
   // Make sure that the last line is properly terminated with '\n'.
   fflush(out);
   if (buflen == 0 || buf[buflen - 1] != '\n')
     fputc('\n', out);
+
   fputc('\0', out);
   fclose(out);
+
   return buf;
+
+#endif
+
+#ifdef _WIN32
+  // Make sure that the last line is properly terminated with '\n'.
+  if (buflen == 0 || buf[buflen - 1] != '\n')
+    buf[buflen++] = '\n';
+
+  buf[buflen++] = '\0';
+
+  return buf;
+#endif
 }
 
 File **get_input_files(void) {

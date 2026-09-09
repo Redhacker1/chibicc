@@ -25,6 +25,27 @@
 # define __attribute__(x)
 #endif
 
+#ifdef _WIN32
+static char *chibicc_strndup(const char *s, size_t n)
+{
+    size_t len = strlen(s);
+
+    if (len > n)
+        len = n;
+
+    char *p = malloc(len + 1);
+    if (!p)
+        return NULL;
+
+    memcpy(p, s, len);
+    p[len] = '\0';
+
+    return p;
+}
+
+#define strndup chibicc_strndup
+#endif
+
 typedef struct Type Type;
 typedef struct Node Node;
 typedef struct Member Member;
