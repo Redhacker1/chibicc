@@ -118,6 +118,7 @@ static Type *typeof_specifier(Token **rest, Token *tok);
 static Type *type_suffix(Token **rest, Token *tok, Type *ty);
 static Type *declarator(Token **rest, Token *tok, Type *ty);
 static Node *declaration(Token **rest, Token *tok, Type *basety, VarAttr *attr);
+static void static_assertion(Token **rest, Token *tok);
 static void array_initializer2(Token **rest, Token *tok, Initializer *init, int i);
 static void struct_initializer2(Token **rest, Token *tok, Initializer *init, Member *mem);
 static void initializer2(Token **rest, Token *tok, Initializer *init);
@@ -1050,8 +1051,13 @@ static Type *enum_specifier(Token **rest, Token *tok) {
     if (i++ > 0)
       tok = skip(tok, ",");
 
+    Token *tok_id = tok;
     char *name = get_ident(tok);
     tok = tok->next;
+
+    VarScope *sc_exist = hashmap_get2(&scope->vars, tok_id->loc, tok_id->len);
+    if (sc_exist && (sc_exist->var || sc_exist->enum_ty))
+      error_tok(tok_id, "redefinition of enumerator '%s'", name);
 
     if (equal(tok, "="))
       val = const_expr(&tok, tok->next);
@@ -1065,8 +1071,12 @@ static Type *enum_specifier(Token **rest, Token *tok) {
   *rest = consume_attributes(*rest, &attr_post);
   apply_attr_to_type(ty, &attr_post);
 
-  if (tag)
+  if (tag) {
+    Type *ty2 = hashmap_get2(&scope->tags, tag->loc, tag->len);
+    if (ty2)
+      error_tok(tag, "redefinition of enum '%s'", get_ident(tag));
     push_tag_scope(tag, ty);
+  }
   return ty;
 }
 
@@ -1136,10 +1146,15 @@ static Node *declaration(Token **rest, Token *tok, Type *basety, VarAttr *attr) 
     tok = consume_attributes(tok, attr);
     apply_attr_to_type(ty, attr);
 
+    char *name = get_ident(ty->name);
+    VarScope *sc = hashmap_get2(&scope->vars, ty->name->loc, ty->name->len);
+    if (sc && sc->var)
+      error_tok(ty->name, "redefinition of '%s'", name);
+
     if (attr && attr->is_static) {
       // static local variable
       Obj *var = new_anon_gvar(ty);
-      push_scope(get_ident(ty->name))->var = var;
+      push_scope(name)->var = var;
       if (equal(tok, "="))
         gvar_initializer(&tok, tok->next, var);
       continue;
@@ -1157,7 +1172,7 @@ static Node *declaration(Token **rest, Token *tok, Type *basety, VarAttr *attr) 
       // Variable length arrays (VLAs) are translated to alloca() calls.
       // For example, `int x[n+2]` is translated to `tmp = n + 2,
       // x = alloca(tmp)`.
-      Obj *var = new_lvar(get_ident(ty->name), ty);
+      Obj *var = new_lvar(name, ty);
       Token *tok = ty->name;
       Node *expr = new_binary(ND_ASSIGN, new_vla_ptr(var, tok),
                               new_alloca(new_var_node(ty->vla_size, tok)),
@@ -1167,7 +1182,7 @@ static Node *declaration(Token **rest, Token *tok, Type *basety, VarAttr *attr) 
       continue;
     }
 
-    Obj *var = new_lvar(get_ident(ty->name), ty);
+    Obj *var = new_lvar(name, ty);
     if (attr && attr->asm_name)
       var->name = attr->asm_name;
     if (attr && attr->align)
@@ -2086,6 +2101,11 @@ static Node *compound_stmt(Token **rest, Token *tok) {
   enter_scope();
 
   while (!equal(tok, "}")) {
+    if (equal(tok, "_Static_assert") || equal(tok, "static_assert")) {
+      static_assertion(&tok, tok);
+      continue;
+    }
+
     if (is_typename(tok) && !equal(tok->next, ":")) {
       VarAttr attr = {};
       Type *basety = declspec(&tok, tok, &attr);
@@ -2903,6 +2923,15 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
       mem->idx = idx++;
       mem->align = attr.align ? attr.align : mem->ty->align;
 
+      if (mem->name) {
+        for (Member *m = head.next; m; m = m->next) {
+          if (m != mem && m->name && m->name->len == mem->name->len &&
+              !strncmp(m->name->loc, mem->name->loc, mem->name->len)) {
+            error_tok(mem->name, "duplicate member '%s'", get_ident(mem->name));
+          }
+        }
+      }
+
       if (consume(&tok, tok, ":")) {
         mem->is_bitfield = true;
         mem->bit_width = const_expr(&tok, tok);
@@ -2969,9 +2998,9 @@ static Type *struct_union_decl(Token **rest, Token *tok) {
     ty->align = attr2.align;
 
   if (tag) {
-    // If this is a redefinition, overwrite a previous type.
-    // Otherwise, register the struct type.
     Type *ty2 = hashmap_get2(&scope->tags, tag->loc, tag->len);
+    if (ty2 && ty2->size >= 0)
+      error_tok(tag, "redefinition of struct or union '%s'", get_ident(tag));
     if (ty2) {
       *ty2 = *ty;
       return ty2;
@@ -3738,7 +3767,11 @@ static void create_param_lvars(Type *param) {
     create_param_lvars(param->next);
     if (!param->name)
       error_tok(param->name_pos, "parameter name omitted");
-    new_lvar(get_ident(param->name), param);
+    char *name = get_ident(param->name);
+    VarScope *sc = hashmap_get2(&scope->vars, param->name->loc, param->name->len);
+    if (sc && sc->var)
+      error_tok(param->name, "duplicate parameter '%s'", name);
+    new_lvar(name, param);
   }
 }
 
@@ -3888,7 +3921,45 @@ static Token *global_variable(Token *tok, Type *basety, VarAttr *attr) {
     tok = consume_attributes(tok, attr);
     apply_attr_to_type(ty, attr);
 
-    Obj *var = new_gvar(get_ident(ty->name), ty);
+    char *name = get_ident(ty->name);
+    VarScope *sc = find_var(ty->name);
+    if (sc && sc->var) {
+      Obj *var = sc->var;
+      if (var->is_function)
+        error_tok(ty->name, "redeclared as a different kind of symbol");
+      if (!is_compatible(var->ty, ty))
+        error_tok(ty->name, "conflicting types for '%s'", name);
+      if (!var->is_static && attr->is_static)
+        error_tok(ty->name, "static declaration follows a non-static declaration");
+      if (var->is_static && !attr->is_static && !attr->is_extern)
+        error_tok(ty->name, "non-static declaration follows a static declaration");
+
+      // Complete array type if previous declaration had incomplete array length
+      if (var->ty->kind == TY_ARRAY && var->ty->array_len < 0 && ty->kind == TY_ARRAY && ty->array_len >= 0) {
+        var->ty = ty;
+      }
+
+      bool was_def = var->is_definition && !var->is_tentative;
+
+      if (!attr->is_extern) {
+        var->is_definition = true;
+        if (!attr->is_static)
+          var->is_static = false;
+      }
+
+      if (equal(tok, "=")) {
+        if (was_def && !var->is_static)
+          error_tok(ty->name, "redefinition of '%s'", name);
+        var->is_definition = true;
+        var->is_tentative = false;
+        gvar_initializer(&tok, tok->next, var);
+      } else if (!var->init_data && !attr->is_extern && !attr->is_tls && !was_def) {
+        var->is_tentative = true;
+      }
+      continue;
+    }
+
+    Obj *var = new_gvar(name, ty);
     var->is_definition = !attr->is_extern;
     var->is_static = attr->is_static;
     var->is_tls = attr->is_tls;
@@ -3991,6 +4062,21 @@ static void declare_builtin_types(void) {
   push_scope("__va_elem")->type_def = va_elem;
 }
 
+static void static_assertion(Token **rest, Token *tok) {
+  Token *start = tok;
+  tok = skip(tok->next, "(");
+  int64_t val = const_expr(&tok, tok);
+  tok = skip(tok, ",");
+  if (tok->kind != TK_STR)
+    error_tok(tok, "expected string literal in _Static_assert");
+  tok = tok->next;
+  tok = skip(tok, ")");
+  *rest = skip(tok, ";");
+
+  if (!val)
+    error_tok(start, "static assertion failed");
+}
+
 // program = (typedef | function-definition | global-variable)*
 Obj *parse(Token *tok) {
   scope = &(Scope){};
@@ -4006,6 +4092,11 @@ Obj *parse(Token *tok) {
 
     if (equal(tok, "asm") || equal(tok, "__asm__") || equal(tok, "__asm")) {
       asm_stmt(&tok, tok);
+      continue;
+    }
+
+    if (equal(tok, "_Static_assert") || equal(tok, "static_assert")) {
+      static_assertion(&tok, tok);
       continue;
     }
 

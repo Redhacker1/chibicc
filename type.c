@@ -84,8 +84,7 @@ bool is_compatible(Type *t1, Type *t2) {
   case TY_ARRAY:
     if (!is_compatible(t1->base, t2->base))
       return false;
-    return t1->array_len < 0 && t2->array_len < 0 &&
-           t1->array_len == t2->array_len;
+    return t1->array_len < 0 || t2->array_len < 0 || t1->array_len == t2->array_len;
   }
   return false;
 }
