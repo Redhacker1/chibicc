@@ -117,33 +117,15 @@ void regalloc_function(IRFunction *fn, const RegAllocPool *pool) {
       v->phys_reg = allocated_reg;
       v->is_spilled = false;
     } else {
-      // Spill to stack slot (reuse expired slots if available)
+      // Spill to distinct stack slot
       int sz = v->ty ? v->ty->size : 8;
       int align = v->ty ? v->ty->align : 8;
       if (sz < 8) sz = 8;
       if (align < 8) align = 8;
 
-      int found_slot = -1;
-      for (int s = 0; s < num_slots; s++) {
-        if (slots[s].last_use_pos < v->def_pos && slots[s].size >= sz) {
-          found_slot = s;
-          break;
-        }
-      }
-
-      if (found_slot >= 0) {
-        v->spill_offset = slots[found_slot].offset;
-        slots[found_slot].last_use_pos = v->last_use_pos;
-      } else {
-        spill_offset += sz;
-        spill_offset = align_to(spill_offset, align);
-        v->spill_offset = -spill_offset;
-        slots[num_slots].offset = -spill_offset;
-        slots[num_slots].size = sz;
-        slots[num_slots].last_use_pos = v->last_use_pos;
-        num_slots++;
-      }
-
+      spill_offset += sz;
+      spill_offset = align_to(spill_offset, align);
+      v->spill_offset = -spill_offset;
       v->phys_reg = -1;
       v->is_spilled = true;
     }

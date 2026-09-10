@@ -669,6 +669,24 @@ bool ir_opt_const_fold(IRFunction *fn) {
         insn->src2 = NULL;
         changed = true;
       }
+    } else if ((insn->kind == IR_EQ || insn->kind == IR_LE || insn->kind == IR_GE) &&
+               insn->dst && insn->src1 && insn->src2 && insn->src1 == insn->src2 &&
+               !insn->src1->is_float) {
+      insn->kind = IR_IMM;
+      insn->imm = 1;
+      insn->src1 = insn->src2 = NULL;
+      is_const[insn->dst->id] = true;
+      const_vals[insn->dst->id] = 1;
+      changed = true;
+    } else if ((insn->kind == IR_NE || insn->kind == IR_LT || insn->kind == IR_GT) &&
+               insn->dst && insn->src1 && insn->src2 && insn->src1 == insn->src2 &&
+               !insn->src1->is_float) {
+      insn->kind = IR_IMM;
+      insn->imm = 0;
+      insn->src1 = insn->src2 = NULL;
+      is_const[insn->dst->id] = true;
+      const_vals[insn->dst->id] = 0;
+      changed = true;
     }
   }
 

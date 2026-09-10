@@ -21,36 +21,138 @@ static void compute_materialization(LLIRFunction *fn) {
   for (int i = 0; i < fn->num_vregs; i++)
     current_needs_mat[i] = true;
 
-  for (int i = 0; i < fn->num_vregs; i++) {
-    LLIRVReg *v = fn->vregs[i];
-    if (!v || !v->def_insn)
-      continue;
+  int *use_count = calloc(fn->num_vregs, sizeof(int));
+  for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
+    if (insn->src1) use_count[insn->src1->id]++;
+    if (insn->src2) use_count[insn->src2->id]++;
+    if (insn->src3) use_count[insn->src3->id]++;
+    for (int a = 0; a < insn->num_args; a++) {
+      if (insn->args[a]) use_count[insn->args[a]->id]++;
+    }
+  }
 
-    if (v->def_insn->kind == LLIR_LEA && v->def_insn->var) {
-      bool all_uses_foldable = true;
-      for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
-        if (insn->src1 == v) {
-          if (insn->kind != LLIR_LOAD && insn->kind != LLIR_STORE) {
-            all_uses_foldable = false;
-            break;
+  // Iteratively identify folded address computations and dead pure vregs
+  bool changed = true;
+  while (changed) {
+    changed = false;
+
+    // 1. Foldable ADD / SUB offset calculations
+    for (int i = 0; i < fn->num_vregs; i++) {
+      LLIRVReg *v = fn->vregs[i];
+      if (!v || !v->def_insn || !current_needs_mat[v->id])
+        continue;
+
+      LLIRInsn *def = v->def_insn;
+      if (def->kind == LLIR_ADD && def->src1 && def->src2) {
+        LLIRInsn *d1 = def->src1->def_insn;
+        LLIRInsn *d2 = def->src2->def_insn;
+        LLIRVReg *base = NULL;
+        LLIRVReg *imm_vreg = NULL;
+        if (d2 && d2->kind == LLIR_IMM) {
+          base = def->src1;
+          imm_vreg = def->src2;
+        } else if (d1 && d1->kind == LLIR_IMM) {
+          base = def->src2;
+          imm_vreg = def->src1;
+        }
+
+        if (base && imm_vreg) {
+          bool all_uses_mem = true;
+          for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
+            if (insn->src1 == v) {
+              if (insn->kind != LLIR_LOAD && insn->kind != LLIR_STORE) {
+                all_uses_mem = false;
+                break;
+              }
+            }
+            if (insn->src2 == v || insn->src3 == v) {
+              all_uses_mem = false;
+              break;
+            }
+            for (int a = 0; a < insn->num_args; a++) {
+              if (insn->args[a] == v) {
+                all_uses_mem = false;
+                break;
+              }
+            }
           }
-        }
-        if (insn->src2 == v || insn->src3 == v) {
-          all_uses_foldable = false;
-          break;
-        }
-        for (int a = 0; a < insn->num_args; a++) {
-          if (insn->args[a] == v) {
-            all_uses_foldable = false;
-            break;
+
+          if (all_uses_mem) {
+            current_needs_mat[v->id] = false;
+            changed = true;
           }
         }
       }
 
-      if (all_uses_foldable)
-        current_needs_mat[v->id] = false;
+      // 2. Foldable LEA of variables
+      if (def->kind == LLIR_LEA && def->var) {
+        bool all_uses_foldable = true;
+        for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
+          if (insn->src1 == v) {
+            if (insn->kind != LLIR_LOAD && insn->kind != LLIR_STORE) {
+              // Could be used in a non-materialized ADD
+              if (insn->kind == LLIR_ADD && insn->dst && !current_needs_mat[insn->dst->id]) {
+                // folded
+              } else {
+                all_uses_foldable = false;
+                break;
+              }
+            }
+          }
+          if (insn->src2 == v) {
+            if (insn->kind == LLIR_ADD && insn->dst && !current_needs_mat[insn->dst->id]) {
+              // folded
+            } else {
+              all_uses_foldable = false;
+              break;
+            }
+          }
+          if (insn->src3 == v) {
+            all_uses_foldable = false;
+            break;
+          }
+          for (int a = 0; a < insn->num_args; a++) {
+            if (insn->args[a] == v) {
+              all_uses_foldable = false;
+              break;
+            }
+          }
+        }
+
+        if (all_uses_foldable) {
+          current_needs_mat[v->id] = false;
+          changed = true;
+        }
+      }
+
+      // 3. Foldable IMM used only in folded address ADD
+      if (def->kind == LLIR_IMM) {
+        bool all_uses_folded = true;
+        for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
+          if (insn->src1 == v || insn->src2 == v || insn->src3 == v) {
+            if (insn->kind == LLIR_ADD && insn->dst && !current_needs_mat[insn->dst->id]) {
+              // folded into an unmaterialized address ADD
+            } else {
+              all_uses_folded = false;
+              break;
+            }
+          }
+          for (int a = 0; a < insn->num_args; a++) {
+            if (insn->args[a] == v) {
+              all_uses_folded = false;
+              break;
+            }
+          }
+        }
+        if (all_uses_folded) {
+          current_needs_mat[v->id] = false;
+          changed = true;
+        }
+      }
     }
   }
+
+  free(use_count);
 }
 
 static void gen_expr(Node *node, FILE *out);
@@ -2582,6 +2684,38 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
     return;
 
   (void)out;
+
+  if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id]) {
+    switch (insn->kind) {
+    case LLIR_IMM:
+    case LLIR_FIMM:
+    case LLIR_LEA:
+    case LLIR_MOV:
+    case LLIR_CAST:
+    case LLIR_ADD:
+    case LLIR_SUB:
+    case LLIR_MUL:
+    case LLIR_DIV:
+    case LLIR_MOD:
+    case LLIR_AND:
+    case LLIR_OR:
+    case LLIR_XOR:
+    case LLIR_SHL:
+    case LLIR_SHR:
+    case LLIR_NEG:
+    case LLIR_NOT:
+    case LLIR_LOGNOT:
+    case LLIR_CMP_EQ:
+    case LLIR_CMP_NE:
+    case LLIR_CMP_LT:
+    case LLIR_CMP_LE:
+    case LLIR_CMP_GT:
+    case LLIR_CMP_GE:
+      return;
+    default:
+      break;
+    }
+  }
 
   switch (insn->kind) {
   case LLIR_NOP:
