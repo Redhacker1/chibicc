@@ -177,8 +177,7 @@ typedef enum {
   LLIR_ALLOCA,         // %dst = alloca(%src1)
   LLIR_ASM,            // inline asm string
   LLIR_CAS,            // cas(%addr=%src1, %old=%src2, %new=%src3)
-  LLIR_EXCH
-  bool is_spilled;,           // exch(%addr=%src1, %val=%src2)
+  LLIR_EXCH,           // exch(%addr=%src1, %val=%src2)
 } LLIRKind;
 
 typedef struct LLIRVReg LLIRVReg;
@@ -197,6 +196,10 @@ struct LLIRVReg {
   int spill_offset;    // Stack frame spill slot
   bool is_float;
   bool is_pinned;
+  bool is_spilled;
+  bool is_struct_val;
+  int struct_size;
+  Type *struct_ty;
 };
 
 struct LLIRInsn {

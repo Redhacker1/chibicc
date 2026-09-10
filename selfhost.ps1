@@ -104,7 +104,7 @@ function Build-Stage([string]$StageCompiler, [string]$BuildDir, [string]$TargetE
 
     $outPath = "$BuildDir\$TargetExeName"
     Write-Host "`n--- Linking $outPath ---" -ForegroundColor Cyan
-    gcc $objFiles -o $outPath
+    gcc $objFiles "-Wl,--stack,16777216" -o $outPath
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Link failed for $outPath."
         exit 1

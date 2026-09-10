@@ -10,6 +10,7 @@ typedef struct Type Type;
 typedef struct Node Node;
 typedef struct Obj Obj;
 typedef struct ABI ABI;
+typedef struct LLIRInsn LLIRInsn;
 
 struct ABI {
   const char *name;
@@ -59,6 +60,10 @@ struct ABI {
   // Local variable and parameter layout calculation
   void (*assign_lvar_offsets)(Obj *prog);
 
+  // Stack frame layout and register spilling queries
+  int (*get_spill_base)(Obj *fn);
+  void (*finalize_stack)(Obj *fn, int spill_offset);
+
   // Function call parameter pushing / preparation. Returns stack depth words added.
   int (*push_args)(Node *node, FILE *out, int *depth);
 
@@ -73,15 +78,26 @@ struct ABI {
   // Pre-call hook (e.g. setting %al for SysV variadic calls)
   void (*pre_call)(Node *node, FILE *out);
 
+  // Variadic argument builtins
+  Node *(*builtin_va_start)(Node *ap, Node *last, Token *tok);
+  Node *(*builtin_va_arg)(Node *ap, Type *ty, Token *tok);
+  Node *(*builtin_va_copy)(Node *dest, Node *src, Token *tok);
+  Node *(*builtin_va_end)(Node *ap, Token *tok);
+
   // Function prologue & epilogue helpers
   void (*emit_prologue)(Obj *fn, FILE *out);
   void (*emit_epilogue)(Obj *fn, FILE *out);
+  void (*emit_return)(Obj *fn, Type *return_ty, FILE *out);
+  void (*emit_call)(LLIRInsn *insn, FILE *out);
 
   // Preprocessor macro definitions
   void (*define_macros)(void);
 
   // Type initialization
   void (*init_types)(void);
+
+  // Builtin types and declarations
+  void (*declare_builtin_types)(void);
 };
 
 extern ABI *current_abi;
@@ -90,6 +106,7 @@ void register_abi(ABI *abi);
 ABI *get_abi(const char *name);
 void init_abis(void);
 void set_abi(const char *name);
+void declare_abi_builtin_types(void);
 
 // Standard ABI instances
 extern ABI abi_sysv64;

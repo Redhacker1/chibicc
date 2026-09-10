@@ -328,7 +328,26 @@ struct Node {
   long double fval;
 };
 
+typedef struct VarScope VarScope;
+struct VarScope {
+  Obj *var;
+  Type *type_def;
+  Type *enum_ty;
+  int enum_val;
+};
+
 Node *new_cast(Node *expr, Type *ty);
+Node *new_node(NodeKind kind, Token *tok);
+Node *new_binary(NodeKind kind, Node *lhs, Node *rhs, Token *tok);
+Node *new_unary(NodeKind kind, Node *expr, Token *tok);
+Node *new_num(int64_t val, Token *tok);
+Node *new_ulong(long val, Token *tok);
+Node *new_var_node(Obj *var, Token *tok);
+Node *new_add(Node *lhs, Node *rhs, Token *tok);
+Node *new_sub(Node *lhs, Node *rhs, Token *tok);
+Obj *new_lvar(char *name, Type *ty);
+VarScope *find_var(Token *tok);
+VarScope *push_scope(char *name);
 int64_t const_expr(Token **rest, Token *tok);
 Obj *parse(Token *tok);
 

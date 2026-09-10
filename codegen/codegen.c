@@ -102,8 +102,6 @@ void codegen(Obj *prog, FILE *out) {
   // 3. Emit target machine assembly from Low-Level IR
   if (current_codegen->codegen_llir)
     current_codegen->codegen_llir(llir, out);
-  else if (current_codegen->codegen)
-    current_codegen->codegen(prog, out);
   else
     error("active codegen backend has no entry point");
 }

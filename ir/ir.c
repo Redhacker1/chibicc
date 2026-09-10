@@ -175,22 +175,8 @@ static void gen_stmt_ir(IRFunction *fn, Node *node);
 
 static IRVReg *gen_addr_ir(IRFunction *fn, Node *node) {
   switch (node->kind) {
-  case ND_VAR: {
-    if (node->var->ty->kind == TY_VLA) {
-      IRVReg *addr_var = ir_new_vreg(fn, pointer_to(node->var->ty));
-      IRInsn *addr_insn = ir_new_insn(IR_ADDR);
-      addr_insn->dst = addr_var;
-      addr_insn->var = node->var;
-      ir_append_insn(fn, addr_insn);
-
-      IRVReg *dst = ir_new_vreg(fn, pointer_to(node->var->ty));
-      IRInsn *load_insn = ir_new_insn(IR_LOAD);
-      load_insn->dst = dst;
-      load_insn->src1 = addr_var;
-      load_insn->ty = pointer_to(node->var->ty);
-      ir_append_insn(fn, load_insn);
-      return dst;
-    }
+  case ND_VAR:
+  case ND_VLA_PTR: {
     IRVReg *dst = ir_new_vreg(fn, pointer_to(node->var->ty));
     IRInsn *insn = ir_new_insn(IR_ADDR);
     insn->dst = dst;
@@ -224,6 +210,31 @@ static IRVReg *gen_addr_ir(IRFunction *fn, Node *node) {
   case ND_FUNCALL:
     if (node->ret_buffer)
       return gen_expr_ir(fn, node);
+    if (node->ty && (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION)) {
+      IRVReg *val = gen_expr_ir(fn, node);
+      Obj *tmp = calloc(1, sizeof(Obj));
+      tmp->name = "";
+      tmp->ty = node->ty;
+      tmp->is_local = true;
+      tmp->align = node->ty->align;
+      if (fn->fn_obj) {
+        tmp->next = fn->fn_obj->locals;
+        fn->fn_obj->locals = tmp;
+      }
+
+      IRVReg *tmp_addr = ir_new_vreg(fn, pointer_to(node->ty));
+      IRInsn *addr_insn = ir_new_insn(IR_ADDR);
+      addr_insn->dst = tmp_addr;
+      addr_insn->var = tmp;
+      ir_append_insn(fn, addr_insn);
+
+      IRInsn *store = ir_new_insn(IR_STORE);
+      store->src1 = tmp_addr;
+      store->src2 = val;
+      store->ty = node->ty;
+      ir_append_insn(fn, store);
+      return tmp_addr;
+    }
     break;
   case ND_STMT_EXPR:
     for (Node *n = node->body; n; n = n->next) {
@@ -237,14 +248,6 @@ static IRVReg *gen_addr_ir(IRFunction *fn, Node *node) {
     if (node->ty && (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION))
       return gen_expr_ir(fn, node);
     break;
-  case ND_VLA_PTR: {
-    IRVReg *dst = ir_new_vreg(fn, pointer_to(node->var->ty));
-    IRInsn *insn = ir_new_insn(IR_ADDR);
-    insn->dst = dst;
-    insn->var = node->var;
-    ir_append_insn(fn, insn);
-    return dst;
-  }
   default:
     break;
   }
@@ -276,11 +279,29 @@ static IRVReg *gen_expr_ir(IRFunction *fn, Node *node) {
     }
     return dst;
   }
-  case ND_VAR:
-  case ND_VLA_PTR:
-  case ND_MEMBER: {
+  case ND_VLA_PTR: {
     IRVReg *addr = gen_addr_ir(fn, node);
-    if (node->ty->kind == TY_ARRAY || node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION)
+    IRVReg *dst = ir_new_vreg(fn, pointer_to(node->var->ty));
+    IRInsn *insn = ir_new_insn(IR_LOAD);
+    insn->dst = dst;
+    insn->src1 = addr;
+    insn->ty = pointer_to(node->var->ty);
+    ir_append_insn(fn, insn);
+    return dst;
+  }
+  case ND_VAR: {
+    if (node->var->ty->kind == TY_VLA) {
+      IRVReg *addr = gen_addr_ir(fn, node);
+      IRVReg *dst = ir_new_vreg(fn, pointer_to(node->var->ty->base));
+      IRInsn *insn = ir_new_insn(IR_LOAD);
+      insn->dst = dst;
+      insn->src1 = addr;
+      insn->ty = pointer_to(node->var->ty->base);
+      ir_append_insn(fn, insn);
+      return dst;
+    }
+    IRVReg *addr = gen_addr_ir(fn, node);
+    if (node->ty->kind == TY_ARRAY || node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION || node->ty->kind == TY_FUNC)
       return addr;
     IRVReg *dst = ir_new_vreg(fn, node->ty);
     IRInsn *insn = ir_new_insn(IR_LOAD);
@@ -290,9 +311,56 @@ static IRVReg *gen_expr_ir(IRFunction *fn, Node *node) {
     ir_append_insn(fn, insn);
     return dst;
   }
+  case ND_MEMBER: {
+    IRVReg *addr = gen_addr_ir(fn, node);
+    if (node->ty->kind == TY_ARRAY || node->ty->kind == TY_VLA || node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION || node->ty->kind == TY_FUNC)
+      return addr;
+    IRVReg *dst = ir_new_vreg(fn, node->ty);
+    IRInsn *insn = ir_new_insn(IR_LOAD);
+    insn->dst = dst;
+    insn->src1 = addr;
+    insn->ty = node->ty;
+    ir_append_insn(fn, insn);
+
+    if (node->member && node->member->is_bitfield) {
+      Member *mem = node->member;
+      int total_bits = (mem->ty ? mem->ty->size : 8) * 8;
+      if (mem->bit_width < total_bits) {
+        IRVReg *shl_dst = ir_new_vreg(fn, node->ty);
+        IRVReg *shl_amt = ir_new_vreg(fn, ty_int);
+        IRInsn *imm1 = ir_new_insn(IR_IMM);
+        imm1->dst = shl_amt;
+        imm1->imm = total_bits - mem->bit_width - mem->bit_offset;
+        ir_append_insn(fn, imm1);
+
+        IRInsn *shl = ir_new_insn(IR_SHL);
+        shl->dst = shl_dst;
+        shl->src1 = dst;
+        shl->src2 = shl_amt;
+        shl->ty = node->ty;
+        ir_append_insn(fn, shl);
+
+        IRVReg *shr_dst = ir_new_vreg(fn, node->ty);
+        IRVReg *shr_amt = ir_new_vreg(fn, ty_int);
+        IRInsn *imm2 = ir_new_insn(IR_IMM);
+        imm2->dst = shr_amt;
+        imm2->imm = total_bits - mem->bit_width;
+        ir_append_insn(fn, imm2);
+
+        IRInsn *shr = ir_new_insn(IR_SHR);
+        shr->dst = shr_dst;
+        shr->src1 = shl_dst;
+        shr->src2 = shr_amt;
+        shr->ty = node->ty;
+        ir_append_insn(fn, shr);
+        return shr_dst;
+      }
+    }
+    return dst;
+  }
   case ND_DEREF: {
     IRVReg *addr = gen_expr_ir(fn, node->lhs);
-    if (node->ty->kind == TY_ARRAY || node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION)
+    if (node->ty->kind == TY_ARRAY || node->ty->kind == TY_VLA || node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION || node->ty->kind == TY_FUNC)
       return addr;
     IRVReg *dst = ir_new_vreg(fn, node->ty);
     IRInsn *insn = ir_new_insn(IR_LOAD);
@@ -305,7 +373,98 @@ static IRVReg *gen_expr_ir(IRFunction *fn, Node *node) {
   case ND_ADDR:
     return gen_addr_ir(fn, node->lhs);
   case ND_ASSIGN: {
+    if (node->lhs && node->lhs->kind == ND_MEMBER && node->lhs->member && node->lhs->member->is_bitfield) {
+      Member *mem = node->lhs->member;
+      IRVReg *rhs = gen_expr_ir(fn, node->rhs);
+      IRVReg *addr = gen_addr_ir(fn, node->lhs);
+
+      // Load old value
+      IRVReg *old_val = ir_new_vreg(fn, mem->ty);
+      IRInsn *load = ir_new_insn(IR_LOAD);
+      load->dst = old_val;
+      load->src1 = addr;
+      load->ty = mem->ty;
+      ir_append_insn(fn, load);
+
+      uint64_t value_mask = mem->bit_width >= 64 ? UINT64_MAX : ((1ULL << mem->bit_width) - 1);
+      uint64_t field_mask = mem->bit_width >= 64 ? UINT64_MAX : (value_mask << mem->bit_offset);
+
+      // Mask new value: (rhs & value_mask) << bit_offset
+      IRVReg *v_mask = ir_new_vreg(fn, mem->ty);
+      IRInsn *imm_vmask = ir_new_insn(IR_IMM);
+      imm_vmask->dst = v_mask;
+      imm_vmask->imm = value_mask;
+      ir_append_insn(fn, imm_vmask);
+
+      IRVReg *masked_rhs = ir_new_vreg(fn, mem->ty);
+      IRInsn *and_rhs = ir_new_insn(IR_BITAND);
+      and_rhs->dst = masked_rhs;
+      and_rhs->src1 = rhs;
+      and_rhs->src2 = v_mask;
+      and_rhs->ty = mem->ty;
+      ir_append_insn(fn, and_rhs);
+
+      IRVReg *shifted_rhs = masked_rhs;
+      if (mem->bit_offset > 0) {
+        IRVReg *sh_amt = ir_new_vreg(fn, ty_int);
+        IRInsn *imm_sh = ir_new_insn(IR_IMM);
+        imm_sh->dst = sh_amt;
+        imm_sh->imm = mem->bit_offset;
+        ir_append_insn(fn, imm_sh);
+
+        shifted_rhs = ir_new_vreg(fn, mem->ty);
+        IRInsn *shl = ir_new_insn(IR_SHL);
+        shl->dst = shifted_rhs;
+        shl->src1 = masked_rhs;
+        shl->src2 = sh_amt;
+        shl->ty = mem->ty;
+        ir_append_insn(fn, shl);
+      }
+
+      // Clear old field: old_val & ~field_mask
+      IRVReg *f_mask = ir_new_vreg(fn, mem->ty);
+      IRInsn *imm_fmask = ir_new_insn(IR_IMM);
+      imm_fmask->dst = f_mask;
+      imm_fmask->imm = ~field_mask;
+      ir_append_insn(fn, imm_fmask);
+
+      IRVReg *cleared_old = ir_new_vreg(fn, mem->ty);
+      IRInsn *and_old = ir_new_insn(IR_BITAND);
+      and_old->dst = cleared_old;
+      and_old->src1 = old_val;
+      and_old->src2 = f_mask;
+      and_old->ty = mem->ty;
+      ir_append_insn(fn, and_old);
+
+      // Combine: cleared_old | shifted_rhs
+      IRVReg *combined = ir_new_vreg(fn, mem->ty);
+      IRInsn *or_insn = ir_new_insn(IR_BITOR);
+      or_insn->dst = combined;
+      or_insn->src1 = cleared_old;
+      or_insn->src2 = shifted_rhs;
+      or_insn->ty = mem->ty;
+      ir_append_insn(fn, or_insn);
+
+      // Store combined back
+      IRInsn *store = ir_new_insn(IR_STORE);
+      store->src1 = addr;
+      store->src2 = combined;
+      store->ty = mem->ty;
+      ir_append_insn(fn, store);
+
+      return rhs;
+    }
     if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION) {
+      if (node->rhs->kind == ND_FUNCALL && node->ty->size <= 16 && !node->rhs->ret_buffer) {
+        IRVReg *r = gen_expr_ir(fn, node->rhs);
+        IRVReg *l = gen_addr_ir(fn, node->lhs);
+        IRInsn *insn = ir_new_insn(IR_STORE);
+        insn->src1 = l;
+        insn->src2 = r;
+        insn->ty = node->ty;
+        ir_append_insn(fn, insn);
+        return l;
+      }
       IRVReg *r = gen_expr_ir(fn, node->rhs);
       IRVReg *l = gen_addr_ir(fn, node->lhs);
       IRInsn *insn = ir_new_insn(IR_MEMCPY);
@@ -328,6 +487,8 @@ static IRVReg *gen_expr_ir(IRFunction *fn, Node *node) {
     IRVReg *src = gen_expr_ir(fn, node->lhs);
     if (node->ty->kind == TY_VOID)
       return NULL;
+    if (src && node->lhs && node->lhs->ty && node->lhs->ty == node->ty)
+      return src;
     IRVReg *dst = ir_new_vreg(fn, node->ty);
     IRInsn *insn = ir_new_insn(IR_CAST);
     insn->dst = dst;
@@ -579,8 +740,15 @@ static IRVReg *gen_expr_ir(IRFunction *fn, Node *node) {
 
     IRVReg **arg_vregs = calloc(argc, sizeof(IRVReg *));
     int i = 0;
-    for (Node *arg = node->args; arg; arg = arg->next)
-      arg_vregs[i++] = gen_expr_ir(fn, arg);
+    for (Node *arg = node->args; arg; arg = arg->next) {
+      IRVReg *v = gen_expr_ir(fn, arg);
+      if (arg->ty && (arg->ty->kind == TY_STRUCT || arg->ty->kind == TY_UNION)) {
+        v->is_struct_val = true;
+        v->struct_size = arg->ty->size;
+        v->struct_ty = arg->ty;
+      }
+      arg_vregs[i++] = v;
+    }
 
     IRVReg *callee = gen_expr_ir(fn, node->lhs);
 
@@ -1104,20 +1272,444 @@ void llir_dump(FILE *out, LLIRProg *prog) {
   ir_dump(out, prog);
 }
 
+static HLIRVal *hlir_new_val(HLIRFunction *fn, Type *ty) {
+  HLIRVal *val = calloc(1, sizeof(HLIRVal));
+  val->id = fn->num_vals++;
+  val->ty = ty;
+  if (fn->num_vals > fn->val_cap) {
+    fn->val_cap = fn->val_cap ? fn->val_cap * 2 : 16;
+    fn->vals = realloc(fn->vals, sizeof(HLIRVal *) * fn->val_cap);
+  }
+  fn->vals[val->id] = val;
+  return val;
+}
+
+static HLIRInsn *hlir_new_insn(HLIRKind kind) {
+  HLIRInsn *insn = calloc(1, sizeof(HLIRInsn));
+  insn->kind = kind;
+  return insn;
+}
+
+static void hlir_append_insn(HLIRFunction *fn, HLIRInsn *insn) {
+  if (!fn->head) {
+    fn->head = fn->tail = insn;
+  } else {
+    fn->tail->next = insn;
+    insn->prev = fn->tail;
+    fn->tail = insn;
+  }
+  insn->pos = fn->num_insns++;
+}
+
+static HLIRVal *gen_expr_hlir(HLIRFunction *fn, Node *node);
+static void gen_stmt_hlir(HLIRFunction *fn, Node *node);
+
+static HLIRVal *gen_addr_hlir(HLIRFunction *fn, Node *node) {
+  switch (node->kind) {
+  case ND_VAR: {
+    HLIRVal *dst = hlir_new_val(fn, pointer_to(node->var->ty));
+    HLIRInsn *insn = hlir_new_insn(HLIR_ADDR_VAR);
+    insn->dst = dst;
+    insn->var = node->var;
+    hlir_append_insn(fn, insn);
+    return dst;
+  }
+  case ND_DEREF:
+    return gen_expr_hlir(fn, node->lhs);
+  case ND_COMMA:
+    gen_expr_hlir(fn, node->lhs);
+    return gen_addr_hlir(fn, node->rhs);
+  case ND_MEMBER: {
+    HLIRVal *base = gen_addr_hlir(fn, node->lhs);
+    if (node->member->offset == 0)
+      return base;
+    HLIRVal *offset = hlir_new_val(fn, ty_long);
+    HLIRInsn *imm_insn = hlir_new_insn(HLIR_ICONST);
+    imm_insn->dst = offset;
+    imm_insn->imm = node->member->offset;
+    hlir_append_insn(fn, imm_insn);
+
+    HLIRVal *dst = hlir_new_val(fn, pointer_to(node->ty));
+    HLIRInsn *add_insn = hlir_new_insn(HLIR_ADD);
+    add_insn->dst = dst;
+    add_insn->src1 = base;
+    add_insn->src2 = offset;
+    hlir_append_insn(fn, add_insn);
+    return dst;
+  }
+  default:
+    break;
+  }
+  HLIRVal *dst = hlir_new_val(fn, pointer_to(node->ty));
+  HLIRInsn *insn = hlir_new_insn(HLIR_ADDR_VAR);
+  insn->dst = dst;
+  hlir_append_insn(fn, insn);
+  return dst;
+}
+
+static HLIRVal *gen_expr_hlir(HLIRFunction *fn, Node *node) {
+  if (!node)
+    return NULL;
+
+  switch (node->kind) {
+  case ND_NULL_EXPR:
+    return NULL;
+  case ND_NUM: {
+    HLIRVal *dst = hlir_new_val(fn, node->ty);
+    if (is_flonum(node->ty)) {
+      HLIRInsn *insn = hlir_new_insn(HLIR_FCONST);
+      insn->dst = dst;
+      insn->fimm = node->fval;
+      insn->ty = node->ty;
+      hlir_append_insn(fn, insn);
+    } else {
+      HLIRInsn *insn = hlir_new_insn(HLIR_ICONST);
+      insn->dst = dst;
+      insn->imm = node->val;
+      insn->ty = node->ty;
+      hlir_append_insn(fn, insn);
+    }
+    return dst;
+  }
+  case ND_VAR: {
+    if (node->var->ty->kind == TY_ARRAY || node->var->ty->kind == TY_STRUCT || node->var->ty->kind == TY_UNION || node->var->ty->kind == TY_FUNC)
+      return gen_addr_hlir(fn, node);
+    HLIRVal *dst = hlir_new_val(fn, node->ty);
+    HLIRInsn *insn = hlir_new_insn(HLIR_LOAD_VAR);
+    insn->dst = dst;
+    insn->var = node->var;
+    insn->ty = node->ty;
+    hlir_append_insn(fn, insn);
+    return dst;
+  }
+  case ND_ADDR:
+    return gen_addr_hlir(fn, node->lhs);
+  case ND_DEREF: {
+    HLIRVal *addr = gen_expr_hlir(fn, node->lhs);
+    if (node->ty->kind == TY_ARRAY || node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION || node->ty->kind == TY_FUNC)
+      return addr;
+    HLIRVal *dst = hlir_new_val(fn, node->ty);
+    HLIRInsn *insn = hlir_new_insn(HLIR_LOAD_PTR);
+    insn->dst = dst;
+    insn->src1 = addr;
+    insn->ty = node->ty;
+    hlir_append_insn(fn, insn);
+    return dst;
+  }
+  case ND_MEMBER: {
+    HLIRVal *base = gen_addr_hlir(fn, node->lhs);
+    HLIRVal *dst = hlir_new_val(fn, node->ty);
+    HLIRInsn *insn = hlir_new_insn(HLIR_LOAD_MEMBER);
+    insn->dst = dst;
+    insn->src1 = base;
+    insn->imm = node->member->offset;
+    insn->ty = node->ty;
+    hlir_append_insn(fn, insn);
+    return dst;
+  }
+  case ND_ASSIGN: {
+    HLIRVal *val = gen_expr_hlir(fn, node->rhs);
+    if (node->lhs->kind == ND_VAR) {
+      HLIRInsn *insn = hlir_new_insn(HLIR_STORE_VAR);
+      insn->var = node->lhs->var;
+      insn->src1 = val;
+      insn->ty = node->lhs->ty;
+      hlir_append_insn(fn, insn);
+    } else if (node->lhs->kind == ND_MEMBER) {
+      HLIRVal *base = gen_addr_hlir(fn, node->lhs->lhs);
+      HLIRInsn *insn = hlir_new_insn(HLIR_STORE_MEMBER);
+      insn->src1 = base;
+      insn->src2 = val;
+      insn->imm = node->lhs->member->offset;
+      insn->ty = node->lhs->ty;
+      hlir_append_insn(fn, insn);
+    } else {
+      HLIRVal *addr = gen_addr_hlir(fn, node->lhs);
+      HLIRInsn *insn = hlir_new_insn(HLIR_STORE_PTR);
+      insn->src1 = addr;
+      insn->src2 = val;
+      insn->ty = node->lhs->ty;
+      hlir_append_insn(fn, insn);
+    }
+    return val;
+  }
+  case ND_CAST: {
+    HLIRVal *src = gen_expr_hlir(fn, node->lhs);
+    HLIRVal *dst = hlir_new_val(fn, node->ty);
+    HLIRInsn *insn = hlir_new_insn(HLIR_CAST);
+    insn->dst = dst;
+    insn->src1 = src;
+    insn->ty = node->ty;
+    hlir_append_insn(fn, insn);
+    return dst;
+  }
+  case ND_NOT: {
+    HLIRVal *src = gen_expr_hlir(fn, node->lhs);
+    HLIRVal *dst = hlir_new_val(fn, node->ty);
+    HLIRInsn *insn = hlir_new_insn(HLIR_LOGNOT);
+    insn->dst = dst;
+    insn->src1 = src;
+    insn->ty = node->ty;
+    hlir_append_insn(fn, insn);
+    return dst;
+  }
+  case ND_BITNOT: {
+    HLIRVal *src = gen_expr_hlir(fn, node->lhs);
+    HLIRVal *dst = hlir_new_val(fn, node->ty);
+    HLIRInsn *insn = hlir_new_insn(HLIR_BITNOT);
+    insn->dst = dst;
+    insn->src1 = src;
+    insn->ty = node->ty;
+    hlir_append_insn(fn, insn);
+    return dst;
+  }
+  case ND_NEG: {
+    HLIRVal *src = gen_expr_hlir(fn, node->lhs);
+    HLIRVal *dst = hlir_new_val(fn, node->ty);
+    HLIRInsn *insn = hlir_new_insn(HLIR_NEG);
+    insn->dst = dst;
+    insn->src1 = src;
+    insn->ty = node->ty;
+    hlir_append_insn(fn, insn);
+    return dst;
+  }
+  case ND_ADD:
+  case ND_SUB:
+  case ND_MUL:
+  case ND_DIV:
+  case ND_MOD:
+  case ND_BITAND:
+  case ND_BITOR:
+  case ND_BITXOR:
+  case ND_SHL:
+  case ND_SHR:
+  case ND_EQ:
+  case ND_NE:
+  case ND_LT:
+  case ND_LE: {
+    HLIRVal *l = gen_expr_hlir(fn, node->lhs);
+    HLIRVal *r = gen_expr_hlir(fn, node->rhs);
+    HLIRVal *dst = hlir_new_val(fn, node->ty);
+    HLIRKind k = HLIR_ADD;
+    switch (node->kind) {
+    case ND_ADD: k = HLIR_ADD; break;
+    case ND_SUB: k = HLIR_SUB; break;
+    case ND_MUL: k = HLIR_MUL; break;
+    case ND_DIV: k = HLIR_DIV; break;
+    case ND_MOD: k = HLIR_MOD; break;
+    case ND_BITAND: k = HLIR_BITAND; break;
+    case ND_BITOR: k = HLIR_BITOR; break;
+    case ND_BITXOR: k = HLIR_BITXOR; break;
+    case ND_SHL: k = HLIR_SHL; break;
+    case ND_SHR: k = HLIR_SHR; break;
+    case ND_EQ: k = HLIR_CMP_EQ; break;
+    case ND_NE: k = HLIR_CMP_NE; break;
+    case ND_LT: k = HLIR_CMP_LT; break;
+    case ND_LE: k = HLIR_CMP_LE; break;
+    default: break;
+    }
+    HLIRInsn *insn = hlir_new_insn(k);
+    insn->dst = dst;
+    insn->src1 = l;
+    insn->src2 = r;
+    insn->ty = node->ty;
+    hlir_append_insn(fn, insn);
+    return dst;
+  }
+  case ND_FUNCALL: {
+    HLIRVal **args = NULL;
+    int num_args = 0;
+    for (Node *arg = node->args; arg; arg = arg->next)
+      num_args++;
+    if (num_args > 0) {
+      args = calloc(num_args, sizeof(HLIRVal *));
+      int i = 0;
+      for (Node *arg = node->args; arg; arg = arg->next)
+        args[i++] = gen_expr_hlir(fn, arg);
+    }
+    HLIRVal *callee = gen_expr_hlir(fn, node->lhs);
+    HLIRVal *dst = node->ty->kind == TY_VOID ? NULL : hlir_new_val(fn, node->ty);
+    HLIRInsn *insn = hlir_new_insn(HLIR_CALL);
+    insn->dst = dst;
+    insn->src1 = callee;
+    insn->num_args = num_args;
+    insn->args = args;
+    insn->ty = node->ty;
+    hlir_append_insn(fn, insn);
+    return dst;
+  }
+  case ND_COMMA:
+    gen_expr_hlir(fn, node->lhs);
+    return gen_expr_hlir(fn, node->rhs);
+  case ND_STMT_EXPR:
+    for (Node *n = node->body; n; n = n->next) {
+      if (!n->next && n->kind == ND_EXPR_STMT)
+        return gen_expr_hlir(fn, n->lhs);
+      gen_stmt_hlir(fn, n);
+    }
+    return NULL;
+  default:
+    break;
+  }
+  return NULL;
+}
+
+static void gen_stmt_hlir(HLIRFunction *fn, Node *node) {
+  if (!node)
+    return;
+
+  switch (node->kind) {
+  case ND_IF: {
+    static int id = 0;
+    int c = id++;
+    char *else_lbl = node->els ? format(".L.hlir.else.%d", c) : format(".L.hlir.end.%d", c);
+    char *end_lbl = format(".L.hlir.end.%d", c);
+
+    HLIRVal *cond = gen_expr_hlir(fn, node->cond);
+    HLIRInsn *br = hlir_new_insn(HLIR_JMP_IF_ZERO);
+    br->src1 = cond;
+    br->label = else_lbl;
+    hlir_append_insn(fn, br);
+
+    gen_stmt_hlir(fn, node->then);
+
+    if (node->els) {
+      HLIRInsn *jmp = hlir_new_insn(HLIR_JMP);
+      jmp->label = end_lbl;
+      hlir_append_insn(fn, jmp);
+
+      HLIRInsn *lbl_else = hlir_new_insn(HLIR_LABEL);
+      lbl_else->label = else_lbl;
+      hlir_append_insn(fn, lbl_else);
+
+      gen_stmt_hlir(fn, node->els);
+    }
+
+    HLIRInsn *lbl_end = hlir_new_insn(HLIR_LABEL);
+    lbl_end->label = end_lbl;
+    hlir_append_insn(fn, lbl_end);
+    return;
+  }
+  case ND_FOR: {
+    static int id = 0;
+    int c = id++;
+    char *begin_lbl = format(".L.hlir.for.begin.%d", c);
+    char *end_lbl = node->brk_label ? node->brk_label : format(".L.hlir.for.end.%d", c);
+    char *cont_lbl = node->cont_label ? node->cont_label : format(".L.hlir.for.cont.%d", c);
+
+    if (node->init)
+      gen_stmt_hlir(fn, node->init);
+
+    HLIRInsn *lbl_begin = hlir_new_insn(HLIR_LABEL);
+    lbl_begin->label = begin_lbl;
+    hlir_append_insn(fn, lbl_begin);
+
+    if (node->cond) {
+      HLIRVal *cond = gen_expr_hlir(fn, node->cond);
+      HLIRInsn *br = hlir_new_insn(HLIR_JMP_IF_ZERO);
+      br->src1 = cond;
+      br->label = end_lbl;
+      hlir_append_insn(fn, br);
+    }
+
+    gen_stmt_hlir(fn, node->then);
+
+    HLIRInsn *lbl_cont = hlir_new_insn(HLIR_LABEL);
+    lbl_cont->label = cont_lbl;
+    hlir_append_insn(fn, lbl_cont);
+
+    if (node->inc)
+      gen_expr_hlir(fn, node->inc);
+
+    HLIRInsn *jmp = hlir_new_insn(HLIR_JMP);
+    jmp->label = begin_lbl;
+    hlir_append_insn(fn, jmp);
+
+    HLIRInsn *lbl_end = hlir_new_insn(HLIR_LABEL);
+    lbl_end->label = end_lbl;
+    hlir_append_insn(fn, lbl_end);
+    return;
+  }
+  case ND_BLOCK:
+    for (Node *n = node->body; n; n = n->next)
+      gen_stmt_hlir(fn, n);
+    return;
+  case ND_GOTO: {
+    HLIRInsn *jmp = hlir_new_insn(HLIR_JMP);
+    jmp->label = node->unique_label;
+    hlir_append_insn(fn, jmp);
+    return;
+  }
+  case ND_LABEL: {
+    HLIRInsn *lbl = hlir_new_insn(HLIR_LABEL);
+    lbl->label = node->unique_label;
+    hlir_append_insn(fn, lbl);
+    gen_stmt_hlir(fn, node->lhs);
+    return;
+  }
+  case ND_RETURN: {
+    HLIRVal *ret_val = node->lhs ? gen_expr_hlir(fn, node->lhs) : NULL;
+    HLIRInsn *ret = hlir_new_insn(HLIR_RET);
+    ret->src1 = ret_val;
+    ret->ty = node->lhs ? node->lhs->ty : ty_void;
+    hlir_append_insn(fn, ret);
+    return;
+  }
+  case ND_EXPR_STMT:
+    gen_expr_hlir(fn, node->lhs);
+    return;
+  case ND_ASM: {
+    HLIRInsn *insn = hlir_new_insn(HLIR_ASM);
+    insn->asm_str = node->asm_str;
+    hlir_append_insn(fn, insn);
+    return;
+  }
+  default:
+    break;
+  }
+}
+
 HLIRProg *ast_to_hlir(Obj *prog) {
-  return (HLIRProg *)ast_to_ir(prog);
+  HLIRProg *hlir_prog = calloc(1, sizeof(HLIRProg));
+  hlir_prog->globals = prog;
+
+  int fn_count = 0;
+  for (const Obj *fn = prog; fn; fn = fn->next)
+    if (fn->is_function && fn->is_definition && fn->is_live)
+      fn_count++;
+
+  hlir_prog->fns = calloc(fn_count, sizeof(HLIRFunction *));
+  hlir_prog->num_fns = fn_count;
+
+  int idx = 0;
+  for (Obj *fn = prog; fn; fn = fn->next) {
+    if (!fn->is_function || !fn->is_definition || !fn->is_live)
+      continue;
+
+    HLIRFunction *hlir_fn = calloc(1, sizeof(HLIRFunction));
+    hlir_fn->fn_obj = fn;
+    hlir_fn->name = fn->name;
+    hlir_fn->func_ty = fn->ty;
+    hlir_fn->locals = fn->locals;
+    hlir_fn->params = fn->params;
+    hlir_fn->stack_size = fn->stack_size;
+
+    gen_stmt_hlir(hlir_fn, fn->body);
+    hlir_prog->fns[idx++] = hlir_fn;
+  }
+
+  return hlir_prog;
 }
 
 void hlir_optimize(HLIRProg *prog, int opt_level) {
-  if (opt_level <= 0 || !prog)
-    return;
-  ir_optimize_level((IRProg *)prog, opt_level);
+  (void)prog;
+  (void)opt_level;
 }
 
 LLIRProg *hlir_to_llir(HLIRProg *hlir) {
   if (!hlir)
     return NULL;
-  return (LLIRProg *)hlir;
+  return ast_to_ir(hlir->globals);
 }
 
 void llir_optimize(LLIRProg *prog, int opt_level) {

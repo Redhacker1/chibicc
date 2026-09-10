@@ -18,15 +18,6 @@
 
 #include "chibicc.h"
 
-// Scope for local variables, global variables, typedefs
-// or enum constants
-typedef struct {
-  Obj *var;
-  Type *type_def;
-  Type *enum_ty;
-  int enum_val;
-} VarScope;
-
 // Represents a block scope.
 typedef struct Scope Scope;
 struct Scope {
@@ -145,8 +136,8 @@ static Node *equality(Token **rest, Token *tok);
 static Node *relational(Token **rest, Token *tok);
 static Node *shift(Token **rest, Token *tok);
 static Node *add(Token **rest, Token *tok);
-static Node *new_add(Node *lhs, Node *rhs, Token *tok);
-static Node *new_sub(Node *lhs, Node *rhs, Token *tok);
+Node *new_add(Node *lhs, Node *rhs, Token *tok);
+Node *new_sub(Node *lhs, Node *rhs, Token *tok);
 static Node *mul(Token **rest, Token *tok);
 static Node *cast(Token **rest, Token *tok);
 static Member *get_struct_member(Type *ty, Token *tok);
@@ -176,7 +167,7 @@ static void leave_scope(void) {
 }
 
 // Find a variable by name.
-static VarScope *find_var(Token *tok) {
+VarScope *find_var(Token *tok) {
   for (Scope *sc = scope; sc; sc = sc->next) {
     VarScope *sc2 = hashmap_get2(&sc->vars, tok->loc, tok->len);
     if (sc2)
@@ -194,7 +185,7 @@ static Type *find_tag(Token *tok) {
   return NULL;
 }
 
-static Node *new_node(NodeKind kind, Token *tok) {
+Node *new_node(NodeKind kind, Token *tok) {
   assert(tok != NULL);
   Node *node = calloc(1, sizeof(Node));
   node->kind = kind;
@@ -202,7 +193,7 @@ static Node *new_node(NodeKind kind, Token *tok) {
   return node;
 }
 
-static Node *new_binary(NodeKind kind, Node *lhs, Node *rhs, Token *tok) {
+Node *new_binary(NodeKind kind, Node *lhs, Node *rhs, Token *tok) {
   assert(lhs != NULL);
   assert(rhs != NULL);
   assert(tok != NULL);
@@ -212,7 +203,7 @@ static Node *new_binary(NodeKind kind, Node *lhs, Node *rhs, Token *tok) {
   return node;
 }
 
-static Node *new_unary(NodeKind kind, Node *expr, Token *tok) {
+Node *new_unary(NodeKind kind, Node *expr, Token *tok) {
   assert(expr != NULL);
   assert(tok != NULL);
   Node *node = new_node(kind, tok);
@@ -220,7 +211,7 @@ static Node *new_unary(NodeKind kind, Node *expr, Token *tok) {
   return node;
 }
 
-static Node *new_num(int64_t val, Token *tok) {
+Node *new_num(int64_t val, Token *tok) {
   assert(tok != NULL);
   Node *node = new_node(ND_NUM, tok);
   node->val = val;
@@ -235,7 +226,7 @@ static Node *new_long(int64_t val, Token *tok) {
   return node;
 }
 
-static Node *new_ulong(long val, Token *tok) {
+Node *new_ulong(long val, Token *tok) {
   assert(tok != NULL);
   Node *node = new_node(ND_NUM, tok);
   node->val = val;
@@ -243,7 +234,7 @@ static Node *new_ulong(long val, Token *tok) {
   return node;
 }
 
-static Node *new_var_node(Obj *var, Token *tok) {
+Node *new_var_node(Obj *var, Token *tok) {
   assert(var != NULL);
   assert(tok != NULL);
   Node *node = new_node(ND_VAR, tok);
@@ -272,7 +263,7 @@ Node *new_cast(Node *expr, Type *ty) {
   return node;
 }
 
-static VarScope *push_scope(char *name) {
+VarScope *push_scope(char *name) {
   VarScope *sc = calloc(1, sizeof(VarScope));
   hashmap_put(&scope->vars, name, sc);
   return sc;
@@ -327,7 +318,7 @@ static Obj *new_var(char *name, Type *ty) {
   return var;
 }
 
-static Obj *new_lvar(char *name, Type *ty) {
+Obj *new_lvar(char *name, Type *ty) {
   Obj *var = new_var(name, ty);
   var->is_local = true;
   var->next = locals;
@@ -1848,6 +1839,28 @@ static bool is_typename(Token *tok) {
   return hashmap_get2(&map, tok->loc, tok->len) || find_typedef(tok) || is_attribute_token(tok);
 }
 
+static char *format_asm_dialect(const char *s) {
+  if (!s || !strchr(s, '{'))
+    return (char *)s;
+  char *buf = calloc(strlen(s) + 1, 1);
+  char *d = buf;
+  const char *p = s;
+  while (*p) {
+    if (*p == '{') {
+      p++;
+      while (*p && *p != '|' && *p != '}')
+        *d++ = *p++;
+      while (*p && *p != '}')
+        p++;
+      if (*p == '}')
+        p++;
+    } else {
+      *d++ = *p++;
+    }
+  }
+  return buf;
+}
+
 // asm-stmt = ("asm" | "__asm__" | "__asm") ("volatile" | "inline")* "(" string-literal ... ")"
 static Node *asm_stmt(Token **rest, Token *tok) {
   Node *node = new_node(ND_ASM, tok);
@@ -1862,7 +1875,7 @@ static Node *asm_stmt(Token **rest, Token *tok) {
   tok = skip(tok, "(");
   if (tok->kind != TK_STR || tok->ty->base->kind != TY_CHAR)
     error_tok(tok, "expected string literal");
-  node->asm_str = tok->str;
+  node->asm_str = format_asm_dialect(tok->str);
   tok = tok->next;
   while (tok && !equal(tok, ")")) {
     if (equal(tok, "(")) {
@@ -2709,7 +2722,7 @@ static Node *shift(Token **rest, Token *tok) {
 // so that p+n points to the location n elements (not bytes) ahead of p.
 // In other words, we need to scale an integer value before adding to a
 // pointer value. This function takes care of the scaling.
-static Node *new_add(Node *lhs, Node *rhs, Token *tok) {
+Node *new_add(Node *lhs, Node *rhs, Token *tok) {
   add_type(lhs);
   add_type(rhs);
 
@@ -2740,7 +2753,7 @@ static Node *new_add(Node *lhs, Node *rhs, Token *tok) {
 }
 
 // Like `+`, `-` is overloaded for the pointer type.
-static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
+Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
   add_type(lhs);
   add_type(rhs);
 
@@ -3271,10 +3284,13 @@ static Node *funcall(Token **rest, Token *tok, Node *fn) {
   node->ty = ty->return_ty;
   node->args = head.next;
 
-  // If a function returns a struct, it is caller's responsibility
-  // to allocate a space for the return value.
-  if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION)
-    node->ret_buffer = new_lvar("", node->ty);
+  // If a function returns a struct by reference according to callee ABI,
+  // it is caller's responsibility to allocate space for the return value.
+  if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION) {
+    ABI *callee_abi = ty->abi ? ty->abi : (current_fn ? get_fn_abi(current_fn) : current_abi);
+    if (callee_abi && callee_abi->returns_by_reference && callee_abi->returns_by_reference(node->ty))
+      node->ret_buffer = new_lvar("", node->ty);
+  }
   return node;
 }
 
@@ -3654,8 +3670,12 @@ static Node *primary(Token **rest, Token *tok) {
     tok = skip(tok->next, "(");
     Node *ap = assign(&tok, tok);
     tok = skip(tok, ",");
-    (void)assign(&tok, tok);
+    Node *last = assign(&tok, tok);
     *rest = skip(tok, ")");
+
+    ABI *fn_abi = current_fn ? get_fn_abi(current_fn) : current_abi;
+    if (fn_abi && fn_abi->builtin_va_start)
+      return fn_abi->builtin_va_start(ap, last, start);
 
     VarScope *sc = find_var(&(Token){.loc = "__va_area__", .len = 11});
     if (!sc || !sc->var)
@@ -3665,8 +3685,7 @@ static Node *primary(Token **rest, Token *tok) {
     if (ap->ty->kind == TY_PTR && (ap->ty->base->kind != TY_STRUCT && ap->ty->base->kind != TY_UNION)) {
       // Pointer va_list (e.g. Win64 char *va_list)
       Node *addr = new_unary(ND_ADDR, va_var, start);
-      Node *offset_ptr = new_binary(ND_ADD, addr, new_num(8, start), start);
-      Node *val = new_unary(ND_DEREF, new_cast(offset_ptr, pointer_to(ap->ty)), start);
+      Node *val = new_unary(ND_DEREF, new_cast(addr, pointer_to(ap->ty)), start);
       return new_binary(ND_ASSIGN, ap, val, start);
     } else {
       VarScope *va_elem_sc = find_var(&(Token){.loc = "__va_elem", .len = 9});
@@ -3678,10 +3697,28 @@ static Node *primary(Token **rest, Token *tok) {
     }
   }
 
+  if (equal(tok, "__builtin_va_arg")) {
+    tok = skip(tok->next, "(");
+    Node *ap = assign(&tok, tok);
+    tok = skip(tok, ",");
+    Type *ty = typename(&tok, tok);
+    *rest = skip(tok, ")");
+
+    ABI *fn_abi = current_fn ? get_fn_abi(current_fn) : current_abi;
+    if (fn_abi && fn_abi->builtin_va_arg)
+      return fn_abi->builtin_va_arg(ap, ty, start);
+    error_tok(start, "__builtin_va_arg not supported for current ABI");
+  }
+
   if (equal(tok, "__builtin_va_end")) {
     tok = skip(tok->next, "(");
-    (void)assign(&tok, tok);
+    Node *ap = assign(&tok, tok);
     *rest = skip(tok, ")");
+
+    ABI *fn_abi = current_fn ? get_fn_abi(current_fn) : current_abi;
+    if (fn_abi && fn_abi->builtin_va_end)
+      return fn_abi->builtin_va_end(ap, start);
+
     Node *node = new_node(ND_NULL_EXPR, start);
     node->ty = ty_void;
     return node;
@@ -3693,6 +3730,11 @@ static Node *primary(Token **rest, Token *tok) {
     tok = skip(tok, ",");
     Node *src = assign(&tok, tok);
     *rest = skip(tok, ")");
+
+    ABI *fn_abi = current_fn ? get_fn_abi(current_fn) : current_abi;
+    if (fn_abi && fn_abi->builtin_va_copy)
+      return fn_abi->builtin_va_copy(dest, src, start);
+
     add_type(dest);
     if (dest->ty->kind == TY_PTR && (dest->ty->base->kind != TY_STRUCT && dest->ty->base->kind != TY_UNION)) {
       return new_binary(ND_ASSIGN, dest, src, start);
@@ -4038,43 +4080,7 @@ static void declare_builtin_functions(void) {
 }
 
 static void declare_builtin_types(void) {
-  if (current_abi == &abi_win64 || current_abi == &abi_win32) {
-    push_scope("__builtin_va_list")->type_def = pointer_to(ty_char);
-    return;
-  }
-
-  Type *va_elem = struct_type();
-  Member *m1 = calloc(1, sizeof(Member));
-  m1->ty = ty_uint;
-  m1->name = &(Token){.loc = "gp_offset", .len = 9};
-  m1->offset = 0;
-
-  Member *m2 = calloc(1, sizeof(Member));
-  m2->ty = ty_uint;
-  m2->name = &(Token){.loc = "fp_offset", .len = 9};
-  m2->offset = 4;
-
-  Member *m3 = calloc(1, sizeof(Member));
-  m3->ty = pointer_to(ty_void);
-  m3->name = &(Token){.loc = "overflow_arg_area", .len = 17};
-  m3->offset = 8;
-
-  Member *m4 = calloc(1, sizeof(Member));
-  m4->ty = pointer_to(ty_void);
-  m4->name = &(Token){.loc = "reg_save_area", .len = 13};
-  m4->offset = 16;
-
-  m1->next = m2;
-  m2->next = m3;
-  m3->next = m4;
-  va_elem->members = m1;
-  va_elem->size = 24;
-  va_elem->align = 8;
-
-  Type *va_list_ty = array_of(va_elem, 1);
-
-  push_scope("__builtin_va_list")->type_def = va_list_ty;
-  push_scope("__va_elem")->type_def = va_elem;
+  declare_abi_builtin_types();
 }
 
 static void static_assertion(Token **rest, Token *tok) {

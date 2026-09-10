@@ -48,7 +48,18 @@ void regalloc_function(IRFunction *fn, const RegAllocPool *pool) {
   bool *gp_used = calloc(pool ? pool->num_gp_regs : 16, sizeof(bool));
   bool *fp_used = calloc(pool ? pool->num_fp_regs : 16, sizeof(bool));
 
-  int spill_offset = fn->stack_size ? fn->stack_size : 0;
+  Obj *fn_obj = fn->fn_obj;
+  ABI *abi = fn_obj ? get_fn_abi(fn_obj) : current_abi;
+
+  int base = 0;
+  if (abi && abi->get_spill_base)
+    base = abi->get_spill_base(fn_obj);
+  else if (fn_obj)
+    base = fn_obj->stack_size;
+  else
+    base = fn->stack_size;
+
+  int spill_offset = base;
   if (pool && pool->spill_base_offset > spill_offset)
     spill_offset = pool->spill_base_offset;
 
@@ -113,6 +124,11 @@ void regalloc_function(IRFunction *fn, const RegAllocPool *pool) {
 
   int align = (pool && pool->spill_align) ? pool->spill_align : 16;
   fn->stack_size = align_to(spill_offset, align);
+  if (abi && abi->finalize_stack) {
+    abi->finalize_stack(fn_obj, spill_offset);
+  } else if (fn_obj) {
+    fn_obj->stack_size = align_to(spill_offset, 16);
+  }
 
   free(gp_used);
   free(fp_used);

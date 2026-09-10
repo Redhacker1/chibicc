@@ -19,10 +19,12 @@ void assert(int expected, int actual, char *code) {
 int test_sysv_abi(void);
 int test_win64_abi(void);
 int test_win32_abi(void);
+int test_cross_abi(void);
 
 #include "tests/abi_sysv_test.c"
 #include "tests/abi_win64_test.c"
 #include "tests/abi_win32_test.c"
+#include "tests/abi_cross_test.c"
 
 int main(void) {
   printf("========================================\n");
@@ -36,6 +38,9 @@ int main(void) {
   printf("\n");
 
   test_win32_abi();
+  printf("\n");
+
+  test_cross_abi();
   printf("\n");
 
   printf("========================================\n");

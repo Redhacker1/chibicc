@@ -9,6 +9,7 @@ typedef struct Obj Obj;
 typedef struct Node Node;
 typedef struct Codegen Codegen;
 typedef struct LLIRProg LLIRProg;
+typedef struct LLIRInsn LLIRInsn;
 
 struct Codegen {
   const char *name;
@@ -21,17 +22,13 @@ struct Codegen {
   // Top-level program code generation from Low-Level IR (LLIR)
   void (*codegen_llir)(LLIRProg *prog, FILE *out);
 
-  // Top-level program code generation (AST/Legacy fallback)
-  void (*codegen)(Obj *prog, FILE *out);
-
   // Sub-phases of code generation
   void (*emit_data)(Obj *prog, FILE *out);
-  void (*emit_text)(Obj *prog, FILE *out);
+  void (*emit_text)(LLIRProg *prog, FILE *out);
 
-  // Individual statement/expression code generators
-  void (*gen_stmt)(Node *node, FILE *out);
-  void (*gen_expr)(Node *node, FILE *out);
-  void (*gen_addr)(Node *node, FILE *out);
+  // Individual instruction / expression code generators working on LLIR
+  void (*gen_insn)(LLIRInsn *insn, FILE *out);
+  void (*gen_expr)(LLIRInsn *insn, FILE *out);
 };
 
 extern Codegen *current_codegen;

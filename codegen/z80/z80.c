@@ -224,12 +224,17 @@ static void gen_stmt(Node *node, FILE *out) {
     int c = count();
     gen_expr(node->cond, output_file);
     println("  ld a, h; or l");
+    if (!node->els) {
+      println("  jp z, .L.end.%d", c);
+      gen_stmt(node->then, output_file);
+      println(".L.end.%d:", c);
+      return;
+    }
     println("  jp z, .L.else.%d", c);
     gen_stmt(node->then, output_file);
     println("  jp .L.end.%d", c);
     println(".L.else.%d:", c);
-    if (node->els)
-      gen_stmt(node->els, output_file);
+    gen_stmt(node->els, output_file);
     println(".L.end.%d:", c);
     return;
   }
@@ -263,8 +268,12 @@ static void gen_stmt(Node *node, FILE *out) {
     gen_stmt(node->lhs, output_file);
     return;
   case ND_RETURN:
-    if (node->lhs)
+    if (node->lhs) {
       gen_expr(node->lhs, output_file);
+      ABI *fn_abi = (current_fn && current_fn->abi) ? current_fn->abi : current_abi;
+      if (fn_abi && fn_abi->emit_return)
+        fn_abi->emit_return(current_fn, node->lhs->ty, output_file);
+    }
     println("  jp .L.return.%s", current_fn->name);
     return;
   case ND_EXPR_STMT:
@@ -302,9 +311,211 @@ static void z80_emit_data(Obj *prog, FILE *out) {
   }
 }
 
-static void z80_emit_text(Obj *prog, FILE *out) {
+static void z80_load_vreg(LLIRVReg *v, const char *reg) {
+  if (!v) return;
+  int offset = v->spill_offset ? v->spill_offset : -((v->id + 1) * 2);
+  int sz = v->ty ? v->ty->size : 2;
+  if (strcmp(reg, "hl") == 0) {
+    if (sz == 1)
+      println("  ld l, (ix %d)\n  ld h, 0", offset);
+    else
+      println("  ld l, (ix %d)\n  ld h, (ix %d)", offset, offset + 1);
+  } else if (strcmp(reg, "de") == 0) {
+    if (sz == 1)
+      println("  ld e, (ix %d)\n  ld d, 0", offset);
+    else
+      println("  ld e, (ix %d)\n  ld d, (ix %d)", offset, offset + 1);
+  }
+}
+
+static void z80_store_vreg(const char *reg, LLIRVReg *v) {
+  if (!v) return;
+  int offset = v->spill_offset ? v->spill_offset : -((v->id + 1) * 2);
+  int sz = v->ty ? v->ty->size : 2;
+  if (strcmp(reg, "hl") == 0) {
+    if (sz == 1)
+      println("  ld (ix %d), l", offset);
+    else
+      println("  ld (ix %d), l\n  ld (ix %d), h", offset, offset + 1);
+  } else if (strcmp(reg, "de") == 0) {
+    if (sz == 1)
+      println("  ld (ix %d), e", offset);
+    else
+      println("  ld (ix %d), e\n  ld (ix %d), d", offset, offset + 1);
+  }
+}
+
+static void z80_gen_insn(LLIRInsn *insn, FILE *out) {
+  if (!insn) return;
   (void)out;
-  for (Obj *fn = prog; fn; fn = fn->next) {
+
+  switch (insn->kind) {
+  case LLIR_NOP:
+  case LLIR_PHI:
+    break;
+  case LLIR_LABEL:
+    println("%s:", insn->label ? insn->label : "");
+    break;
+  case LLIR_JMP:
+    println("  jp %s", insn->label ? insn->label : "");
+    break;
+  case LLIR_BR_COND:
+    z80_load_vreg(insn->src1, "hl");
+    println("  ld a, h\n  or l");
+    if (insn->label_true && insn->label_false) {
+      println("  jp nz, %s", insn->label_true);
+      println("  jp %s", insn->label_false);
+    } else if (insn->label_true) {
+      println("  jp nz, %s", insn->label_true);
+    } else if (insn->label_false) {
+      println("  jp z, %s", insn->label_false);
+    }
+    break;
+  case LLIR_IMM:
+    println("  ld hl, %lld", (long long)insn->imm);
+    z80_store_vreg("hl", insn->dst);
+    break;
+  case LLIR_LEA:
+    if (insn->var) {
+      if (insn->var->is_local) {
+        println("  ld hl, %d", insn->var->offset);
+        println("  add hl, ix");
+      } else {
+        println("  ld hl, _%s", insn->var->name);
+      }
+    } else if (insn->label) {
+      println("  ld hl, %s", insn->label);
+    }
+    z80_store_vreg("hl", insn->dst);
+    break;
+  case LLIR_MOV:
+  case LLIR_CAST:
+    z80_load_vreg(insn->src1, "hl");
+    z80_store_vreg("hl", insn->dst);
+    break;
+  case LLIR_LOAD: {
+    z80_load_vreg(insn->src1, "hl");
+    int sz = insn->ty ? insn->ty->size : 2;
+    if (sz == 1)
+      println("  ld a, (hl)\n  ld l, a\n  ld h, 0");
+    else
+      println("  ld e, (hl)\n  inc hl\n  ld d, (hl)\n  ex de, hl");
+    z80_store_vreg("hl", insn->dst);
+    break;
+  }
+  case LLIR_STORE: {
+    z80_load_vreg(insn->src1, "hl");
+    z80_load_vreg(insn->src2, "de");
+    int sz = insn->ty ? insn->ty->size : 2;
+    if (sz == 1)
+      println("  ld (hl), e");
+    else
+      println("  ld (hl), e\n  inc hl\n  ld (hl), d");
+    break;
+  }
+  case LLIR_ADD:
+    z80_load_vreg(insn->src1, "hl");
+    z80_load_vreg(insn->src2, "de");
+    println("  add hl, de");
+    z80_store_vreg("hl", insn->dst);
+    break;
+  case LLIR_SUB:
+    z80_load_vreg(insn->src1, "hl");
+    z80_load_vreg(insn->src2, "de");
+    println("  or a\n  sbc hl, de");
+    z80_store_vreg("hl", insn->dst);
+    break;
+  case LLIR_AND:
+    z80_load_vreg(insn->src1, "hl");
+    z80_load_vreg(insn->src2, "de");
+    println("  ld a, h\n  and d\n  ld h, a\n  ld a, l\n  and e\n  ld l, a");
+    z80_store_vreg("hl", insn->dst);
+    break;
+  case LLIR_OR:
+    z80_load_vreg(insn->src1, "hl");
+    z80_load_vreg(insn->src2, "de");
+    println("  ld a, h\n  or d\n  ld h, a\n  ld a, l\n  or e\n  ld l, a");
+    z80_store_vreg("hl", insn->dst);
+    break;
+  case LLIR_XOR:
+    z80_load_vreg(insn->src1, "hl");
+    z80_load_vreg(insn->src2, "de");
+    println("  ld a, h\n  xor d\n  ld h, a\n  ld a, l\n  xor e\n  ld l, a");
+    z80_store_vreg("hl", insn->dst);
+    break;
+  case LLIR_RET:
+    if (insn->src1) {
+      z80_load_vreg(insn->src1, "hl");
+      ABI *fn_abi = (current_fn && current_fn->abi) ? current_fn->abi : current_abi;
+      if (fn_abi && fn_abi->emit_return)
+        fn_abi->emit_return(current_fn, insn->ty, output_file);
+    }
+    println("  jp .L.return.%s", current_fn->name);
+    break;
+  case LLIR_CALL:
+    for (int a = insn->num_args - 1; a >= 0; a--) {
+      z80_load_vreg(insn->args[a], "hl");
+      println("  push hl");
+    }
+    if (insn->src1) {
+      z80_load_vreg(insn->src1, "hl");
+      println("  call __call_hl");
+    } else if (insn->label) {
+      println("  call _%s", insn->label);
+    }
+    if (insn->num_args > 0)
+      println("  ld hl, %d\n  add hl, sp\n  ld sp, hl", insn->num_args * 2);
+    if (insn->dst)
+      z80_store_vreg("hl", insn->dst);
+    break;
+  case LLIR_ASM:
+    println("  %s", insn->asm_str ? insn->asm_str : "");
+    break;
+  default:
+    break;
+  }
+}
+
+static void z80_gen_expr(LLIRInsn *insn, FILE *out) {
+  z80_gen_insn(insn, out);
+}
+
+static void z80_emit_text(LLIRProg *prog, FILE *out) {
+  (void)out;
+
+  if (prog->fns && prog->num_fns > 0) {
+    for (int i = 0; i < prog->num_fns; i++) {
+      LLIRFunction *fn = prog->fns[i];
+      Obj *fn_obj = fn->fn_obj;
+      if (!fn_obj || !fn_obj->is_function || !fn_obj->is_definition || !fn_obj->is_live)
+        continue;
+
+      if (!fn_obj->is_static)
+        println("  .globl _%s", fn->name);
+
+      println("  .text");
+      println("_%s:", fn->name);
+      current_fn = fn_obj;
+
+      ABI *fn_abi = fn->abi ? fn->abi : current_abi;
+
+      if (fn_abi && fn_abi->emit_prologue)
+        fn_abi->emit_prologue(fn_obj, output_file);
+
+      for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
+        z80_gen_insn(insn, output_file);
+      }
+
+      if (strcmp(fn->name, "main") == 0)
+        println("  ld hl, 0");
+
+      if (fn_abi && fn_abi->emit_epilogue)
+        fn_abi->emit_epilogue(fn_obj, output_file);
+    }
+    return;
+  }
+
+  for (Obj *fn = prog->globals; fn; fn = fn->next) {
     if (!fn->is_function || !fn->is_definition || !fn->is_live)
       continue;
 
@@ -333,20 +544,20 @@ static void z80_init(FILE *out) {
   depth = 0;
 }
 
-static void z80_codegen(Obj *prog, FILE *out) {
+static void z80_codegen(LLIRProg *prog, FILE *out) {
   output_file = out;
   depth = 0;
 
   if (current_abi && current_abi->assign_lvar_offsets)
-    current_abi->assign_lvar_offsets(prog);
+    current_abi->assign_lvar_offsets(prog->globals);
 
-  z80_emit_data(prog, out);
+  z80_emit_data(prog->globals, out);
   z80_emit_text(prog, out);
 }
 
 static void z80_codegen_llir(LLIRProg *prog, FILE *out) {
-  if (prog && prog->globals)
-    z80_codegen(prog->globals, out);
+  if (prog)
+    z80_codegen(prog, out);
 }
 
 Codegen codegen_z80 = {
@@ -355,10 +566,8 @@ Codegen codegen_z80 = {
   .default_abi_name = "z80",
   .init = z80_init,
   .codegen_llir = z80_codegen_llir,
-  .codegen = z80_codegen,
   .emit_data = z80_emit_data,
   .emit_text = z80_emit_text,
-  .gen_stmt = gen_stmt,
-  .gen_expr = gen_expr,
-  .gen_addr = gen_addr,
+  .gen_insn = z80_gen_insn,
+  .gen_expr = z80_gen_expr,
 };

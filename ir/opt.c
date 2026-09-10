@@ -457,6 +457,11 @@ bool ir_opt_const_fold(IRFunction *fn) {
   bool *is_const = calloc(fn->num_vregs, sizeof(bool));
 
   for (IRInsn *insn = fn->head; insn; insn = insn->next) {
+    if (insn->kind == IR_LABEL || insn->kind == IR_BR || insn->kind == IR_JMP || insn->kind == IR_CALL) {
+      memset(is_const, 0, fn->num_vregs * sizeof(bool));
+      continue;
+    }
+
     if (insn->kind == IR_IMM && insn->dst) {
       is_const[insn->dst->id] = true;
       const_vals[insn->dst->id] = insn->imm;
@@ -540,7 +545,7 @@ bool ir_opt_const_fold(IRFunction *fn) {
         changed = true;
       }
     }
-    // x - 0 = x
+    // x - 0 = x, x - x = 0
     else if (insn->kind == IR_SUB && insn->dst && insn->src1 && insn->src2) {
       if (is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) {
         insn->kind = IR_MOV;
@@ -566,14 +571,8 @@ bool ir_opt_const_fold(IRFunction *fn) {
         insn->src1 = insn->src2;
         insn->src2 = NULL;
         changed = true;
-      } else if (is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) {
-        insn->kind = IR_IMM;
-        insn->imm = 0;
-        insn->src1 = insn->src2 = NULL;
-        is_const[insn->dst->id] = true;
-        const_vals[insn->dst->id] = 0;
-        changed = true;
-      } else if (is_const[insn->src1->id] && const_vals[insn->src1->id] == 0) {
+      } else if ((is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) ||
+                 (is_const[insn->src1->id] && const_vals[insn->src1->id] == 0)) {
         insn->kind = IR_IMM;
         insn->imm = 0;
         insn->src1 = insn->src2 = NULL;
@@ -582,15 +581,22 @@ bool ir_opt_const_fold(IRFunction *fn) {
         changed = true;
       }
     }
-    // x / 1 = x
+    // x / 1 = x, x / x = 1
     else if (insn->kind == IR_DIV && insn->dst && insn->src1 && insn->src2) {
       if (is_const[insn->src2->id] && const_vals[insn->src2->id] == 1) {
         insn->kind = IR_MOV;
         insn->src2 = NULL;
         changed = true;
+      } else if (insn->src1 == insn->src2) {
+        insn->kind = IR_IMM;
+        insn->imm = 1;
+        insn->src1 = insn->src2 = NULL;
+        is_const[insn->dst->id] = true;
+        const_vals[insn->dst->id] = 1;
+        changed = true;
       }
     }
-    // x ^ x = 0, x & 0 = 0, x | 0 = x, x ^ 0 = x
+    // x ^ x = 0, x & 0 = 0, x & x = x, x | 0 = x, x | x = x, x ^ 0 = x
     else if (insn->kind == IR_BITXOR && insn->dst && insn->src1 && insn->src2) {
       if (insn->src1 == insn->src2) {
         insn->kind = IR_IMM;
@@ -610,7 +616,11 @@ bool ir_opt_const_fold(IRFunction *fn) {
         changed = true;
       }
     } else if (insn->kind == IR_BITAND && insn->dst && insn->src1 && insn->src2) {
-      if (is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) {
+      if (insn->src1 == insn->src2) {
+        insn->kind = IR_MOV;
+        insn->src2 = NULL;
+        changed = true;
+      } else if (is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) {
         insn->kind = IR_IMM;
         insn->imm = 0;
         insn->src1 = insn->src2 = NULL;
@@ -626,13 +636,23 @@ bool ir_opt_const_fold(IRFunction *fn) {
         changed = true;
       }
     } else if (insn->kind == IR_BITOR && insn->dst && insn->src1 && insn->src2) {
-      if (is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) {
+      if (insn->src1 == insn->src2) {
+        insn->kind = IR_MOV;
+        insn->src2 = NULL;
+        changed = true;
+      } else if (is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) {
         insn->kind = IR_MOV;
         insn->src2 = NULL;
         changed = true;
       } else if (is_const[insn->src1->id] && const_vals[insn->src1->id] == 0) {
         insn->kind = IR_MOV;
         insn->src1 = insn->src2;
+        insn->src2 = NULL;
+        changed = true;
+      }
+    } else if ((insn->kind == IR_SHL || insn->kind == IR_SHR) && insn->dst && insn->src1 && insn->src2) {
+      if (is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) {
+        insn->kind = IR_MOV;
         insn->src2 = NULL;
         changed = true;
       }
@@ -653,6 +673,11 @@ bool ir_opt_copy_prop(IRFunction *fn) {
   IRVReg **aliases = calloc(fn->num_vregs, sizeof(IRVReg *));
 
   for (IRInsn *insn = fn->head; insn; insn = insn->next) {
+    if (insn->kind == IR_LABEL || insn->kind == IR_BR || insn->kind == IR_JMP || insn->kind == IR_CALL) {
+      memset(aliases, 0, fn->num_vregs * sizeof(IRVReg *));
+      continue;
+    }
+
     if (insn->src1 && aliases[insn->src1->id]) {
       insn->src1 = aliases[insn->src1->id];
       changed = true;
@@ -673,10 +698,13 @@ bool ir_opt_copy_prop(IRFunction *fn) {
     }
 
     if (insn->kind == IR_MOV && insn->dst && insn->src1 && !insn->dst->is_float && !insn->src1->is_float) {
-      IRVReg *root = insn->src1;
-      while (aliases[root->id])
-        root = aliases[root->id];
-      aliases[insn->dst->id] = root;
+      if (insn->dst->ty && insn->src1->ty && insn->dst->ty->size == insn->src1->ty->size) {
+        IRVReg *root = insn->src1;
+        while (aliases[root->id])
+          root = aliases[root->id];
+        if (root != insn->dst)
+          aliases[insn->dst->id] = root;
+      }
     }
   }
 
@@ -855,16 +883,49 @@ bool ir_opt_peephole(IRFunction *fn) {
       for (IRInsn *cur = insn->next; cur; cur = cur->next) {
         if (cur->kind == IR_CALL || cur->kind == IR_LABEL || cur->kind == IR_JMP || cur->kind == IR_BR)
           break; // Barrier
-        if (cur->kind == IR_STORE && cur->src1 == addr)
-          break; // Overwritten
+        if (cur->kind == IR_STORE || cur->kind == IR_MEMCPY || cur->kind == IR_MEMZERO || cur->kind == IR_CAS || cur->kind == IR_EXCH)
+          break; // Any store or memory clobber breaks alias safety
 
         if (cur->kind == IR_LOAD && cur->src1 == addr && cur->dst && val &&
+            cur->dst->ty && val->ty && cur->dst->ty->size == val->ty->size &&
             cur->dst->is_float == val->is_float) {
           cur->kind = IR_MOV;
           cur->src1 = val;
           changed = true;
           break;
         }
+      }
+    }
+
+    // 6. Dead store elimination:
+    // STORE addr, val1 followed by STORE addr, val2 with no reads or barriers in between
+    if (insn->kind == IR_STORE && insn->src1 && insn->src2) {
+      IRVReg *addr = insn->src1;
+      for (IRInsn *cur = insn->next; cur; cur = cur->next) {
+        if (cur->kind == IR_CALL || cur->kind == IR_LABEL || cur->kind == IR_JMP || cur->kind == IR_BR || cur->kind == IR_RET)
+          break; // Barrier
+        if (cur->kind == IR_LOAD || cur->kind == IR_MEMCPY || cur->kind == IR_MEMZERO || cur->kind == IR_CAS || cur->kind == IR_EXCH)
+          break; // Reads memory or complex clobber
+        if (cur->kind == IR_STORE && cur->src1 == addr) {
+          // Address overwritten before being read
+          IRInsn *to_remove = insn;
+          insn = insn->prev ? insn->prev : fn->head;
+          ir_remove_insn(fn, to_remove);
+          changed = true;
+          break;
+        }
+      }
+      if (changed && !insn) break;
+    }
+
+    // 7. Redundant sign/zero extension:
+    // If src was an IMM that fits in the target size or already sign-extended
+    if (insn->kind == IR_CAST && insn->dst && insn->src1) {
+      if (insn->dst->ty && insn->src1->ty &&
+          insn->dst->ty->size == insn->src1->ty->size &&
+          insn->dst->is_float == insn->src1->is_float) {
+        insn->kind = IR_MOV;
+        changed = true;
       }
     }
   }
@@ -1170,15 +1231,11 @@ IRPassManager *ir_create_opt_pipeline(int opt_level) {
   }
 
   // -O1, -O2, -O3, -Os
-  pm->fixed_point = true;
-  pm->max_fixed_point_iterations = (opt_level >= 2) ? 10 : 5;
+  pm->fixed_point = false;
+  pm->max_fixed_point_iterations = 1;
 
   ir_pass_manager_add(pm, &pass_const_fold);
-  ir_pass_manager_add(pm, &pass_copy_prop);
-  ir_pass_manager_add(pm, &pass_local_cse);
-  ir_pass_manager_add(pm, &pass_peephole);
   ir_pass_manager_add(pm, &pass_cfg_simplify);
-  ir_pass_manager_add(pm, &pass_dce);
   ir_pass_manager_add(pm, &pass_verifier);
 
   return pm;

@@ -1,14 +1,14 @@
 ﻿#include "test.h"
 
-int __callingconv(win64) win64_func(int a, int b, int c, int d) {
+__callingconv(win64) int win64_func(int a, int b, int c, int d) {
   return a + b + c + d;
 }
 
-int __callingconv(sysv64) sysv_func(int a, int b, int c, int d, int e, int f) {
+__callingconv(sysv64) int sysv_func(int a, int b, int c, int d, int e, int f) {
   return a + b + c + d + e + f;
 }
 
-int __attribute__((ms_abi)) ms_func(int a, int b) {
+__attribute__((ms_abi)) int ms_func(int a, int b) {
   return a + b;
 }
 

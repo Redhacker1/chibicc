@@ -53,3 +53,14 @@ void init_abis(void) {
   // Default ABI is SysV x86_64
   set_abi("sysv64");
 }
+
+void declare_abi_builtin_types(void) {
+  for (int i = 0; i < abi_count; i++) {
+    if (abis[i] && abis[i] != current_abi && abis[i]->declare_builtin_types)
+      abis[i]->declare_builtin_types();
+  }
+  if (current_abi && current_abi->declare_builtin_types)
+    current_abi->declare_builtin_types();
+  else
+    push_scope("__builtin_va_list")->type_def = pointer_to(ty_char);
+}
