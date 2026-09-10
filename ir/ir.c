@@ -39,6 +39,8 @@ void ir_append_insn(IRFunction *fn, IRInsn *insn) {
     insn->prev = fn->tail;
     fn->tail = insn;
   }
+  if (insn->dst)
+    insn->dst->def_insn = insn;
 }
 
 void ir_insert_before(IRFunction *fn, IRInsn *target, IRInsn *new_insn) {
@@ -54,6 +56,8 @@ void ir_insert_before(IRFunction *fn, IRInsn *target, IRInsn *new_insn) {
     fn->head = new_insn;
   target->prev = new_insn;
   fn->num_insns++;
+  if (new_insn->dst)
+    new_insn->dst->def_insn = new_insn;
 }
 
 void ir_insert_after(IRFunction *fn, IRInsn *target, IRInsn *new_insn) {
@@ -69,6 +73,8 @@ void ir_insert_after(IRFunction *fn, IRInsn *target, IRInsn *new_insn) {
     fn->tail = new_insn;
   target->next = new_insn;
   fn->num_insns++;
+  if (new_insn->dst)
+    new_insn->dst->def_insn = new_insn;
 }
 
 void ir_remove_insn(IRFunction *fn, IRInsn *insn) {
@@ -100,12 +106,17 @@ void ir_replace_insn(IRFunction *fn, IRInsn *old_insn, IRInsn *new_insn) {
   else
     fn->tail = new_insn;
   old_insn->prev = old_insn->next = NULL;
+  if (new_insn->dst)
+    new_insn->dst->def_insn = new_insn;
 }
 
 void ir_renumber_insns(IRFunction *fn) {
   int pos = 0;
-  for (IRInsn *insn = fn->head; insn; insn = insn->next)
+  for (IRInsn *insn = fn->head; insn; insn = insn->next) {
     insn->pos = pos++;
+    if (insn->dst)
+      insn->dst->def_insn = insn;
+  }
   fn->num_insns = pos;
 }
 
@@ -487,8 +498,16 @@ static IRVReg *gen_expr_ir(IRFunction *fn, Node *node) {
     IRVReg *src = gen_expr_ir(fn, node->lhs);
     if (node->ty->kind == TY_VOID)
       return NULL;
-    if (src && node->lhs && node->lhs->ty && node->lhs->ty == node->ty)
-      return src;
+    if (src && node->lhs && node->lhs->ty) {
+      if (node->lhs->ty == node->ty)
+        return src;
+      if (node->lhs->ty->base && node->ty->base)
+        return src;
+      if (node->lhs->ty->size == node->ty->size &&
+          node->lhs->ty->is_unsigned == node->ty->is_unsigned &&
+          is_flonum(node->lhs->ty) == is_flonum(node->ty))
+        return src;
+    }
     IRVReg *dst = ir_new_vreg(fn, node->ty);
     IRInsn *insn = ir_new_insn(IR_CAST);
     insn->dst = dst;
@@ -750,12 +769,19 @@ static IRVReg *gen_expr_ir(IRFunction *fn, Node *node) {
       arg_vregs[i++] = v;
     }
 
-    IRVReg *callee = gen_expr_ir(fn, node->lhs);
+    IRVReg *callee = NULL;
+    char *label = NULL;
+    if (node->lhs->kind == ND_VAR && (node->lhs->var->is_function || (node->lhs->var->ty && node->lhs->var->ty->kind == TY_FUNC))) {
+      label = node->lhs->var->name;
+    } else {
+      callee = gen_expr_ir(fn, node->lhs);
+    }
 
     IRVReg *dst = (node->ty->kind != TY_VOID) ? ir_new_vreg(fn, node->ty) : NULL;
     IRInsn *call = ir_new_insn(IR_CALL);
     call->dst = dst;
     call->src1 = callee;
+    call->label = label;
     call->num_args = argc;
     call->args = arg_vregs;
     call->call_abi = callee_abi;

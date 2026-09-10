@@ -73,6 +73,31 @@ static int test_cse_memory_barrier(void) {
   return 0;
 }
 
+// 5. Address CSE Disambiguation (different local vars must not match)
+static int test_addr_cse_distinct_vars(void) {
+  int x = opaque_val(13);
+  int y = opaque_val(47);
+  ASSERT(13, x);
+  ASSERT(47, y);
+
+  x = opaque_val(100);
+  ASSERT(100, x);
+  ASSERT(47, y);
+
+  y = opaque_val(200);
+  ASSERT(100, x);
+  ASSERT(200, y);
+
+  int *px = &x;
+  int *py = &y;
+  ASSERT(1, px != py);
+  *px = 300;
+  *py = 400;
+  ASSERT(300, x);
+  ASSERT(400, y);
+  return 0;
+}
+
 int main(void) {
   int a = opaque_val(15);
   int b = opaque_val(25);
@@ -82,6 +107,7 @@ int main(void) {
   test_commutative_cse(a, b);
   test_complex_subexpr(a, b, c);
   test_cse_memory_barrier();
+  test_addr_cse_distinct_vars();
 
   printf("OK\n");
   return 0;

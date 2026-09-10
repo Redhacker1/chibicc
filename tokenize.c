@@ -476,7 +476,7 @@ static void add_line_numbers(Token *tok) {
   int n = 1;
 
   do {
-    if (p == tok->loc) {
+    if (tok && p == tok->loc) {
       tok->line_no = n;
       tok = tok->next;
     }

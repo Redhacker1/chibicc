@@ -3,6 +3,8 @@
 #include "codegen/common/common.h"
 #include "ir/ir.h"
 
+extern Obj *current_fn;
+
 #define WIN64_REG_MAX 4
 #define WIN64_SHADOW_SPACE 32
 
@@ -1008,15 +1010,8 @@ static void win64_load_vreg(LLIRVReg *v, const char *reg, FILE *out) {
 static void win64_store_vreg(const char *reg, LLIRVReg *v, FILE *out) {
   if (!v) return;
   int offset = v->spill_offset ? v->spill_offset : -((v->id + 1) * 8);
-  int sz = v->ty ? v->ty->size : 8;
   if (reg[1] == 'x') {
     println_abi(out, "  movq %s, %d(%%rbp)", reg, offset);
-  } else if (sz == 1) {
-    println_abi(out, "  movb %s, %d(%%rbp)", win64_reg8(reg), offset);
-  } else if (sz == 2) {
-    println_abi(out, "  movw %s, %d(%%rbp)", win64_reg16(reg), offset);
-  } else if (sz == 4) {
-    println_abi(out, "  movl %s, %d(%%rbp)", win64_reg32(reg), offset);
   } else {
     println_abi(out, "  movq %s, %d(%%rbp)", reg, offset);
   }

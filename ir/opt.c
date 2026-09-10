@@ -517,6 +517,19 @@ bool ir_opt_const_fold(IRFunction *fn) {
       case IR_NEG: res = -c; break;
       case IR_BITNOT: res = ~c; break;
       case IR_LOGNOT: res = !c; break;
+      case IR_CAST: {
+        if (insn->dst->is_float) {
+          folded = false;
+        } else {
+          int sz = insn->dst->ty ? insn->dst->ty->size : 8;
+          bool is_unsigned = insn->dst->ty ? insn->dst->ty->is_unsigned : false;
+          res = c;
+          if (sz == 1) res = is_unsigned ? (uint8_t)c : (int8_t)c;
+          else if (sz == 2) res = is_unsigned ? (uint16_t)c : (int16_t)c;
+          else if (sz == 4) res = is_unsigned ? (uint32_t)c : (int32_t)c;
+        }
+        break;
+      }
       default: folded = false; break;
       }
 
@@ -673,7 +686,7 @@ bool ir_opt_copy_prop(IRFunction *fn) {
   IRVReg **aliases = calloc(fn->num_vregs, sizeof(IRVReg *));
 
   for (IRInsn *insn = fn->head; insn; insn = insn->next) {
-    if (insn->kind == IR_LABEL || insn->kind == IR_BR || insn->kind == IR_JMP || insn->kind == IR_CALL) {
+    if (insn->kind == IR_LABEL || insn->kind == IR_BR || insn->kind == IR_JMP) {
       memset(aliases, 0, fn->num_vregs * sizeof(IRVReg *));
       continue;
     }
@@ -953,8 +966,13 @@ bool ir_opt_local_cse(IRFunction *fn) {
         break; // Memory dependency
 
       if (sub->kind == insn->kind && sub->dst) {
+        if (sub->var != insn->var)
+          continue;
+        if ((sub->label || insn->label) && (!sub->label || !insn->label || strcmp(sub->label, insn->label) != 0))
+          continue;
+
         bool match = false;
-        if (sub->src1 == insn->src1 && sub->src2 == insn->src2 && sub->src3 == insn->src3 && sub->imm == insn->imm) {
+        if (sub->src1 == insn->src1 && sub->src2 == insn->src2 && sub->src3 == insn->src3 && sub->imm == insn->imm && sub->fimm == insn->fimm) {
           match = true;
         } else if (ir_insn_is_commutative(insn->kind) && sub->src1 == insn->src2 && sub->src2 == insn->src1) {
           match = true;
@@ -1224,18 +1242,22 @@ IRPassManager *ir_create_opt_pipeline(int opt_level) {
   IRPassManager *pm = ir_pass_manager_new();
 
   if (opt_level <= 0) {
-    // -O0: Minimal cleanup only
+    // -O0: Basic cleanup only
     pm->fixed_point = false;
     ir_pass_manager_add(pm, &pass_verifier);
     return pm;
   }
 
   // -O1, -O2, -O3, -Os
-  pm->fixed_point = false;
-  pm->max_fixed_point_iterations = 1;
+  pm->fixed_point = true;
+  pm->max_fixed_point_iterations = (opt_level >= 2) ? 8 : 4;
 
   ir_pass_manager_add(pm, &pass_const_fold);
+  ir_pass_manager_add(pm, &pass_copy_prop);
+  ir_pass_manager_add(pm, &pass_local_cse);
+  ir_pass_manager_add(pm, &pass_peephole);
   ir_pass_manager_add(pm, &pass_cfg_simplify);
+  ir_pass_manager_add(pm, &pass_dce);
   ir_pass_manager_add(pm, &pass_verifier);
 
   return pm;

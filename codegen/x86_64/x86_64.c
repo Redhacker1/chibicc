@@ -6,7 +6,52 @@
 
 static FILE *output_file;
 static int depth;
-static Obj *current_fn;
+Obj *current_fn = NULL;
+static bool *current_needs_mat = NULL;
+
+static void compute_materialization(LLIRFunction *fn) {
+  if (current_needs_mat) {
+    free(current_needs_mat);
+    current_needs_mat = NULL;
+  }
+  if (!fn || fn->num_vregs == 0)
+    return;
+
+  current_needs_mat = calloc(fn->num_vregs, sizeof(bool));
+  for (int i = 0; i < fn->num_vregs; i++)
+    current_needs_mat[i] = true;
+
+  for (int i = 0; i < fn->num_vregs; i++) {
+    LLIRVReg *v = fn->vregs[i];
+    if (!v || !v->def_insn)
+      continue;
+
+    if (v->def_insn->kind == LLIR_LEA && v->def_insn->var) {
+      bool all_uses_foldable = true;
+      for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
+        if (insn->src1 == v) {
+          if (insn->kind != LLIR_LOAD && insn->kind != LLIR_STORE) {
+            all_uses_foldable = false;
+            break;
+          }
+        }
+        if (insn->src2 == v || insn->src3 == v) {
+          all_uses_foldable = false;
+          break;
+        }
+        for (int a = 0; a < insn->num_args; a++) {
+          if (insn->args[a] == v) {
+            all_uses_foldable = false;
+            break;
+          }
+        }
+      }
+
+      if (all_uses_foldable)
+        current_needs_mat[v->id] = false;
+    }
+  }
+}
 
 static void gen_expr(Node *node, FILE *out);
 static void gen_stmt(Node *node, FILE *out);
@@ -1928,12 +1973,41 @@ static void emit_data(Obj *prog, FILE *out) {
           rel = rel->next;
           pos += 8;
         } else {
-          /*
-           * Keep the existing byte-oriented initializer format for
-           * correctness with arbitrary packed/static initializer data.
-           */
-          println("  .byte %d",
-                  var->init_data[pos++]);
+          int end = rel ? rel->offset : var->ty->size;
+          if (end > var->ty->size)
+            end = var->ty->size;
+
+          int z = pos;
+          while (z < end && var->init_data[z] == 0)
+            z++;
+          if (z - pos >= 4) {
+            println("  .zero %d", z - pos);
+            pos = z;
+            continue;
+          }
+
+          int count = end - pos;
+          if (count > 16)
+            count = 16;
+
+          for (int k = 1; k < count; k++) {
+            if (pos + k + 3 < end &&
+                var->init_data[pos + k] == 0 &&
+                var->init_data[pos + k + 1] == 0 &&
+                var->init_data[pos + k + 2] == 0 &&
+                var->init_data[pos + k + 3] == 0) {
+              count = k;
+              break;
+            }
+          }
+
+          char buf[512];
+          int off = sprintf(buf, "  .byte %d", (unsigned char)var->init_data[pos]);
+          for (int i = 1; i < count; i++) {
+            off += sprintf(buf + off, ", %d", (unsigned char)var->init_data[pos + i]);
+          }
+          println("%s", buf);
+          pos += count;
         }
       }
 
@@ -2018,8 +2092,16 @@ static const char *x86_reg8(const char *r64) {
   return r64;
 }
 
+static LLIRVReg *cached_rax_vreg = NULL;
+
+static void invalidate_cached_regs(void) {
+  cached_rax_vreg = NULL;
+}
+
 static void load_vreg(LLIRVReg *v, const char *reg) {
   if (!v) return;
+  if (!strcmp(reg, "%rax") && cached_rax_vreg == v)
+    return;
   int offset = v->spill_offset ? v->spill_offset : -((v->id + 1) * 8);
   if (v->is_float) {
     if (reg[1] == 'x') { // %xmm...
@@ -2033,27 +2115,38 @@ static void load_vreg(LLIRVReg *v, const char *reg) {
       else
         println("  movq %d(%%rbp), %s", offset, reg);
     }
+    cached_rax_vreg = (!strcmp(reg, "%rax")) ? v : NULL;
   } else {
     int sz = v->ty ? v->ty->size : 8;
     if (reg[1] == 'x') { // %xmm...
       println("  movq %d(%%rbp), %s", offset, reg);
+      cached_rax_vreg = NULL;
     } else if (sz == 1) {
       if (v->ty && v->ty->is_unsigned)
         println("  movzbq %d(%%rbp), %s", offset, reg);
       else
         println("  movsbq %d(%%rbp), %s", offset, reg);
+      cached_rax_vreg = (!strcmp(reg, "%rax")) ? v : NULL;
     } else if (sz == 2) {
       if (v->ty && v->ty->is_unsigned)
         println("  movzwq %d(%%rbp), %s", offset, reg);
       else
         println("  movswq %d(%%rbp), %s", offset, reg);
+      cached_rax_vreg = (!strcmp(reg, "%rax")) ? v : NULL;
     } else if (sz == 4) {
       if (v->ty && v->ty->is_unsigned)
         println("  movl %d(%%rbp), %s", offset, x86_reg32(reg));
       else
         println("  movslq %d(%%rbp), %s", offset, reg);
+      cached_rax_vreg = (!strcmp(reg, "%rax")) ? v : NULL;
     } else {
-      println("  movq %d(%%rbp), %s", offset, reg);
+      if (cached_rax_vreg == v && strcmp(reg, "%rax") != 0) {
+        println("  movq %%rax, %s", reg);
+      } else {
+        println("  movq %d(%%rbp), %s", offset, reg);
+        if (!strcmp(reg, "%rax"))
+          cached_rax_vreg = v;
+      }
     }
   }
 }
@@ -2073,18 +2166,15 @@ static void store_vreg(const char *reg, LLIRVReg *v) {
       else
         println("  movq %s, %d(%%rbp)", reg, offset);
     }
+    cached_rax_vreg = NULL;
   } else {
-    int sz = v->ty ? v->ty->size : 8;
     if (reg[1] == 'x') {
       println("  movq %s, %d(%%rbp)", reg, offset);
-    } else if (sz == 1) {
-      println("  movb %s, %d(%%rbp)", x86_reg8(reg), offset);
-    } else if (sz == 2) {
-      println("  movw %s, %d(%%rbp)", x86_reg16(reg), offset);
-    } else if (sz == 4) {
-      println("  movl %s, %d(%%rbp)", x86_reg32(reg), offset);
+      cached_rax_vreg = NULL;
     } else {
       println("  movq %s, %d(%%rbp)", reg, offset);
+      if (!strcmp(reg, "%rax"))
+        cached_rax_vreg = v;
     }
   }
 }
@@ -2257,8 +2347,103 @@ static void x86_64_emit_unary(LLIRInsn *insn, const char *op) {
   store_vreg("%rax", insn->dst);
 }
 
+typedef struct {
+  const char *base_reg;
+  int offset;
+  char buf[64];
+} X86Addr;
+
+static void x86_get_addr(LLIRVReg *addr_vreg, X86Addr *addr) {
+  if (!addr_vreg) {
+    addr->base_reg = "%rax";
+    addr->offset = 0;
+    sprintf(addr->buf, "(%%rax)");
+    return;
+  }
+
+  // Case 1: addr_vreg is LEA of a local or global variable
+  LLIRInsn *def = addr_vreg->def_insn;
+  if (def && def->kind == LLIR_LEA) {
+    if (def->var) {
+      if (def->var->is_local) {
+        addr->base_reg = "%rbp";
+        addr->offset = def->var->offset;
+        sprintf(addr->buf, "%d(%%rbp)", def->var->offset);
+        return;
+      } else {
+        addr->base_reg = "%rip";
+        addr->offset = 0;
+        sprintf(addr->buf, "%s(%%rip)", def->var->name);
+        return;
+      }
+    } else if (def->label) {
+      addr->base_reg = "%rip";
+      addr->offset = 0;
+      sprintf(addr->buf, "%s(%%rip)", def->label);
+      return;
+    }
+  }
+
+  // Case 2: addr_vreg is ADD(base, IMM) or ADD(IMM, base)
+  if (def && def->kind == LLIR_ADD && def->src1 && def->src2) {
+    LLIRInsn *def1 = def->src1->def_insn;
+    LLIRInsn *def2 = def->src2->def_insn;
+    LLIRVReg *base = NULL;
+    int64_t imm = 0;
+    bool has_imm = false;
+
+    if (def2 && def2->kind == LLIR_IMM) {
+      base = def->src1;
+      imm = def2->imm;
+      has_imm = true;
+    } else if (def1 && def1->kind == LLIR_IMM) {
+      base = def->src2;
+      imm = def1->imm;
+      has_imm = true;
+    }
+
+    if (has_imm) {
+      LLIRInsn *base_def = base->def_insn;
+      if (base_def && base_def->kind == LLIR_LEA) {
+        if (base_def->var) {
+          if (base_def->var->is_local) {
+            int total_off = base_def->var->offset + (int)imm;
+            addr->base_reg = "%rbp";
+            addr->offset = total_off;
+            sprintf(addr->buf, "%d(%%rbp)", total_off);
+            return;
+          } else {
+            addr->base_reg = "%rip";
+            addr->offset = (int)imm;
+            if (imm == 0)
+              sprintf(addr->buf, "%s(%%rip)", base_def->var->name);
+            else
+              sprintf(addr->buf, "%s%+d(%%rip)", base_def->var->name, (int)imm);
+            return;
+          }
+        }
+      }
+      load_vreg(base, "%rax");
+      addr->base_reg = "%rax";
+      addr->offset = (int)imm;
+      if (imm == 0)
+        sprintf(addr->buf, "(%%rax)");
+      else
+        sprintf(addr->buf, "%d(%%rax)", (int)imm);
+      return;
+    }
+  }
+
+  // Default: load address into %rax
+  load_vreg(addr_vreg, "%rax");
+  addr->base_reg = "%rax";
+  addr->offset = 0;
+  sprintf(addr->buf, "(%%rax)");
+}
+
 static void x86_64_emit_load(LLIRInsn *insn) {
-  load_vreg(insn->src1, "%rax");
+  X86Addr addr;
+  x86_get_addr(insn->src1, &addr);
 
   Type *ty = insn->ty;
   int sz = ty ? ty->size : 8;
@@ -2266,27 +2451,27 @@ static void x86_64_emit_load(LLIRInsn *insn) {
   switch (sz) {
   case 1:
     if (ty && ty->is_unsigned)
-      println("  movzbl (%%rax), %%eax");
+      println("  movzbl %s, %%eax", addr.buf);
     else
-      println("  movsbl (%%rax), %%eax");
+      println("  movsbl %s, %%eax", addr.buf);
     break;
 
   case 2:
     if (ty && ty->is_unsigned)
-      println("  movzwl (%%rax), %%eax");
+      println("  movzwl %s, %%eax", addr.buf);
     else
-      println("  movswl (%%rax), %%eax");
+      println("  movswl %s, %%eax", addr.buf);
     break;
 
   case 4:
     if (ty && ty->is_unsigned)
-      println("  movl (%%rax), %%eax");
+      println("  movl %s, %%eax", addr.buf);
     else
-      println("  movslq (%%rax), %%rax");
+      println("  movslq %s, %%rax", addr.buf);
     break;
 
   default:
-    println("  movq (%%rax), %%rax");
+    println("  movq %s, %%rax", addr.buf);
     break;
   }
 
@@ -2327,40 +2512,48 @@ static void classify_struct_eightbytes(Type *ty, EightbyteClass *cls0, Eightbyte
 }
 
 static void x86_64_emit_store(LLIRInsn *insn) {
-  load_vreg(insn->src1, "%rax");
+  X86Addr addr;
   if (insn->ty && (insn->ty->kind == TY_STRUCT || insn->ty->kind == TY_UNION)) {
     int src2_offset = insn->src2 ? (insn->src2->spill_offset ? insn->src2->spill_offset : -((insn->src2->id + 1) * 8)) : 0;
     if (insn->ty->size <= 8) {
       load_vreg(insn->src2, "%rcx");
+      x86_get_addr(insn->src1, &addr);
       switch (insn->ty->size) {
-      case 1: println("  movb %%cl, (%%rax)"); break;
-      case 2: println("  movw %%cx, (%%rax)"); break;
-      case 4: println("  movl %%ecx, (%%rax)"); break;
-      default: println("  movq %%rcx, (%%rax)"); break;
+      case 1: println("  movb %%cl, %s", addr.buf); break;
+      case 2: println("  movw %%cx, %s", addr.buf); break;
+      case 4: println("  movl %%ecx, %s", addr.buf); break;
+      default: println("  movq %%rcx, %s", addr.buf); break;
       }
       return;
     } else if (insn->ty->size <= 16) {
+      x86_get_addr(insn->src1, &addr);
       println("  movq %d(%%rbp), %%rcx", src2_offset);
-      println("  movq %%rcx, (%%rax)");
-      println("  movq %d(%%rbp), %%rcx", src2_offset + 8);
-      println("  movq %%rcx, 8(%%rax)");
+      println("  movq %%rcx, %s", addr.buf);
+      if (!strcmp(addr.base_reg, "%rbp")) {
+        println("  movq %d(%%rbp), %%rcx", src2_offset + 8);
+        println("  movq %%rcx, %d(%%rbp)", addr.offset + 8);
+      } else {
+        println("  movq %d(%%rbp), %%rcx", src2_offset + 8);
+        println("  movq %%rcx, %d(%%rax)", addr.offset + 8);
+      }
       return;
     }
   }
   load_vreg(insn->src2, "%rdx");
+  x86_get_addr(insn->src1, &addr);
 
   switch (insn->ty ? insn->ty->size : 8) {
   case 1:
-    println("  movb %%dl, (%%rax)");
+    println("  movb %%dl, %s", addr.buf);
     break;
   case 2:
-    println("  movw %%dx, (%%rax)");
+    println("  movw %%dx, %s", addr.buf);
     break;
   case 4:
-    println("  movl %%edx, (%%rax)");
+    println("  movl %%edx, %s", addr.buf);
     break;
   default:
-    println("  movq %%rdx, (%%rax)");
+    println("  movq %%rdx, %s", addr.buf);
     break;
   }
 }
@@ -2396,14 +2589,66 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
     break;
 
   case LLIR_LABEL:
+    invalidate_cached_regs();
     println("%s:", insn->label ? insn->label : "");
     break;
 
   case LLIR_JMP:
+    invalidate_cached_regs();
     println("  jmp %s", insn->label ? insn->label : "");
     break;
 
-  case LLIR_BR_COND:
+  case LLIR_BR_COND: {
+    LLIRInsn *def = insn->src1 ? insn->src1->def_insn : NULL;
+    invalidate_cached_regs();
+
+    if (def && (!def->src1 || !def->src1->ty || !is_flonum(def->src1->ty)) &&
+        (def->kind == LLIR_CMP_EQ || def->kind == LLIR_CMP_NE ||
+         def->kind == LLIR_CMP_LT || def->kind == LLIR_CMP_LE ||
+         def->kind == LLIR_CMP_GT || def->kind == LLIR_CMP_GE)) {
+      load_vreg(def->src1, "%rax");
+      load_vreg(def->src2, "%rdx");
+      println("  cmp %%rdx, %%rax");
+
+      bool uns = def->src1 && def->src1->ty && def->src1->ty->is_unsigned;
+      const char *cc = "e";
+      const char *inv_cc = "ne";
+
+      switch (def->kind) {
+      case LLIR_CMP_EQ: cc = "e";  inv_cc = "ne"; break;
+      case LLIR_CMP_NE: cc = "ne"; inv_cc = "e";  break;
+      case LLIR_CMP_LT: cc = uns ? "b" : "l";   inv_cc = uns ? "ae" : "ge"; break;
+      case LLIR_CMP_LE: cc = uns ? "be" : "le"; inv_cc = uns ? "a" : "g";   break;
+      case LLIR_CMP_GT: cc = uns ? "a" : "g";   inv_cc = uns ? "be" : "le"; break;
+      case LLIR_CMP_GE: cc = uns ? "ae" : "ge"; inv_cc = uns ? "b" : "l";   break;
+      default: break;
+      }
+
+      if (insn->label_true && insn->label_false) {
+        println("  j%s %s", cc, insn->label_true);
+        println("  jmp %s", insn->label_false);
+      } else if (insn->label_true) {
+        println("  j%s %s", cc, insn->label_true);
+      } else if (insn->label_false) {
+        println("  j%s %s", inv_cc, insn->label_false);
+      }
+      break;
+    }
+
+    if (def && def->kind == LLIR_LOGNOT) {
+      load_vreg(def->src1, "%rax");
+      println("  test %%rax, %%rax");
+      if (insn->label_true && insn->label_false) {
+        println("  je %s", insn->label_true);
+        println("  jmp %s", insn->label_false);
+      } else if (insn->label_true) {
+        println("  je %s", insn->label_true);
+      } else if (insn->label_false) {
+        println("  jne %s", insn->label_false);
+      }
+      break;
+    }
+
     load_vreg(insn->src1, "%rax");
     println("  test %%rax, %%rax");
 
@@ -2416,12 +2661,17 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
       println("  je %s", insn->label_false);
     }
     break;
+  }
 
   case LLIR_IMM:
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     if (insn->imm == 0)
       println("  xor %%eax, %%eax");
-    else if ((int64_t)(int32_t)insn->imm == insn->imm)
+    else if (insn->imm > 0 && insn->imm <= 0x7FFFFFFFLL)
       println("  mov $%lld, %%eax", (long long)insn->imm);
+    else if ((int64_t)(int32_t)insn->imm == insn->imm)
+      println("  mov $%lld, %%rax", (long long)insn->imm);
     else
       println("  movabs $%lld, %%rax", (long long)insn->imm);
 
@@ -2429,6 +2679,8 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
     break;
 
   case LLIR_FIMM: {
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     if (insn->ty && insn->ty->kind == TY_FLOAT) {
       union {
         float f;
@@ -2453,6 +2705,8 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
   }
 
   case LLIR_LEA:
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     if (insn->var) {
       if (insn->var->is_local)
         println("  lea %d(%%rbp), %%rax", insn->var->offset);
@@ -2476,7 +2730,7 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
 
     load_vreg(insn->src1, "%rax");
 
-    if (!from || !to) {
+    if (!from || !to || (from->size == to->size && from->is_unsigned == to->is_unsigned && is_flonum(from) == is_flonum(to))) {
       store_vreg("%rax", insn->dst);
       break;
     }
@@ -2679,10 +2933,13 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
     break;
 
   case LLIR_RET:
+    invalidate_cached_regs();
     if (insn->src1) {
       load_vreg(insn->src1, "%rax");
 
-      if (insn->ty &&
+      if (insn->ty && is_flonum(insn->ty)) {
+        println("  movq %%rax, %%xmm0");
+      } else if (insn->ty &&
           (insn->ty->kind == TY_STRUCT ||
            insn->ty->kind == TY_UNION)) {
         ABI *fn_abi =
@@ -2697,6 +2954,7 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
     break;
 
   case LLIR_CALL: {
+    invalidate_cached_regs();
     ABI *callee_abi = insn->call_abi ? insn->call_abi : ((current_fn && current_fn->abi) ? current_fn->abi : current_abi);
     if (callee_abi && callee_abi->emit_call) {
       callee_abi->emit_call(insn, output_file);
@@ -2705,6 +2963,7 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
   }
 
   case LLIR_ASM:
+    invalidate_cached_regs();
     println("  %s", insn->asm_str ? insn->asm_str : "");
     break;
 
@@ -2784,19 +3043,68 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
 
     break;
 
-  case LLIR_MEMCPY:
-    load_vreg(insn->src1, "%rdi");
-    load_vreg(insn->src2, "%rsi");
-    println("  mov $%lld, %%rcx", (long long)insn->imm);
-    println("  rep movsb");
+  case LLIR_MEMCPY: {
+    invalidate_cached_regs();
+    int64_t sz = insn->imm;
+    if (sz == 1) {
+      load_vreg(insn->src2, "%rax");
+      load_vreg(insn->src1, "%rdx");
+      println("  movb (%%rax), %%cl");
+      println("  movb %%cl, (%%rdx)");
+    } else if (sz == 2) {
+      load_vreg(insn->src2, "%rax");
+      load_vreg(insn->src1, "%rdx");
+      println("  movw (%%rax), %%cx");
+      println("  movw %%cx, (%%rdx)");
+    } else if (sz == 4) {
+      load_vreg(insn->src2, "%rax");
+      load_vreg(insn->src1, "%rdx");
+      println("  movl (%%rax), %%ecx");
+      println("  movl %%ecx, (%%rdx)");
+    } else if (sz == 8) {
+      load_vreg(insn->src2, "%rax");
+      load_vreg(insn->src1, "%rdx");
+      println("  movq (%%rax), %%rcx");
+      println("  movq %%rcx, (%%rdx)");
+    } else if (sz == 16) {
+      load_vreg(insn->src2, "%rax");
+      load_vreg(insn->src1, "%rdx");
+      println("  movq (%%rax), %%rcx");
+      println("  movq %%rcx, (%%rdx)");
+      println("  movq 8(%%rax), %%rcx");
+      println("  movq %%rcx, 8(%%rdx)");
+    } else {
+      load_vreg(insn->src1, "%rdi");
+      load_vreg(insn->src2, "%rsi");
+      println("  mov $%lld, %%rcx", (long long)insn->imm);
+      println("  rep movsb");
+    }
     break;
+  }
 
-  case LLIR_MEMZERO:
-    load_vreg(insn->src1, "%rdi");
-    println("  xor %%eax, %%eax");
-    println("  mov $%lld, %%rcx", (long long)insn->imm);
-    println("  rep stosb");
+  case LLIR_MEMZERO: {
+    invalidate_cached_regs();
+    int64_t sz = insn->imm;
+    load_vreg(insn->src1, "%rax");
+    if (sz == 1) {
+      println("  movb $0, (%%rax)");
+    } else if (sz == 2) {
+      println("  movw $0, (%%rax)");
+    } else if (sz == 4) {
+      println("  movl $0, (%%rax)");
+    } else if (sz == 8) {
+      println("  movq $0, (%%rax)");
+    } else if (sz == 16) {
+      println("  movq $0, (%%rax)");
+      println("  movq $0, 8(%%rax)");
+    } else {
+      println("  mov %%rax, %%rdi");
+      println("  xor %%eax, %%eax");
+      println("  mov $%lld, %%rcx", (long long)insn->imm);
+      println("  rep stosb");
+    }
     break;
+  }
 
   default:
     break;
@@ -2835,6 +3143,9 @@ static void emit_text(LLIRProg *prog, FILE *out) {
 
       if (fn_abi && fn_abi->emit_prologue)
         fn_abi->emit_prologue(fn_obj, output_file);
+
+      compute_materialization(fn);
+      invalidate_cached_regs();
 
       // Assemble LLIR instructions directly from LLIRFunction
       for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {

@@ -344,9 +344,19 @@ static Obj *new_anon_gvar(Type *ty) {
   return new_gvar(new_unique_name(), ty);
 }
 
+static HashMap str_pool;
+
 static Obj *new_string_literal(char *p, Type *ty) {
+  if (ty && ty->kind == TY_ARRAY && ty->base == ty_char && ty->size > 0 && p) {
+    Obj *cached = hashmap_get2(&str_pool, p, ty->size);
+    if (cached)
+      return cached;
+  }
   Obj *var = new_anon_gvar(ty);
   var->init_data = p;
+  if (ty && ty->kind == TY_ARRAY && ty->base == ty_char && ty->size > 0 && p) {
+    hashmap_put2(&str_pool, p, ty->size, var);
+  }
   return var;
 }
 
@@ -2748,7 +2758,8 @@ Node *new_add(Node *lhs, Node *rhs, Token *tok) {
 
   // ptr + num
   rhs = new_cast(rhs, ty_llong);
-  rhs = new_binary(ND_MUL, rhs, new_num(lhs->ty->base->size, tok), tok);
+  if (lhs->ty->base->size != 1)
+    rhs = new_binary(ND_MUL, rhs, new_num(lhs->ty->base->size, tok), tok);
   return new_binary(ND_ADD, lhs, rhs, tok);
 }
 
@@ -2773,7 +2784,8 @@ Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
   // ptr - num
   if (lhs->ty->base && is_integer(rhs->ty)) {
     rhs = new_cast(rhs, ty_llong);
-    rhs = new_binary(ND_MUL, rhs, new_num(lhs->ty->base->size, tok), tok);
+    if (lhs->ty->base->size != 1)
+      rhs = new_binary(ND_MUL, rhs, new_num(lhs->ty->base->size, tok), tok);
     add_type(rhs);
     Node *node = new_binary(ND_SUB, lhs, rhs, tok);
     node->ty = lhs->ty;
@@ -2784,6 +2796,8 @@ Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
   if (lhs->ty->base && rhs->ty->base) {
     Node *node = new_binary(ND_SUB, lhs, rhs, tok);
     node->ty = ty_llong;
+    if (lhs->ty->base->size == 1)
+      return node;
     return new_binary(ND_DIV, node, new_num(lhs->ty->base->size, tok), tok);
   }
 
@@ -3759,6 +3773,8 @@ static Node *primary(Token **rest, Token *tok) {
     }
 
     if (sc) {
+      if (sc->func_name && !sc->var)
+        sc->var = new_string_literal(sc->func_name, array_of(ty_char, strlen(sc->func_name) + 1));
       if (sc->var)
         return new_var_node(sc->var, tok);
       if (sc->enum_ty)
@@ -3948,13 +3964,11 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
 
   // [https://www.sigbus.info/n1570#6.4.2.2p1] "__func__" is
   // automatically defined as a local variable containing the
-  // current function name.
-  push_scope("__func__")->var =
-    new_string_literal(fn->name, array_of(ty_char, strlen(fn->name) + 1));
+  // current function name (instantiated on demand).
+  push_scope("__func__")->func_name = fn->name;
 
   // [GNU] __FUNCTION__ is yet another name of __func__.
-  push_scope("__FUNCTION__")->var =
-    new_string_literal(fn->name, array_of(ty_char, strlen(fn->name) + 1));
+  push_scope("__FUNCTION__")->func_name = fn->name;
 
   fn->body = compound_stmt(&tok, tok);
   fn->locals = locals;

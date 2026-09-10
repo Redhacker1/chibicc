@@ -334,6 +334,7 @@ struct VarScope {
   Type *type_def;
   Type *enum_ty;
   int enum_val;
+  char *func_name;
 };
 
 Node *new_cast(Node *expr, Type *ty);

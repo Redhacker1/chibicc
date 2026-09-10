@@ -908,9 +908,10 @@ static void sysv64_copy_struct_reg(Obj *fn, FILE *out) {
   SysVTypeClass cls = classify_sysv64(ty);
 
   /*
-   * Preserve the aggregate address while loading return registers.
+   * Preserve the aggregate address in a scratch volatile register (%r11)
+   * while loading return registers.
    */
-  println_abi(out, "  mov %%rax, %%rdi");
+  println_abi(out, "  mov %%rax, %%r11");
 
   int gp = 0;
   int fp = 0;
@@ -929,22 +930,22 @@ static void sysv64_copy_struct_reg(Obj *fn, FILE *out) {
 
       if (size == 8) {
         println_abi(out,
-                    "  mov %d(%%rdi), %s",
+                    "  mov %d(%%r11), %s",
                     offset,
                     reg);
       } else if (size == 4) {
         println_abi(out,
-                    "  movl %d(%%rdi), %s",
+                    "  movl %d(%%r11), %s",
                     offset,
                     gp == 0 ? "%eax" : "%edx");
       } else if (size == 2) {
         println_abi(out,
-                    "  movzwl %d(%%rdi), %s",
+                    "  movzwl %d(%%r11), %s",
                     offset,
                     gp == 0 ? "%eax" : "%edx");
       } else if (size == 1) {
         println_abi(out,
-                    "  movzbl %d(%%rdi), %s",
+                    "  movzbl %d(%%r11), %s",
                     offset,
                     gp == 0 ? "%eax" : "%edx");
       } else {
@@ -953,7 +954,7 @@ static void sysv64_copy_struct_reg(Obj *fn, FILE *out) {
           if (b < size - 1)
             println_abi(out, "  shl $8, %s", reg);
           println_abi(out,
-                      "  movb %d(%%rdi), %s",
+                      "  movb %d(%%r11), %s",
                       offset + b,
                       gp == 0 ? "%al" : "%dl");
         }
@@ -969,12 +970,12 @@ static void sysv64_copy_struct_reg(Obj *fn, FILE *out) {
 
       if (size == 4) {
         println_abi(out,
-                    "  movss %d(%%rdi), %%xmm%d",
+                    "  movss %d(%%r11), %%xmm%d",
                     offset,
                     fp);
       } else {
         println_abi(out,
-                    "  movsd %d(%%rdi), %%xmm%d",
+                    "  movsd %d(%%r11), %%xmm%d",
                     offset,
                     fp);
       }
@@ -1000,34 +1001,34 @@ static void sysv64_copy_struct_mem(Obj *fn, FILE *out) {
    * The hidden return buffer pointer is the first parameter.
    */
   println_abi(out,
-              "  mov %d(%%rbp), %%rdi",
+              "  mov %d(%%rbp), %%r11",
               var->offset);
 
   int i = 0;
   while (ty->size - i >= 8) {
     println_abi(out, "  mov %d(%%rax), %%r10", i);
-    println_abi(out, "  mov %%r10, %d(%%rdi)", i);
+    println_abi(out, "  mov %%r10, %d(%%r11)", i);
     i += 8;
   }
   if (ty->size - i >= 4) {
     println_abi(out, "  mov %d(%%rax), %%r10d", i);
-    println_abi(out, "  mov %%r10d, %d(%%rdi)", i);
+    println_abi(out, "  mov %%r10d, %d(%%r11)", i);
     i += 4;
   }
   if (ty->size - i >= 2) {
     println_abi(out, "  mov %d(%%rax), %%r10w", i);
-    println_abi(out, "  mov %%r10w, %d(%%rdi)", i);
+    println_abi(out, "  mov %%r10w, %d(%%r11)", i);
     i += 2;
   }
   if (i < ty->size) {
     println_abi(out, "  mov %d(%%rax), %%r10b", i);
-    println_abi(out, "  mov %%r10b, %d(%%rdi)", i);
+    println_abi(out, "  mov %%r10b, %d(%%r11)", i);
   }
 
   /*
    * SysV requires the hidden return-buffer pointer in RAX on return.
    */
-  println_abi(out, "  mov %%rdi, %%rax");
+  println_abi(out, "  mov %%r11, %%rax");
 }
 
 
@@ -1531,15 +1532,8 @@ static void sysv64_load_vreg(LLIRVReg *v, const char *reg, FILE *out) {
 static void sysv64_store_vreg(const char *reg, LLIRVReg *v, FILE *out) {
   if (!v) return;
   int offset = v->spill_offset ? v->spill_offset : -((v->id + 1) * 8);
-  int sz = v->ty ? v->ty->size : 8;
   if (reg[1] == 'x') {
     println_abi(out, "  movq %s, %d(%%rbp)", reg, offset);
-  } else if (sz == 1) {
-    println_abi(out, "  movb %s, %d(%%rbp)", sysv64_reg8(reg), offset);
-  } else if (sz == 2) {
-    println_abi(out, "  movw %s, %d(%%rbp)", sysv64_reg16(reg), offset);
-  } else if (sz == 4) {
-    println_abi(out, "  movl %s, %d(%%rbp)", sysv64_reg32(reg), offset);
   } else {
     println_abi(out, "  movq %s, %d(%%rbp)", reg, offset);
   }
