@@ -1,6 +1,7 @@
 ﻿#include "chibicc.h"
 #include "codegen/codegen.h"
 #include "codegen/common/common.h"
+#include "ir/ir.h"
 
 static FILE *output_file;
 static int depth;
@@ -97,6 +98,9 @@ static char *reg_si(int sz) {
 // Compute the absolute address of a given node.
 static void gen_addr(Node *node, FILE *out) {
   (void)out;
+  assert(node != NULL);
+  assert(node->tok != NULL);
+
   switch (node->kind) {
   case ND_VAR:
     // Variable-length array, which is always local.
@@ -170,6 +174,9 @@ static void gen_addr(Node *node, FILE *out) {
 
 // Load a value from where %rax is pointing to.
 static void load(Type *ty) {
+  if (!ty)
+    return;
+
   switch (ty->kind) {
   case TY_ARRAY:
   case TY_STRUCT:
@@ -206,6 +213,8 @@ static void load(Type *ty) {
 
 static void store(Type *ty) {
   pop("%rdi");
+  if (!ty)
+    return;
 
   switch (ty->kind) {
   case TY_STRUCT:
@@ -237,6 +246,11 @@ static void store(Type *ty) {
 }
 
 static void cmp_zero(Type *ty) {
+  if (!ty) {
+    println("  test %%rax, %%rax");
+    return;
+  }
+
   switch (ty->kind) {
   case TY_FLOAT:
     println("  xorps %%xmm1, %%xmm1");
@@ -254,9 +268,9 @@ static void cmp_zero(Type *ty) {
   }
 
   if (is_integer(ty) && ty->size <= 4)
-    println("  cmp $0, %%eax");
+    println("  test %%eax, %%eax");
   else
-    println("  cmp $0, %%rax");
+    println("  test %%rax, %%rax");
 }
 
 enum { I8, I16, I32, I64, U8, U16, U32, U64, F32, F64, F80 };
@@ -387,7 +401,11 @@ static void cast(Type *from, Type *to) {
 // Generate code for a given node.
 static void gen_expr(Node *node, FILE *out) {
   (void)out;
-  println("  .loc %d %d", node->tok->file->file_no, node->tok->line_no);
+  assert(node != NULL);
+  assert(node->tok != NULL);
+
+  if (opt_g)
+    println("  .loc %d %d", node->tok->file->file_no, node->tok->line_no);
 
   switch (node->kind) {
   case ND_NULL_EXPR:
@@ -419,6 +437,14 @@ static void gen_expr(Node *node, FILE *out) {
     }
     }
 
+    if (node->val == 0) {
+      println("  xor %%eax, %%eax");
+      return;
+    }
+    if (node->val > 0 && node->val <= 0x7fffffffL) {
+      println("  mov $%lld, %%eax", (long long)node->val);
+      return;
+    }
     println("  mov $%lld, %%rax", (long long)node->val);
     return;
   }
@@ -475,7 +501,7 @@ static void gen_expr(Node *node, FILE *out) {
     push();
     gen_expr(node->rhs, output_file);
 
-    if (node->lhs->kind == ND_MEMBER && node->lhs->member->is_bitfield) {
+    if (node->lhs && node->lhs->kind == ND_MEMBER && node->lhs->member && node->lhs->member->is_bitfield) {
       println("  mov %%rax, %%r8");
 
       // If the lhs is a bitfield, we need to read the current value
@@ -509,7 +535,8 @@ static void gen_expr(Node *node, FILE *out) {
     return;
   case ND_CAST:
     gen_expr(node->lhs, output_file);
-    cast(node->lhs->ty, node->ty);
+    if (node->lhs && node->lhs->ty && node->ty)
+      cast(node->lhs->ty, node->ty);
     return;
   case ND_MEMZERO:
     // `rep stosb` is equivalent to `memset(%rdi, %al, %rcx)`.
@@ -524,7 +551,7 @@ static void gen_expr(Node *node, FILE *out) {
   case ND_COND: {
     int c = count();
     gen_expr(node->cond, output_file);
-    cmp_zero(node->cond->ty);
+    cmp_zero(node->cond ? node->cond->ty : NULL);
     println("  je .L.else.%d", c);
     gen_expr(node->then, output_file);
     println("  jmp .L.end.%d", c);
@@ -535,7 +562,7 @@ static void gen_expr(Node *node, FILE *out) {
   }
   case ND_NOT:
     gen_expr(node->lhs, output_file);
-    cmp_zero(node->lhs->ty);
+    cmp_zero(node->lhs ? node->lhs->ty : NULL);
     println("  sete %%al");
     println("  movzx %%al, %%rax");
     return;
@@ -546,10 +573,10 @@ static void gen_expr(Node *node, FILE *out) {
   case ND_LOGAND: {
     int c = count();
     gen_expr(node->lhs, output_file);
-    cmp_zero(node->lhs->ty);
+    cmp_zero(node->lhs ? node->lhs->ty : NULL);
     println("  je .L.false.%d", c);
     gen_expr(node->rhs, output_file);
-    cmp_zero(node->rhs->ty);
+    cmp_zero(node->rhs ? node->rhs->ty : NULL);
     println("  je .L.false.%d", c);
     println("  mov $1, %%rax");
     println("  jmp .L.end.%d", c);
@@ -561,10 +588,10 @@ static void gen_expr(Node *node, FILE *out) {
   case ND_LOGOR: {
     int c = count();
     gen_expr(node->lhs, output_file);
-    cmp_zero(node->lhs->ty);
+    cmp_zero(node->lhs ? node->lhs->ty : NULL);
     println("  jne .L.true.%d", c);
     gen_expr(node->rhs, output_file);
-    cmp_zero(node->rhs->ty);
+    cmp_zero(node->rhs ? node->rhs->ty : NULL);
     println("  jne .L.true.%d", c);
     println("  mov $0, %%rax");
     println("  jmp .L.end.%d", c);
@@ -575,7 +602,7 @@ static void gen_expr(Node *node, FILE *out) {
   }
   case ND_FUNCALL: {
     ABI *fn_abi = get_node_abi(node);
-    if (node->lhs->kind == ND_VAR && !strcmp(node->lhs->var->name, "alloca")) {
+    if (node->lhs->kind == ND_VAR && node->lhs->var && !strcmp(node->lhs->var->name, "alloca")) {
       gen_expr(node->args, output_file);
       println("  mov %%rax, %%rdi");
       if (fn_abi && fn_abi->builtin_alloca)
@@ -583,26 +610,18 @@ static void gen_expr(Node *node, FILE *out) {
       return;
     }
 
-    if (node->lhs->kind != ND_VAR) {
-      gen_expr(node->lhs, output_file);
-      println("  mov %%rax, %%r10");
-    }
-
     int stack = 0;
     if (fn_abi && fn_abi->push_args)
       stack = fn_abi->push_args(node, output_file, &depth);
 
-    if (node->lhs->kind != ND_VAR) {
-      println("  mov %%r10, %%r11");
-    } else {
-      gen_expr(node->lhs, output_file);
-      println("  mov %%rax, %%r11");
-    }
+    gen_expr(node->lhs, output_file);
+    println("  mov %%rax, %%r11");
 
     if (fn_abi && fn_abi->pre_call)
       fn_abi->pre_call(node, output_file);
 
     println("  call *%%r11");
+
     if (stack > 0) {
       println("  add $%d, %%rsp", stack * 8);
       depth -= stack;
@@ -659,13 +678,15 @@ static void gen_expr(Node *node, FILE *out) {
     gen_expr(node->rhs, output_file);
     pop("%rdi");
 
-    int sz = node->lhs->ty->base->size;
+    int sz = (node->lhs && node->lhs->ty && node->lhs->ty->base) ? node->lhs->ty->base->size : 8;
     println("  xchg %s, (%%rdi)", reg_ax(sz));
     return;
   }
   }
 
-  switch (node->lhs->ty->kind) {
+  Type *lhs_ty = (node->lhs && node->lhs->ty) ? node->lhs->ty : ty_long;
+
+  switch (lhs_ty->kind) {
   case TY_FLOAT:
   case TY_DOUBLE: {
     gen_expr(node->rhs, output_file);
@@ -673,7 +694,7 @@ static void gen_expr(Node *node, FILE *out) {
     gen_expr(node->lhs, output_file);
     popf(1);
 
-    char *sz = (node->lhs->ty->kind == TY_FLOAT) ? "ss" : "sd";
+    char *sz = (lhs_ty->kind == TY_FLOAT) ? "ss" : "sd";
 
     switch (node->kind) {
     case ND_ADD:
@@ -763,7 +784,7 @@ static void gen_expr(Node *node, FILE *out) {
 
   char *ax, *di, *dx;
 
-  if (node->lhs->ty->size == 8 || node->lhs->ty->base) {
+  if (lhs_ty->size == 8 || lhs_ty->base) {
     ax = "%rax";
     di = "%rdi";
     dx = "%rdx";
@@ -785,11 +806,11 @@ static void gen_expr(Node *node, FILE *out) {
     return;
   case ND_DIV:
   case ND_MOD:
-    if (node->ty->is_unsigned) {
+    if (node->ty && node->ty->is_unsigned) {
       println("  mov $0, %s", dx);
       println("  div %s", di);
     } else {
-      if (node->lhs->ty->size == 8)
+      if (lhs_ty->size == 8)
         println("  cqo");
       else
         println("  cdq");
@@ -814,7 +835,7 @@ static void gen_expr(Node *node, FILE *out) {
     return;
   case ND_SHR:
     println("  mov %%rdi, %%rcx");
-    if (node->lhs->ty->is_unsigned)
+    if (lhs_ty->is_unsigned)
       println("  shr %%cl, %s", ax);
     else
       println("  sar %%cl, %s", ax);
@@ -830,7 +851,7 @@ static void gen_expr(Node *node, FILE *out) {
     } else if (node->kind == ND_NE) {
       println("  setne %%al");
     } else {
-      if (node->lhs->ty->is_unsigned) {
+      if (lhs_ty->is_unsigned) {
         if (node->kind == ND_LT)
           println("  setb %%al");
         else
@@ -872,7 +893,12 @@ static char *format_asm_str(char *s) {
 
 static void gen_stmt(Node *node, FILE *out) {
   (void)out;
-  println("  .loc %d %d", node->tok->file->file_no, node->tok->line_no);
+  if (!node)
+    return;
+  assert(node->tok != NULL);
+
+  if (opt_g)
+    println("  .loc %d %d", node->tok->file->file_no, node->tok->line_no);
 
   switch (node->kind) {
   case ND_IF: {
@@ -1114,14 +1140,16 @@ static void x86_64_codegen(Obj *prog, FILE *out) {
   output_file = out;
   depth = 0;
 
-  File **files = get_input_files();
-  for (int i = 0; files[i]; i++) {
-    char *name = strdup(files[i]->name);
-    for (char *p = name; *p; p++)
-      if (*p == '\\')
-        *p = '/';
-    println("  .file %d \"%s\"", files[i]->file_no, name);
-    free(name);
+  if (opt_g) {
+    File **files = get_input_files();
+    for (int i = 0; files[i]; i++) {
+      char *name = strdup(files[i]->name);
+      for (char *p = name; *p; p++)
+        if (*p == '\\')
+          *p = '/';
+      println("  .file %d \"%s\"", files[i]->file_no, name);
+      free(name);
+    }
   }
 
   for (Obj *fn = prog; fn; fn = fn->next) {
@@ -1145,12 +1173,18 @@ static void x86_64_codegen(Obj *prog, FILE *out) {
   emit_text(prog, out);
 }
 
+static void x86_64_codegen_llir(LLIRProg *prog, FILE *out) {
+  if (prog && prog->globals)
+    x86_64_codegen(prog->globals, out);
+}
+
 Codegen codegen_x86_64 =
 {
   .name = "x86_64",
   .description = "x86-64 code generator",
   .default_abi_name = "sysv64",
   .init = x86_64_init,
+  .codegen_llir = x86_64_codegen_llir,
   .codegen = x86_64_codegen,
   .emit_data = emit_data,
   .emit_text = emit_text,

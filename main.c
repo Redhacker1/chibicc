@@ -20,6 +20,9 @@ typedef enum
 StringArray include_paths;
 bool opt_fcommon = true;
 bool opt_fpic;
+bool opt_g = false;
+int opt_O = 0;
+bool opt_dump_ir = false;
 
 static FileType opt_x;
 static StringArray opt_include;
@@ -47,6 +50,21 @@ static char *cc1_output_file;
 static StringArray input_paths;
 StringArray tmpfiles;
 
+void chibicc_assert_fail(const char *expr, const char *file, int line, const char *func) {
+  fprintf(stderr, "\n[CHIBICC INTERNAL ASSERTION FAILURE]\n");
+  fprintf(stderr, "  Assertion : %s\n", expr);
+  fprintf(stderr, "  Location  : %s:%d\n", file, line);
+  if (func)
+    fprintf(stderr, "  Function  : %s\n", func);
+  fprintf(stderr, "\n");
+  fflush(stderr);
+  exit(1);
+}
+
+void _assert(const char *expr, const char *file, int line, const char *func) {
+  chibicc_assert_fail(expr, file, line, func);
+}
+
 static void usage(const int status) {
   fprintf(stderr, "chibicc [ -o <path> ] <file>\n");
   exit(status);
@@ -56,6 +74,7 @@ static bool take_arg(const char *arg) {
   char *x[] = {
     "-o", "-I", "-idirafter", "-include", "-x", "-MF", "-MT", "-Xlinker",
     "-target", "--target", "-mabi", "-march", "-D", "-U",
+    "-cc1-input", "-cc1-output",
   };
 
   for (int i = 0; i < sizeof(x) / sizeof(*x); i++)
@@ -385,10 +404,28 @@ static void parse_args(const int argc, char **argv) {
       exit(0);
     }
 
+    if (!strncmp(argv[i], "-O", 2)) {
+      if (argv[i][2] == '\0')
+        opt_O = 1;
+      else if (argv[i][2] == 's')
+        opt_O = 2;
+      else if (argv[i][2] >= '0' && argv[i][2] <= '9')
+        opt_O = argv[i][2] - '0';
+      continue;
+    }
+
+    if (!strcmp(argv[i], "-fdump-ir") || !strcmp(argv[i], "--dump-ir")) {
+      opt_dump_ir = true;
+      continue;
+    }
+
+    if (!strncmp(argv[i], "-g", 2)) {
+      opt_g = true;
+      continue;
+    }
+
     // These options are ignored for now.
-    if (!strncmp(argv[i], "-O", 2) ||
-        !strncmp(argv[i], "-W", 2) ||
-        !strncmp(argv[i], "-g", 2) ||
+    if (!strncmp(argv[i], "-W", 2) ||
         !strncmp(argv[i], "-std=", 5) ||
         !strcmp(argv[i], "-ffreestanding") ||
         !strcmp(argv[i], "-fno-builtin") ||

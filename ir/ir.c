@@ -1,4 +1,5 @@
 ﻿#include "ir/ir.h"
+#include "ir/opt.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -40,6 +41,123 @@ void ir_append_insn(IRFunction *fn, IRInsn *insn) {
   }
 }
 
+void ir_insert_before(IRFunction *fn, IRInsn *target, IRInsn *new_insn) {
+  if (!target) {
+    ir_append_insn(fn, new_insn);
+    return;
+  }
+  new_insn->next = target;
+  new_insn->prev = target->prev;
+  if (target->prev)
+    target->prev->next = new_insn;
+  else
+    fn->head = new_insn;
+  target->prev = new_insn;
+  fn->num_insns++;
+}
+
+void ir_insert_after(IRFunction *fn, IRInsn *target, IRInsn *new_insn) {
+  if (!target) {
+    ir_append_insn(fn, new_insn);
+    return;
+  }
+  new_insn->prev = target;
+  new_insn->next = target->next;
+  if (target->next)
+    target->next->prev = new_insn;
+  else
+    fn->tail = new_insn;
+  target->next = new_insn;
+  fn->num_insns++;
+}
+
+void ir_remove_insn(IRFunction *fn, IRInsn *insn) {
+  if (!insn)
+    return;
+  if (insn->prev)
+    insn->prev->next = insn->next;
+  else
+    fn->head = insn->next;
+  if (insn->next)
+    insn->next->prev = insn->prev;
+  else
+    fn->tail = insn->prev;
+  insn->prev = insn->next = NULL;
+  fn->num_insns--;
+}
+
+void ir_replace_insn(IRFunction *fn, IRInsn *old_insn, IRInsn *new_insn) {
+  if (!old_insn || !new_insn)
+    return;
+  new_insn->prev = old_insn->prev;
+  new_insn->next = old_insn->next;
+  if (old_insn->prev)
+    old_insn->prev->next = new_insn;
+  else
+    fn->head = new_insn;
+  if (old_insn->next)
+    old_insn->next->prev = new_insn;
+  else
+    fn->tail = new_insn;
+  old_insn->prev = old_insn->next = NULL;
+}
+
+void ir_renumber_insns(IRFunction *fn) {
+  int pos = 0;
+  for (IRInsn *insn = fn->head; insn; insn = insn->next)
+    insn->pos = pos++;
+  fn->num_insns = pos;
+}
+
+bool ir_insn_has_side_effects(IRInsn *insn) {
+  if (!insn)
+    return false;
+  switch (insn->kind) {
+  case IR_STORE:
+  case IR_MEMCPY:
+  case IR_MEMZERO:
+  case IR_CALL:
+  case IR_RET:
+  case IR_BR:
+  case IR_JMP:
+  case IR_LABEL:
+  case IR_ASM:
+  case IR_ALLOCA:
+  case IR_CAS:
+  case IR_EXCH:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool ir_insn_is_terminator(IRInsn *insn) {
+  if (!insn)
+    return false;
+  return insn->kind == IR_JMP || insn->kind == IR_BR || insn->kind == IR_RET;
+}
+
+bool ir_insn_is_branch(IRInsn *insn) {
+  if (!insn)
+    return false;
+  return insn->kind == IR_JMP || insn->kind == IR_BR;
+}
+
+bool ir_insn_is_commutative(IRKind kind) {
+  switch (kind) {
+  case IR_ADD:
+  case IR_MUL:
+  case IR_BITAND:
+  case IR_BITOR:
+  case IR_BITXOR:
+  case IR_EQ:
+  case IR_NE:
+    return true;
+  default:
+    return false;
+  }
+}
+
 IRFunction *ir_new_function(Obj *fn_obj) {
   IRFunction *fn = calloc(1, sizeof(IRFunction));
   fn->fn_obj = fn_obj;
@@ -58,6 +176,21 @@ static void gen_stmt_ir(IRFunction *fn, Node *node);
 static IRVReg *gen_addr_ir(IRFunction *fn, Node *node) {
   switch (node->kind) {
   case ND_VAR: {
+    if (node->var->ty->kind == TY_VLA) {
+      IRVReg *addr_var = ir_new_vreg(fn, pointer_to(node->var->ty));
+      IRInsn *addr_insn = ir_new_insn(IR_ADDR);
+      addr_insn->dst = addr_var;
+      addr_insn->var = node->var;
+      ir_append_insn(fn, addr_insn);
+
+      IRVReg *dst = ir_new_vreg(fn, pointer_to(node->var->ty));
+      IRInsn *load_insn = ir_new_insn(IR_LOAD);
+      load_insn->dst = dst;
+      load_insn->src1 = addr_var;
+      load_insn->ty = pointer_to(node->var->ty);
+      ir_append_insn(fn, load_insn);
+      return dst;
+    }
     IRVReg *dst = ir_new_vreg(fn, pointer_to(node->var->ty));
     IRInsn *insn = ir_new_insn(IR_ADDR);
     insn->dst = dst;
@@ -67,6 +200,9 @@ static IRVReg *gen_addr_ir(IRFunction *fn, Node *node) {
   }
   case ND_DEREF:
     return gen_expr_ir(fn, node->lhs);
+  case ND_COMMA:
+    gen_expr_ir(fn, node->lhs);
+    return gen_addr_ir(fn, node->rhs);
   case ND_MEMBER: {
     IRVReg *base = gen_addr_ir(fn, node->lhs);
     if (node->member->offset == 0)
@@ -85,24 +221,34 @@ static IRVReg *gen_addr_ir(IRFunction *fn, Node *node) {
     ir_append_insn(fn, add_insn);
     return dst;
   }
+  case ND_FUNCALL:
+    if (node->ret_buffer)
+      return gen_expr_ir(fn, node);
+    break;
+  case ND_STMT_EXPR:
+    for (Node *n = node->body; n; n = n->next) {
+      if (!n->next && n->kind == ND_EXPR_STMT)
+        return gen_addr_ir(fn, n->lhs);
+      gen_stmt_ir(fn, n);
+    }
+    return NULL;
+  case ND_ASSIGN:
+  case ND_COND:
+    if (node->ty && (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION))
+      return gen_expr_ir(fn, node);
+    break;
   case ND_VLA_PTR: {
     IRVReg *dst = ir_new_vreg(fn, pointer_to(node->var->ty));
     IRInsn *insn = ir_new_insn(IR_ADDR);
     insn->dst = dst;
     insn->var = node->var;
     ir_append_insn(fn, insn);
-
-    IRVReg *deref = ir_new_vreg(fn, node->var->ty);
-    IRInsn *load_insn = ir_new_insn(IR_LOAD);
-    load_insn->dst = deref;
-    load_insn->src1 = dst;
-    load_insn->ty = node->var->ty;
-    ir_append_insn(fn, load_insn);
-    return deref;
+    return dst;
   }
   default:
-    error_tok(node->tok, "not an lvalue");
+    break;
   }
+  error_tok(node->tok, "not an lvalue");
   return NULL;
 }
 
@@ -131,6 +277,7 @@ static IRVReg *gen_expr_ir(IRFunction *fn, Node *node) {
     return dst;
   }
   case ND_VAR:
+  case ND_VLA_PTR:
   case ND_MEMBER: {
     IRVReg *addr = gen_addr_ir(fn, node);
     if (node->ty->kind == TY_ARRAY || node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION)
@@ -412,6 +559,17 @@ static IRVReg *gen_expr_ir(IRFunction *fn, Node *node) {
     }
     return NULL;
   case ND_FUNCALL: {
+    if (node->lhs->kind == ND_VAR && node->lhs->var && !strcmp(node->lhs->var->name, "alloca")) {
+      IRVReg *sz = gen_expr_ir(fn, node->args);
+      IRVReg *dst = ir_new_vreg(fn, pointer_to(ty_void));
+      IRInsn *insn = ir_new_insn(IR_ALLOCA);
+      insn->dst = dst;
+      insn->src1 = sz;
+      insn->ty = pointer_to(ty_void);
+      ir_append_insn(fn, insn);
+      return dst;
+    }
+
     ABI *callee_abi = get_node_abi(node);
 
     // Count and evaluate arguments
@@ -434,7 +592,17 @@ static IRVReg *gen_expr_ir(IRFunction *fn, Node *node) {
     call->args = arg_vregs;
     call->call_abi = callee_abi;
     call->ty = node->ty;
+    call->var = node->ret_buffer;
     ir_append_insn(fn, call);
+
+    if (node->ret_buffer) {
+      IRVReg *ret_buf_addr = ir_new_vreg(fn, pointer_to(node->ret_buffer->ty));
+      IRInsn *addr_insn = ir_new_insn(IR_ADDR);
+      addr_insn->dst = ret_buf_addr;
+      addr_insn->var = node->ret_buffer;
+      ir_append_insn(fn, addr_insn);
+      return ret_buf_addr;
+    }
 
     return dst;
   }
@@ -650,9 +818,18 @@ static void gen_stmt_ir(IRFunction *fn, Node *node) {
     for (Node *n = node->body; n; n = n->next)
       gen_stmt_ir(fn, n);
     return;
+  case ND_NULL_EXPR:
+    return;
   case ND_GOTO: {
     IRInsn *jmp = ir_new_insn(IR_JMP);
     jmp->label = node->unique_label;
+    ir_append_insn(fn, jmp);
+    return;
+  }
+  case ND_GOTO_EXPR: {
+    IRVReg *addr = gen_expr_ir(fn, node->lhs);
+    IRInsn *jmp = ir_new_insn(IR_JMP);
+    jmp->src1 = addr;
     ir_append_insn(fn, jmp);
     return;
   }
@@ -690,7 +867,7 @@ IRProg *ast_to_ir(Obj *prog) {
   ir_prog->globals = prog;
 
   int fn_count = 0;
-  for (Obj *fn = prog; fn; fn = fn->next)
+  for (const Obj *fn = prog; fn; fn = fn->next)
     if (fn->is_function && fn->is_definition && fn->is_live)
       fn_count++;
 
@@ -710,72 +887,241 @@ IRProg *ast_to_ir(Obj *prog) {
   return ir_prog;
 }
 
+void ir_dump_function(FILE *out, IRFunction *fn) {
+  if (!out || !fn)
+    return;
+
+  fprintf(out, "function %s() [vregs: %d, insns: %d]:\n", fn->name, fn->num_vregs, fn->num_insns);
+  for (IRInsn *insn = fn->head; insn; insn = insn->next) {
+    fprintf(out, "  %4d: ", insn->pos);
+    switch (insn->kind) {
+    case IR_PHI:
+      fprintf(out, "v%d = phi(", insn->dst ? insn->dst->id : -1);
+      for (int a = 0; a < insn->num_args; a++) {
+        fprintf(out, "%sv%d", a > 0 ? ", " : "", insn->args[a] ? insn->args[a]->id : -1);
+      }
+      fprintf(out, ")\n");
+      break;
+    case IR_IMM:
+      fprintf(out, "v%d = %lld\n", insn->dst ? insn->dst->id : -1, (long long)insn->imm);
+      break;
+    case IR_FIMM:
+      fprintf(out, "v%d = %f\n", insn->dst ? insn->dst->id : -1, insn->fimm);
+      break;
+    case IR_ADDR:
+      fprintf(out, "v%d = &%s\n", insn->dst ? insn->dst->id : -1, insn->var ? insn->var->name : "(anon)");
+      break;
+    case IR_LOAD:
+      fprintf(out, "v%d = *v%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1);
+      break;
+    case IR_STORE:
+      fprintf(out, "*v%d = v%d\n", insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case IR_MOV:
+      fprintf(out, "v%d = v%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1);
+      break;
+    case IR_CAST:
+      fprintf(out, "v%d = cast v%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1);
+      break;
+    case IR_ADD:
+      fprintf(out, "v%d = v%d + v%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case IR_SUB:
+      fprintf(out, "v%d = v%d - v%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case IR_MUL:
+      fprintf(out, "v%d = v%d * v%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case IR_DIV:
+      fprintf(out, "v%d = v%d / v%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case IR_MOD:
+      fprintf(out, "v%d = v%d %% v%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case IR_BITAND:
+      fprintf(out, "v%d = v%d & v%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case IR_BITOR:
+      fprintf(out, "v%d = v%d | v%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case IR_BITXOR:
+      fprintf(out, "v%d = v%d ^ v%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case IR_SHL:
+      fprintf(out, "v%d = v%d << v%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case IR_SHR:
+      fprintf(out, "v%d = v%d >> v%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case IR_NEG:
+      fprintf(out, "v%d = -v%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1);
+      break;
+    case IR_BITNOT:
+      fprintf(out, "v%d = ~v%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1);
+      break;
+    case IR_LOGNOT:
+      fprintf(out, "v%d = !v%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1);
+      break;
+    case IR_EQ:
+      fprintf(out, "v%d = (v%d == v%d)\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case IR_NE:
+      fprintf(out, "v%d = (v%d != v%d)\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case IR_LT:
+      fprintf(out, "v%d = (v%d < v%d)\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case IR_LE:
+      fprintf(out, "v%d = (v%d <= v%d)\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case IR_GT:
+      fprintf(out, "v%d = (v%d > v%d)\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case IR_GE:
+      fprintf(out, "v%d = (v%d >= v%d)\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case IR_LABEL:
+      fprintf(out, "%s:\n", insn->label ? insn->label : "(anon label)");
+      break;
+    case IR_JMP:
+      fprintf(out, "jmp %s\n", insn->label ? insn->label : "(anon label)");
+      break;
+    case IR_BR:
+      fprintf(out, "br v%d, %s, %s\n", insn->src1 ? insn->src1->id : -1, insn->label_true ? insn->label_true : "", insn->label_false ? insn->label_false : "");
+      break;
+    case IR_RET:
+      if (insn->src1)
+        fprintf(out, "ret v%d\n", insn->src1->id);
+      else
+        fprintf(out, "ret\n");
+      break;
+    case IR_CALL:
+      if (insn->dst)
+        fprintf(out, "v%d = call v%d(%d args)\n", insn->dst->id, insn->src1 ? insn->src1->id : -1, insn->num_args);
+      else
+        fprintf(out, "call v%d(%d args)\n", insn->src1 ? insn->src1->id : -1, insn->num_args);
+      break;
+    default:
+      fprintf(out, "insn kind %d\n", insn->kind);
+      break;
+    }
+  }
+  fprintf(out, "\n");
+}
+
 void ir_dump(FILE *out, IRProg *prog) {
   if (!out || !prog)
     return;
 
-  for (int i = 0; i < prog->num_fns; i++) {
-    IRFunction *fn = prog->fns[i];
-    fprintf(out, "function %s() [vregs: %d, insns: %d]:\n", fn->name, fn->num_vregs, fn->num_insns);
-    for (IRInsn *insn = fn->head; insn; insn = insn->next) {
-      fprintf(out, "  %4d: ", insn->pos);
-      switch (insn->kind) {
-      case IR_IMM:
-        fprintf(out, "v%d = %lld\n", insn->dst->id, (long long)insn->imm);
-        break;
-      case IR_FIMM:
-        fprintf(out, "v%d = %f\n", insn->dst->id, insn->fimm);
-        break;
-      case IR_ADDR:
-        fprintf(out, "v%d = &%s\n", insn->dst->id, insn->var ? insn->var->name : "(anon)");
-        break;
-      case IR_LOAD:
-        fprintf(out, "v%d = *v%d\n", insn->dst->id, insn->src1->id);
-        break;
-      case IR_STORE:
-        fprintf(out, "*v%d = v%d\n", insn->src1->id, insn->src2->id);
-        break;
-      case IR_MOV:
-        fprintf(out, "v%d = v%d\n", insn->dst->id, insn->src1->id);
-        break;
-      case IR_ADD:
-        fprintf(out, "v%d = v%d + v%d\n", insn->dst->id, insn->src1->id, insn->src2->id);
-        break;
-      case IR_SUB:
-        fprintf(out, "v%d = v%d - v%d\n", insn->dst->id, insn->src1->id, insn->src2->id);
-        break;
-      case IR_MUL:
-        fprintf(out, "v%d = v%d * v%d\n", insn->dst->id, insn->src1->id, insn->src2->id);
-        break;
-      case IR_DIV:
-        fprintf(out, "v%d = v%d / v%d\n", insn->dst->id, insn->src1->id, insn->src2->id);
-        break;
-      case IR_LABEL:
-        fprintf(out, "%s:\n", insn->label);
-        break;
-      case IR_JMP:
-        fprintf(out, "jmp %s\n", insn->label);
-        break;
-      case IR_BR:
-        fprintf(out, "br v%d, %s, %s\n", insn->src1->id, insn->label_true ? insn->label_true : "", insn->label_false ? insn->label_false : "");
-        break;
-      case IR_RET:
-        if (insn->src1)
-          fprintf(out, "ret v%d\n", insn->src1->id);
-        else
-          fprintf(out, "ret\n");
-        break;
-      case IR_CALL:
-        if (insn->dst)
-          fprintf(out, "v%d = call v%d(%d args)\n", insn->dst->id, insn->src1->id, insn->num_args);
-        else
-          fprintf(out, "call v%d(%d args)\n", insn->src1->id, insn->num_args);
-        break;
-      default:
-        fprintf(out, "insn kind %d\n", insn->kind);
-        break;
-      }
+  for (int i = 0; i < prog->num_fns; i++)
+    ir_dump_function(out, prog->fns[i]);
+}
+
+void hlir_dump_function(FILE *out, HLIRFunction *fn) {
+  if (!out || !fn) return;
+  fprintf(out, "hlir_function %s() [vals: %d, insns: %d]:\n", fn->name, fn->num_vals, fn->num_insns);
+  for (HLIRInsn *insn = fn->head; insn; insn = insn->next) {
+    fprintf(out, "  %4d: ", insn->pos);
+    switch (insn->kind) {
+    case HLIR_ICONST:
+      fprintf(out, "%%%d = iconst %lld\n", insn->dst ? insn->dst->id : -1, (long long)insn->imm);
+      break;
+    case HLIR_FCONST:
+      fprintf(out, "%%%d = fconst %f\n", insn->dst ? insn->dst->id : -1, insn->fimm);
+      break;
+    case HLIR_SCONST:
+      fprintf(out, "%%%d = sconst &%s\n", insn->dst ? insn->dst->id : -1, insn->label ? insn->label : "");
+      break;
+    case HLIR_LOAD_VAR:
+      fprintf(out, "%%%d = load_var %s\n", insn->dst ? insn->dst->id : -1, insn->var ? insn->var->name : "");
+      break;
+    case HLIR_STORE_VAR:
+      fprintf(out, "store_var %s = %%%d\n", insn->var ? insn->var->name : "", insn->src1 ? insn->src1->id : -1);
+      break;
+    case HLIR_ADDR_VAR:
+      fprintf(out, "%%%d = addr_var &%s\n", insn->dst ? insn->dst->id : -1, insn->var ? insn->var->name : "");
+      break;
+    case HLIR_LOAD_PTR:
+      fprintf(out, "%%%d = load_ptr *%%%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1);
+      break;
+    case HLIR_STORE_PTR:
+      fprintf(out, "store_ptr *%%%d = %%%d\n", insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case HLIR_ADD:
+      fprintf(out, "%%%d = add %%%d, %%%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case HLIR_SUB:
+      fprintf(out, "%%%d = sub %%%d, %%%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case HLIR_MUL:
+      fprintf(out, "%%%d = mul %%%d, %%%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case HLIR_DIV:
+      fprintf(out, "%%%d = div %%%d, %%%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1, insn->src2 ? insn->src2->id : -1);
+      break;
+    case HLIR_LABEL:
+      fprintf(out, "%s:\n", insn->label ? insn->label : "");
+      break;
+    case HLIR_JMP:
+      fprintf(out, "jmp %s\n", insn->label ? insn->label : "");
+      break;
+    case HLIR_JMP_IF_ZERO:
+      fprintf(out, "jmp_if_zero %%%d, %s\n", insn->src1 ? insn->src1->id : -1, insn->label ? insn->label : "");
+      break;
+    case HLIR_JMP_IF_NZ:
+      fprintf(out, "jmp_if_nz %%%d, %s\n", insn->src1 ? insn->src1->id : -1, insn->label ? insn->label : "");
+      break;
+    case HLIR_RET:
+      if (insn->src1)
+        fprintf(out, "ret %%%d\n", insn->src1->id);
+      else
+        fprintf(out, "ret\n");
+      break;
+    case HLIR_CALL:
+      if (insn->dst)
+        fprintf(out, "%%%d = call %%%d(%d args)\n", insn->dst->id, insn->src1 ? insn->src1->id : -1, insn->num_args);
+      else
+        fprintf(out, "call %%%d(%d args)\n", insn->src1 ? insn->src1->id : -1, insn->num_args);
+      break;
+    default:
+      fprintf(out, "hlir kind %d\n", insn->kind);
+      break;
     }
-    fprintf(out, "\n");
   }
+}
+
+void hlir_dump(FILE *out, HLIRProg *prog) {
+  if (!out || !prog) return;
+  for (int i = 0; i < prog->num_fns; i++)
+    hlir_dump_function(out, prog->fns[i]);
+}
+
+void llir_dump_function(FILE *out, LLIRFunction *fn) {
+  ir_dump_function(out, fn);
+}
+
+void llir_dump(FILE *out, LLIRProg *prog) {
+  ir_dump(out, prog);
+}
+
+HLIRProg *ast_to_hlir(Obj *prog) {
+  return (HLIRProg *)ast_to_ir(prog);
+}
+
+void hlir_optimize(HLIRProg *prog, int opt_level) {
+  if (opt_level <= 0 || !prog)
+    return;
+  ir_optimize_level((IRProg *)prog, opt_level);
+}
+
+LLIRProg *hlir_to_llir(HLIRProg *hlir) {
+  if (!hlir)
+    return NULL;
+  return (LLIRProg *)hlir;
+}
+
+void llir_optimize(LLIRProg *prog, int opt_level) {
+  if (opt_level <= 0 || !prog)
+    return;
+  ir_optimize_level((IRProg *)prog, opt_level);
 }

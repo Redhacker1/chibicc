@@ -232,6 +232,75 @@ if (Test-Path $confDir) {
 }
 
 # ==============================================================================
+# 4. Optimization Passes Test Suite
+# ==============================================================================
+$optDir = "$RootDir\tests\optimizations"
+if (Test-Path $optDir) {
+    $optTests = Get-ChildItem -Path "$optDir\*.c" | Sort-Object Name
+    Write-Host "`n========================================" -ForegroundColor Cyan
+    Write-Host "Section 4: Optimization Passes Tests ($($optTests.Count) suites)" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+
+    Write-Host "`n[Setup] Compiling tests/common helper for optimizations..." -ForegroundColor Yellow
+    gcc -x c -c "tests/common" -o "tests/common.o"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to compile tests/common helper object"
+        exit 1
+    }
+
+    $optLevels = @("-O1", "-O2", "-O3", "-Os")
+
+    foreach ($file in $optTests) {
+        $name = $file.BaseName
+        $cFile = $file.FullName
+        $oFile = "tests\optimizations\$name.o"
+        $exeFile = "tests\optimizations\$name.exe"
+
+        foreach ($optFlag in $optLevels) {
+            $testLabel = "optimizations/$name.c ($optFlag)"
+
+            # Compile with chibicc at the specified optimization level
+            & $Compiler -c $cFile -o $oFile $IncludeFlags -target x86_64-win64 -D_WIN32 -D__GNUC__ $optFlag 2>$null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "  [FAIL] $testLabel (Compilation failed)" -ForegroundColor Red
+                $Failed++
+                $FailedTests += "$testLabel (compile)"
+                continue
+            }
+
+            # Link with GCC
+            gcc $oFile "tests/common.o" -o $exeFile 2>$null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "  [FAIL] $testLabel (Link failed)" -ForegroundColor Red
+                $Failed++
+                $FailedTests += "$testLabel (link)"
+                Remove-Item $oFile -ErrorAction SilentlyContinue
+                continue
+            }
+
+            # Execute test binary
+            $output = & ".\$exeFile" 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  [PASS] $testLabel" -ForegroundColor Green
+                $Passed++
+            } else {
+                Write-Host "  [FAIL] $testLabel (Execution failed, exit code $LASTEXITCODE)" -ForegroundColor Red
+                if ($output) {
+                    Write-Host "         $output" -ForegroundColor DarkGray
+                }
+                $Failed++
+                $FailedTests += "$testLabel (exec)"
+            }
+
+            Remove-Item $oFile, $exeFile -ErrorAction SilentlyContinue
+        }
+    }
+
+    # Cleanup common helper
+    Remove-Item "tests/common.o" -ErrorAction SilentlyContinue
+}
+
+# ==============================================================================
 # Summary Report
 # ==============================================================================
 $Total = $Passed + $Failed

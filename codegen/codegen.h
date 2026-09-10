@@ -8,6 +8,7 @@
 typedef struct Obj Obj;
 typedef struct Node Node;
 typedef struct Codegen Codegen;
+typedef struct LLIRProg LLIRProg;
 
 struct Codegen {
   const char *name;
@@ -17,7 +18,10 @@ struct Codegen {
   // Backend initialization
   void (*init)(FILE *out);
 
-  // Top-level program code generation
+  // Top-level program code generation from Low-Level IR (LLIR)
+  void (*codegen_llir)(LLIRProg *prog, FILE *out);
+
+  // Top-level program code generation (AST/Legacy fallback)
   void (*codegen)(Obj *prog, FILE *out);
 
   // Sub-phases of code generation

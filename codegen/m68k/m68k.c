@@ -1,6 +1,7 @@
 ﻿#include "chibicc.h"
 #include "codegen/codegen.h"
 #include "codegen/common/common.h"
+#include "ir/ir.h"
 
 static FILE *output_file;
 static int depth;
@@ -394,11 +395,17 @@ static void m68k_codegen(Obj *prog, FILE *out) {
   m68k_emit_text(prog, out);
 }
 
+static void m68k_codegen_llir(LLIRProg *prog, FILE *out) {
+  if (prog && prog->globals)
+    m68k_codegen(prog->globals, out);
+}
+
 Codegen codegen_m68k = {
   .name = "m68k",
   .description = "Motorola 68000 code generator (Macintosh System 6 / retro)",
   .default_abi_name = "sys6",
   .init = m68k_init,
+  .codegen_llir = m68k_codegen_llir,
   .codegen = m68k_codegen,
   .emit_data = m68k_emit_data,
   .emit_text = m68k_emit_text,

@@ -1,5 +1,7 @@
+#ifndef CHIBICC_H
+#define CHIBICC_H
+
 #define _POSIX_C_SOURCE 200809L
-#include <assert.h>
 #include <ctype.h>
 #include <errno.h>
 #include <glob.h>
@@ -17,6 +19,16 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+void chibicc_assert_fail(const char *expr, const char *file, int line, const char *func);
+
+#undef assert
+#ifdef NDEBUG
+# define assert(expr) ((void)0)
+#else
+# define assert(expr) \
+    ((expr) ? (void)0 : chibicc_assert_fail(#expr, __FILE__, __LINE__, __func__))
+#endif
 
 #define MAX(x, y) ((x) < (y) ? (y) : (x))
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
@@ -503,4 +515,9 @@ bool file_exists(const char *path);
 extern StringArray include_paths;
 extern bool opt_fpic;
 extern bool opt_fcommon;
+extern bool opt_g;
+extern int opt_O;
+extern bool opt_dump_ir;
 extern char *base_file;
+
+#endif // CHIBICC_H

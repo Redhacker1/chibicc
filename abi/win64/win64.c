@@ -22,11 +22,12 @@ static char *win64_argreg64[] = {
 };
 
 static void println_abi(FILE *out, char *fmt, ...) {
+  char buf[2048];
   va_list ap;
   va_start(ap, fmt);
-  vfprintf(out, fmt, ap);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
-  fprintf(out, "\n");
+  codegen_println(out, "%s", buf);
 }
 
 /*

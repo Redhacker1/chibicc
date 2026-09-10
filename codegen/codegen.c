@@ -1,6 +1,8 @@
 ﻿#include "chibicc.h"
 #include "codegen/codegen.h"
 #include "abi/abi.h"
+#include "ir/ir.h"
+#include "ir/opt.h"
 
 Codegen *current_codegen = NULL;
 
@@ -84,7 +86,23 @@ void codegen(Obj *prog, FILE *out) {
   if (!current_codegen)
     init_all_targets_and_abis();
 
-  if (current_codegen->codegen)
+  // 1. Lower AST to High-Level Bytecode Intermediate Representation (HLIR)
+  HLIRProg *hlir = ast_to_hlir(prog);
+  if (opt_O > 0)
+    hlir_optimize(hlir, opt_O);
+
+  // 2. Lower HLIR to Abstract SSA Low-Level Assembly Intermediate Representation (LLIR)
+  LLIRProg *llir = hlir_to_llir(hlir);
+  if (opt_O > 0)
+    llir_optimize(llir, opt_O);
+
+  if (opt_dump_ir)
+    llir_dump(stderr, llir);
+
+  // 3. Emit target machine assembly from Low-Level IR
+  if (current_codegen->codegen_llir)
+    current_codegen->codegen_llir(llir, out);
+  else if (current_codegen->codegen)
     current_codegen->codegen(prog, out);
   else
     error("active codegen backend has no entry point");

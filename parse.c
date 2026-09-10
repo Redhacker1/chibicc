@@ -195,6 +195,7 @@ static Type *find_tag(Token *tok) {
 }
 
 static Node *new_node(NodeKind kind, Token *tok) {
+  assert(tok != NULL);
   Node *node = calloc(1, sizeof(Node));
   node->kind = kind;
   node->tok = tok;
@@ -202,6 +203,9 @@ static Node *new_node(NodeKind kind, Token *tok) {
 }
 
 static Node *new_binary(NodeKind kind, Node *lhs, Node *rhs, Token *tok) {
+  assert(lhs != NULL);
+  assert(rhs != NULL);
+  assert(tok != NULL);
   Node *node = new_node(kind, tok);
   node->lhs = lhs;
   node->rhs = rhs;
@@ -209,18 +213,22 @@ static Node *new_binary(NodeKind kind, Node *lhs, Node *rhs, Token *tok) {
 }
 
 static Node *new_unary(NodeKind kind, Node *expr, Token *tok) {
+  assert(expr != NULL);
+  assert(tok != NULL);
   Node *node = new_node(kind, tok);
   node->lhs = expr;
   return node;
 }
 
 static Node *new_num(int64_t val, Token *tok) {
+  assert(tok != NULL);
   Node *node = new_node(ND_NUM, tok);
   node->val = val;
   return node;
 }
 
 static Node *new_long(int64_t val, Token *tok) {
+  assert(tok != NULL);
   Node *node = new_node(ND_NUM, tok);
   node->val = val;
   node->ty = ty_long;
@@ -228,6 +236,7 @@ static Node *new_long(int64_t val, Token *tok) {
 }
 
 static Node *new_ulong(long val, Token *tok) {
+  assert(tok != NULL);
   Node *node = new_node(ND_NUM, tok);
   node->val = val;
   node->ty = ty_ulong;
@@ -235,18 +244,24 @@ static Node *new_ulong(long val, Token *tok) {
 }
 
 static Node *new_var_node(Obj *var, Token *tok) {
+  assert(var != NULL);
+  assert(tok != NULL);
   Node *node = new_node(ND_VAR, tok);
   node->var = var;
   return node;
 }
 
 static Node *new_vla_ptr(Obj *var, Token *tok) {
+  assert(var != NULL);
+  assert(tok != NULL);
   Node *node = new_node(ND_VLA_PTR, tok);
   node->var = var;
   return node;
 }
 
 Node *new_cast(Node *expr, Type *ty) {
+  assert(expr != NULL);
+  assert(ty != NULL);
   add_type(expr);
 
   Node *node = calloc(1, sizeof(Node));

@@ -90,6 +90,7 @@ bool is_compatible(Type *t1, Type *t2) {
 }
 
 Type *copy_type(Type *ty) {
+  assert(ty != NULL);
   Type *ret = calloc(1, sizeof(Type));
   *ret = *ty;
   ret->origin = ty;
@@ -97,6 +98,7 @@ Type *copy_type(Type *ty) {
 }
 
 Type *pointer_to(Type *base) {
+  assert(base != NULL);
   int sz = current_abi ? current_abi->size_ptr : 8;
   int al = current_abi ? current_abi->align_ptr : 8;
   Type *ty = new_type(TY_PTR, sz, al);
@@ -106,6 +108,7 @@ Type *pointer_to(Type *base) {
 }
 
 Type *func_type(Type *return_ty) {
+  assert(return_ty != NULL);
   // The C spec disallows sizeof(<function type>), but
   // GCC allows that and the expression is evaluated to 1.
   Type *ty = new_type(TY_FUNC, 1, 1);
@@ -114,6 +117,7 @@ Type *func_type(Type *return_ty) {
 }
 
 Type *array_of(Type *base, int len) {
+  assert(base != NULL);
   Type *ty = new_type(TY_ARRAY, base->size * len, base->align);
   ty->base = base;
   ty->array_len = len;
@@ -174,6 +178,10 @@ static Type *get_common_type(Type *ty1, Type *ty2) {
 //
 // This operation is called the "usual arithmetic conversion".
 static void usual_arith_conv(Node **lhs, Node **rhs) {
+  assert(lhs != NULL && *lhs != NULL);
+  assert(rhs != NULL && *rhs != NULL);
+  assert((*lhs)->ty != NULL);
+  assert((*rhs)->ty != NULL);
   Type *ty = get_common_type((*lhs)->ty, (*rhs)->ty);
   *lhs = new_cast(*lhs, ty);
   *rhs = new_cast(*rhs, ty);
@@ -182,6 +190,8 @@ static void usual_arith_conv(Node **lhs, Node **rhs) {
 void add_type(Node *node) {
   if (!node || node->ty)
     return;
+
+  assert(node->tok != NULL);
 
   add_type(node->lhs);
   add_type(node->rhs);

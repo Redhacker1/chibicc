@@ -18,14 +18,18 @@ void register_abi(ABI *abi) {
 }
 
 ABI *get_abi(const char *name) {
+  if (!name)
+    return NULL;
   for (int i = 0; i < abi_count; i++) {
-    if (!strcmp(abis[i]->name, name))
+    if (abis[i] && abis[i]->name && !strcmp(abis[i]->name, name))
       return abis[i];
   }
   return NULL;
 }
 
 void set_abi(const char *name) {
+  if (!name)
+    return;
   ABI *abi = get_abi(name);
   if (!abi)
     error("unknown ABI: %s", (char *)name);

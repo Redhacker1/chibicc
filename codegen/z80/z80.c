@@ -1,6 +1,7 @@
 ﻿#include "chibicc.h"
 #include "codegen/codegen.h"
 #include "codegen/common/common.h"
+#include "ir/ir.h"
 
 static FILE *output_file;
 static int depth;
@@ -343,11 +344,17 @@ static void z80_codegen(Obj *prog, FILE *out) {
   z80_emit_text(prog, out);
 }
 
+static void z80_codegen_llir(LLIRProg *prog, FILE *out) {
+  if (prog && prog->globals)
+    z80_codegen(prog->globals, out);
+}
+
 Codegen codegen_z80 = {
   .name = "z80",
   .description = "Zilog Z80 retro microcomputer code generator",
   .default_abi_name = "z80",
   .init = z80_init,
+  .codegen_llir = z80_codegen_llir,
   .codegen = z80_codegen,
   .emit_data = z80_emit_data,
   .emit_text = z80_emit_text,
