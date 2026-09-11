@@ -14,3 +14,5 @@
 /bootstrap-test
 /build_selfhost
 chibicc-stage2.exe
+.output.txt
+tests/tmp.exe

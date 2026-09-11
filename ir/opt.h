@@ -2,6 +2,7 @@
 #define CHIBICC_OPT_H
 
 #include "ir/ir.h"
+#include "ir/hlir_opt.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -109,12 +110,15 @@ bool ir_pass_manager_run_function(IRPassManager *pm, IRFunction *fn, IRPassConte
 bool ir_pass_manager_run_prog(IRPassManager *pm, IRProg *prog, IRPassContext *ctx);
 
 // Pass Registry & Fine-Tuning API
+extern int opt_max_passes;
 void ir_register_pass(IRPass *pass);
 IRPass *ir_find_pass(const char *name);
 IRPass **ir_get_all_passes(int *count);
 void ir_init_pass_registry(void);
 void ir_opt_init(void);
 void ir_opt_set_level(int opt_level);
+void ir_opt_set_max_passes(int max_passes);
+int ir_opt_get_max_passes(void);
 bool ir_opt_set_pass_enabled(const char *name, bool enabled);
 bool ir_opt_is_pass_enabled(const char *name);
 void ir_opt_print_passes(FILE *out);
@@ -123,7 +127,6 @@ void ir_opt_print_passes(FILE *out);
 IRPassManager *ir_create_opt_pipeline(int opt_level);
 void ir_optimize(IRProg *prog);
 void ir_optimize_level(IRProg *prog, int opt_level);
-void hlir_optimize(HLIRProg *prog, int opt_level);
 void llir_optimize(LLIRProg *prog, int opt_level);
 
 // Analysis API
@@ -144,20 +147,13 @@ void ir_free_liveness(IRLiveness *liveness);
 bool ir_verify_function(IRFunction *fn, char **err_out);
 bool ir_verify_prog(IRProg *prog, char **err_out);
 
-// Individual Pass Functions (can be invoked directly or via pass manager)
+// Individual Low-Level (LLIR) Pass Functions
 bool ir_opt_const_fold(IRFunction *fn);
 bool ir_opt_copy_prop(IRFunction *fn);
 bool ir_opt_dce(IRFunction *fn);
 bool ir_opt_cfg_simplify(IRFunction *fn);
 bool ir_opt_peephole(IRFunction *fn);
 bool ir_opt_local_cse(IRFunction *fn);
-
-// High-Level IR (HLIR) Optimization Passes & Helpers
-void hlir_remove_insn(HLIRFunction *fn, HLIRInsn *insn);
-bool hlir_opt_const_fold(HLIRFunction *fn);
-bool hlir_opt_algebraic(HLIRFunction *fn);
-bool hlir_opt_control_flow(HLIRFunction *fn);
-bool hlir_opt_dead_code(HLIRFunction *fn);
 
 // Built-in Pass Singletons
 extern IRPass pass_const_fold;
@@ -169,7 +165,12 @@ extern IRPass pass_local_cse;
 extern IRPass pass_verifier;
 extern IRPass pass_hlir_const_fold;
 extern IRPass pass_hlir_algebraic;
+extern IRPass pass_hlir_copy_prop;
+extern IRPass pass_hlir_local_cse;
+extern IRPass pass_hlir_load_store;
 extern IRPass pass_hlir_control_flow;
 extern IRPass pass_hlir_dead_code;
+extern IRPass pass_hlir_dce;
+extern IRPass pass_hlir_inlining;
 
 #endif // CHIBICC_OPT_H

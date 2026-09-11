@@ -51,6 +51,20 @@ static void test_hlir_algebraic_identities(void) {
   ASSERT(42, 0 ^ x);
   ASSERT(0, x ^ x);
 
+  // Advanced identities: negation, bitwise NOT, modulo by 1, and bitwise logic with -1
+  ASSERT(-42, x * -1);
+  ASSERT(-42, -1 * x);
+  ASSERT(-42, 0 - x);
+  ASSERT(0, x % 1);
+  ASSERT(~42, x ^ -1);
+  ASSERT(~42, -1 ^ x);
+  ASSERT(42, x & -1);
+  ASSERT(42, -1 & x);
+  ASSERT(-1, x | -1);
+  ASSERT(-1, -1 | x);
+  ASSERT(42, x << 0);
+  ASSERT(42, x >> 0);
+
   // Nested algebraic chain
   int r = ((x + 0) * 1 - 0) + ((y * 0) | (x ^ x));
   ASSERT(42, r);
@@ -94,11 +108,55 @@ static void test_strength_reductions(void) {
   ASSERT(9, s * 1);
 }
 
+// 5. Canonicalization of Commutative and Relational Expressions with Constants
+static void test_canonicalization(void) {
+  int x = opaque_val(15);
+  ASSERT(1, 10 < x);
+  ASSERT(0, 20 < x);
+  ASSERT(1, 15 <= x);
+  ASSERT(0, 16 <= x);
+  ASSERT(1, 20 > x);
+  ASSERT(0, 10 > x);
+  ASSERT(1, 15 >= x);
+  ASSERT(0, 14 >= x);
+  ASSERT(1, 15 == x);
+  ASSERT(0, 16 == x);
+  ASSERT(1, 16 != x);
+  ASSERT(0, 15 != x);
+  ASSERT(25, 10 + x);
+  ASSERT(150, 10 * x);
+  ASSERT(15, 0xFF & x);
+  ASSERT(15, 0 | x);
+  ASSERT(15, 0 ^ x);
+}
+
+// 6. High-level Double Unary & Redundant Operations
+static void test_hlir_double_unary_and_cse(void) {
+  int x = opaque_val(42);
+  ASSERT(42, -(-x));
+  ASSERT(42, ~(~x));
+  ASSERT(1, !(!x));
+
+  // Local CSE test: repeated expressions in straight line code
+  int a = x + 10;
+  int b = x + 10;
+  int c = a * b;
+  ASSERT(2704, c); // (42 + 10) * (42 + 10) = 52 * 52 = 2704
+
+  // Redundant store followed by store (DSE) & load-after-store
+  int temp = 100;
+  temp = x + 5; // overwrite dead store
+  int read_back = temp;
+  ASSERT(47, read_back);
+}
+
 int main(void) {
   test_hlir_const_folding();
   test_hlir_algebraic_identities();
   ASSERT(52, test_hlir_control_flow(42));
   test_strength_reductions();
+  test_canonicalization();
+  test_hlir_double_unary_and_cse();
 
   printf("OK\n");
   return 0;

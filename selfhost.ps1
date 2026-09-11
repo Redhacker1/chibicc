@@ -46,6 +46,8 @@ $srcs = @(
     "tokenize.c",
     "type.c",
     "unicode.c",
+    "ir/hlir.c",
+    "ir/hlir_opt.c",
     "ir/ir.c",
     "ir/opt.c",
     "ir/regalloc.c",

@@ -75,7 +75,7 @@ static bool take_arg(const char *arg) {
   char *x[] = {
     "-o", "-I", "-idirafter", "-include", "-x", "-MF", "-MT", "-Xlinker",
     "-target", "--target", "-mabi", "-march", "-D", "-U",
-    "-cc1-input", "-cc1-output",
+    "-cc1-input", "-cc1-output", "--max-passes",
   };
 
   for (int i = 0; i < sizeof(x) / sizeof(*x); i++)
@@ -426,6 +426,31 @@ static void parse_args(const int argc, char **argv) {
 
     if (!strcmp(argv[i], "-fdump-ir") || !strcmp(argv[i], "--dump-ir")) {
       opt_dump_ir = true;
+      continue;
+    }
+
+    if (!strncmp(argv[i], "-fmax-passes=", 13)) {
+      ir_opt_set_max_passes(atoi(argv[i] + 13));
+      continue;
+    }
+
+    if (!strncmp(argv[i], "-fmax-iterations=", 17)) {
+      ir_opt_set_max_passes(atoi(argv[i] + 17));
+      continue;
+    }
+
+    if (!strncmp(argv[i], "-fopt-max-passes=", 17)) {
+      ir_opt_set_max_passes(atoi(argv[i] + 17));
+      continue;
+    }
+
+    if (!strncmp(argv[i], "--max-passes=", 13)) {
+      ir_opt_set_max_passes(atoi(argv[i] + 13));
+      continue;
+    }
+
+    if (!strcmp(argv[i], "--max-passes")) {
+      ir_opt_set_max_passes(atoi(argv[++i]));
       continue;
     }
 

@@ -137,7 +137,11 @@ static void compute_materialization(LLIRFunction *fn) {
             } else if (imm32 && (insn->kind == LLIR_ADD || insn->kind == LLIR_MUL ||
                                  insn->kind == LLIR_AND || insn->kind == LLIR_OR ||
                                  insn->kind == LLIR_XOR) && (!insn->ty || !is_flonum(insn->ty))) {
-              // commutative binop with imm
+              // commutative binop with imm: only fold if src2 is NOT an immediate
+              if (insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM) {
+                all_uses_folded = false;
+                break;
+              }
             } else {
               all_uses_folded = false;
               break;
@@ -3144,19 +3148,6 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
     if (!insn->ty || !is_flonum(insn->ty)) {
       bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
       bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
-      if (s1_imm && s2_imm) {
-        int64_t val = insn->src1->def_insn->imm + insn->src2->def_insn->imm;
-        if (val == 0)
-          println("  xor %%eax, %%eax");
-        else if (val > 0 && (uint64_t)val <= 0xFFFFFFFFULL)
-          println("  mov $%u, %%eax", (uint32_t)val);
-        else if ((int64_t)(int32_t)val == val)
-          println("  mov $%lld, %%rax", (long long)val);
-        else
-          println("  movabs $%lld, %%rax", (long long)val);
-        store_vreg("%rax", insn->dst);
-        break;
-      }
       LLIRVReg *imm_v = NULL;
       LLIRVReg *base = NULL;
       if (s2_imm) {
@@ -3180,21 +3171,7 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
 
   case LLIR_SUB: {
     if (!insn->ty || !is_flonum(insn->ty)) {
-      bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
       bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
-      if (s1_imm && s2_imm) {
-        int64_t val = insn->src1->def_insn->imm - insn->src2->def_insn->imm;
-        if (val == 0)
-          println("  xor %%eax, %%eax");
-        else if (val > 0 && (uint64_t)val <= 0xFFFFFFFFULL)
-          println("  mov $%u, %%eax", (uint32_t)val);
-        else if ((int64_t)(int32_t)val == val)
-          println("  mov $%lld, %%rax", (long long)val);
-        else
-          println("  movabs $%lld, %%rax", (long long)val);
-        store_vreg("%rax", insn->dst);
-        break;
-      }
       if (s2_imm && (int32_t)insn->src2->def_insn->imm == insn->src2->def_insn->imm) {
         int64_t imm = insn->src2->def_insn->imm;
         load_vreg(insn->src1, "%rax");
@@ -3213,19 +3190,6 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
     if (!insn->ty || !is_flonum(insn->ty)) {
       bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
       bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
-      if (s1_imm && s2_imm) {
-        int64_t val = insn->src1->def_insn->imm * insn->src2->def_insn->imm;
-        if (val == 0)
-          println("  xor %%eax, %%eax");
-        else if (val > 0 && (uint64_t)val <= 0xFFFFFFFFULL)
-          println("  mov $%u, %%eax", (uint32_t)val);
-        else if ((int64_t)(int32_t)val == val)
-          println("  mov $%lld, %%rax", (long long)val);
-        else
-          println("  movabs $%lld, %%rax", (long long)val);
-        store_vreg("%rax", insn->dst);
-        break;
-      }
       LLIRVReg *imm_v = NULL;
       LLIRVReg *base = NULL;
       if (s2_imm) {
@@ -3235,33 +3199,6 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
       }
       if (imm_v && base && (int32_t)imm_v->def_insn->imm == imm_v->def_insn->imm) {
         int64_t imm = imm_v->def_insn->imm;
-        if (imm == 0) {
-          println("  xor %%eax, %%eax");
-          store_vreg("%rax", insn->dst);
-          break;
-        }
-        if (imm == 1) {
-          load_vreg(base, "%rax");
-          store_vreg("%rax", insn->dst);
-          break;
-        }
-        if (imm == 2) {
-          load_vreg(base, "%rax");
-          println("  add %%rax, %%rax");
-          store_vreg("%rax", insn->dst);
-          break;
-        }
-        if (imm > 0 && (imm & (imm - 1)) == 0) {
-          int shift = 0;
-          while ((1LL << shift) < imm) shift++;
-          load_vreg(base, "%rax");
-          if (shift == 1)
-            println("  shl $1, %%rax");
-          else
-            println("  shl $%d, %%rax", shift);
-          store_vreg("%rax", insn->dst);
-          break;
-        }
         load_vreg(base, "%rax");
         println("  imul $%lld, %%rax, %%rax", (long long)imm);
         store_vreg("%rax", insn->dst);
@@ -3329,19 +3266,6 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
   case LLIR_AND: {
     bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
     bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
-    if (s1_imm && s2_imm) {
-      int64_t val = insn->src1->def_insn->imm & insn->src2->def_insn->imm;
-      if (val == 0)
-        println("  xor %%eax, %%eax");
-      else if (val > 0 && (uint64_t)val <= 0xFFFFFFFFULL)
-        println("  mov $%u, %%eax", (uint32_t)val);
-      else if ((int64_t)(int32_t)val == val)
-        println("  mov $%lld, %%rax", (long long)val);
-      else
-        println("  movabs $%lld, %%rax", (long long)val);
-      store_vreg("%rax", insn->dst);
-      break;
-    }
     LLIRVReg *imm_v = NULL;
     LLIRVReg *base = NULL;
     if (s2_imm) {
@@ -3351,16 +3275,6 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
     }
     if (imm_v && base && (int32_t)imm_v->def_insn->imm == imm_v->def_insn->imm) {
       int64_t imm = imm_v->def_insn->imm;
-      if (imm == 0) {
-        println("  xor %%eax, %%eax");
-        store_vreg("%rax", insn->dst);
-        break;
-      }
-      if (imm == -1) {
-        load_vreg(base, "%rax");
-        store_vreg("%rax", insn->dst);
-        break;
-      }
       load_vreg(base, "%rax");
       println("  and $%lld, %%rax", (long long)imm);
       store_vreg("%rax", insn->dst);
@@ -3373,19 +3287,6 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
   case LLIR_OR: {
     bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
     bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
-    if (s1_imm && s2_imm) {
-      int64_t val = insn->src1->def_insn->imm | insn->src2->def_insn->imm;
-      if (val == 0)
-        println("  xor %%eax, %%eax");
-      else if (val > 0 && (uint64_t)val <= 0xFFFFFFFFULL)
-        println("  mov $%u, %%eax", (uint32_t)val);
-      else if ((int64_t)(int32_t)val == val)
-        println("  mov $%lld, %%rax", (long long)val);
-      else
-        println("  movabs $%lld, %%rax", (long long)val);
-      store_vreg("%rax", insn->dst);
-      break;
-    }
     LLIRVReg *imm_v = NULL;
     LLIRVReg *base = NULL;
     if (s2_imm) {
@@ -3395,11 +3296,6 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
     }
     if (imm_v && base && (int32_t)imm_v->def_insn->imm == imm_v->def_insn->imm) {
       int64_t imm = imm_v->def_insn->imm;
-      if (imm == 0) {
-        load_vreg(base, "%rax");
-        store_vreg("%rax", insn->dst);
-        break;
-      }
       load_vreg(base, "%rax");
       println("  or $%lld, %%rax", (long long)imm);
       store_vreg("%rax", insn->dst);
@@ -3412,19 +3308,6 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
   case LLIR_XOR: {
     bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
     bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
-    if (s1_imm && s2_imm) {
-      int64_t val = insn->src1->def_insn->imm ^ insn->src2->def_insn->imm;
-      if (val == 0)
-        println("  xor %%eax, %%eax");
-      else if (val > 0 && (uint64_t)val <= 0xFFFFFFFFULL)
-        println("  mov $%u, %%eax", (uint32_t)val);
-      else if ((int64_t)(int32_t)val == val)
-        println("  mov $%lld, %%rax", (long long)val);
-      else
-        println("  movabs $%lld, %%rax", (long long)val);
-      store_vreg("%rax", insn->dst);
-      break;
-    }
     LLIRVReg *imm_v = NULL;
     LLIRVReg *base = NULL;
     if (s2_imm) {
@@ -3434,17 +3317,6 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
     }
     if (imm_v && base && (int32_t)imm_v->def_insn->imm == imm_v->def_insn->imm) {
       int64_t imm = imm_v->def_insn->imm;
-      if (imm == 0) {
-        load_vreg(base, "%rax");
-        store_vreg("%rax", insn->dst);
-        break;
-      }
-      if (imm == -1) {
-        load_vreg(base, "%rax");
-        println("  not %%rax");
-        store_vreg("%rax", insn->dst);
-        break;
-      }
       load_vreg(base, "%rax");
       println("  xor $%lld, %%rax", (long long)imm);
       store_vreg("%rax", insn->dst);
@@ -3455,21 +3327,7 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
   }
 
   case LLIR_SHL: {
-    bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
     bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
-    if (s1_imm && s2_imm) {
-      int64_t val = insn->src1->def_insn->imm << (insn->src2->def_insn->imm & 63);
-      if (val == 0)
-        println("  xor %%eax, %%eax");
-      else if (val > 0 && (uint64_t)val <= 0xFFFFFFFFULL)
-        println("  mov $%u, %%eax", (uint32_t)val);
-      else if ((int64_t)(int32_t)val == val)
-        println("  mov $%lld, %%rax", (long long)val);
-      else
-        println("  movabs $%lld, %%rax", (long long)val);
-      store_vreg("%rax", insn->dst);
-      break;
-    }
     if (s2_imm) {
       int64_t imm = insn->src2->def_insn->imm & 63;
       load_vreg(insn->src1, "%rax");
@@ -3488,25 +3346,7 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
   }
 
   case LLIR_SHR: {
-    bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
     bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
-    if (s1_imm && s2_imm) {
-      int64_t val;
-      if (insn->ty && insn->ty->is_unsigned)
-        val = (uint64_t)insn->src1->def_insn->imm >> (insn->src2->def_insn->imm & 63);
-      else
-        val = insn->src1->def_insn->imm >> (insn->src2->def_insn->imm & 63);
-      if (val == 0)
-        println("  xor %%eax, %%eax");
-      else if (val > 0 && (uint64_t)val <= 0xFFFFFFFFULL)
-        println("  mov $%u, %%eax", (uint32_t)val);
-      else if ((int64_t)(int32_t)val == val)
-        println("  mov $%lld, %%rax", (long long)val);
-      else
-        println("  movabs $%lld, %%rax", (long long)val);
-      store_vreg("%rax", insn->dst);
-      break;
-    }
     if (s2_imm) {
       int64_t imm = insn->src2->def_insn->imm & 63;
       load_vreg(insn->src1, "%rax");
