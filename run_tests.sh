@@ -180,6 +180,77 @@ if [ -d "$CONF_DIR" ]; then
 fi
 
 # ==============================================================================
+# 4. Optimization Passes Test Suite
+# ==============================================================================
+echo ""
+echo "========================================"
+echo "Section 4: Optimization Passes Tests"
+echo "========================================"
+
+# 4.1 Internal compiler optimization tests (handcrafted IR)
+echo ""
+echo "[Internal Optimization Tests]"
+HANDCRAFTED_EXE="./cmake-build-debug/hlir-opt-test.exe"
+if [ ! -f "$HANDCRAFTED_EXE" ]; then
+    HANDCRAFTED_EXE="./hlir-opt-test"
+fi
+
+if [ -f "$HANDCRAFTED_EXE" ]; then
+    if "$HANDCRAFTED_EXE"; then
+        echo "  [PASS] hlir-opt-test"
+        PASSED=$((PASSED + 1))
+    else
+        echo "  [FAIL] hlir-opt-test (Execution failed)"
+        FAILED=$((FAILED + 1))
+        FAILED_LIST+=("optimizations/hlir-opt-test (internal)")
+    fi
+else
+    echo "  [SKIP] hlir-opt-test (Not found)"
+fi
+
+# 4.2 Integration tests compiled with chibicc
+OPT_DIR="tests/optimizations"
+if [ -d "$OPT_DIR" ]; then
+    echo ""
+    echo "[Integration Optimization Tests]"
+    
+    # Setup common helper
+    gcc -x c -c "tests/common" -o "tests/common.o"
+    
+    for c_file in $(find "$OPT_DIR" -maxdepth 1 -name "*.c" ! -name "hlir_opt_handcrafted.c" | sort); do
+        test_name=$(basename "$c_file" .c)
+        obj_file="$OPT_DIR/$test_name.o"
+        exe_file="$OPT_DIR/$test_name.exe"
+        
+        for opt_level in -O1 -O2 -O3 -Os; do
+            test_label="optimizations/$test_name.c ($opt_level)"
+            if "$COMPILER" -c "$c_file" -o "$obj_file" $INCLUDE_FLAGS $opt_level -D_WIN32 -D__GNUC__ 2>/dev/null; then
+                if gcc "$obj_file" "tests/common.o" -o "$exe_file" 2>/dev/null; then
+                    if "./$exe_file" >/dev/null 2>&1; then
+                        echo "  [PASS] $test_label"
+                        PASSED=$((PASSED + 1))
+                    else
+                        echo "  [FAIL] $test_label (Execution failed)"
+                        FAILED=$((FAILED + 1))
+                        FAILED_LIST+=("$test_label (exec)")
+                    fi
+                else
+                    echo "  [FAIL] $test_label (Link failed)"
+                    FAILED=$((FAILED + 1))
+                    FAILED_LIST+=("$test_label (link)")
+                fi
+            else
+                echo "  [FAIL] $test_label (Compilation failed)"
+                FAILED=$((FAILED + 1))
+                FAILED_LIST+=("$test_label (compile)")
+            fi
+            rm -f "$obj_file" "$exe_file"
+        done
+    done
+    rm -f "tests/common.o"
+fi
+
+# ==============================================================================
 # Summary Report
 # ==============================================================================
 TOTAL=$((PASSED + FAILED))

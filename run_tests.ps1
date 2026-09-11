@@ -236,9 +236,10 @@ if (Test-Path $confDir) {
 # ==============================================================================
 $optDir = "$RootDir\tests\optimizations"
 if (Test-Path $optDir) {
-    $optTests = Get-ChildItem -Path "$optDir\*.c" | Sort-Object Name
+    # 4.1 Integration tests compiled with chibicc
+    $integrationTests = Get-ChildItem -Path "$optDir\*.c" | Where-Object { $_.Name -ne "hlir_opt_handcrafted.c" } | Sort-Object Name
     Write-Host "`n========================================" -ForegroundColor Cyan
-    Write-Host "Section 4: Optimization Passes Tests ($($optTests.Count) suites)" -ForegroundColor Cyan
+    Write-Host "Section 4: Optimization Passes Tests ($($integrationTests.Count) suites)" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor Cyan
 
     Write-Host "`n[Setup] Compiling tests/common helper for optimizations..." -ForegroundColor Yellow
@@ -250,7 +251,7 @@ if (Test-Path $optDir) {
 
     $optLevels = @("-O1", "-O2", "-O3", "-Os")
 
-    foreach ($file in $optTests) {
+    foreach ($file in $integrationTests) {
         $name = $file.BaseName
         $cFile = $file.FullName
         $oFile = "tests\optimizations\$name.o"
@@ -294,6 +295,30 @@ if (Test-Path $optDir) {
 
             Remove-Item $oFile, $exeFile -ErrorAction SilentlyContinue
         }
+    }
+
+    # 4.2 Internal compiler optimization tests (handcrafted IR)
+    $handcraftedExe = ".\cmake-build-debug\hlir-opt-test.exe"
+    if (-not (Test-Path $handcraftedExe)) {
+        $handcraftedExe = ".\hlir-opt-test.exe"
+    }
+    
+    Write-Host "`n[Internal Optimization Tests]" -ForegroundColor Magenta
+    if (Test-Path $handcraftedExe) {
+        $output = & $handcraftedExe 2>&1
+        $output | ForEach-Object {
+            Write-Host "  $_" -ForegroundColor DarkGray
+        }
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  [PASS] hlir-opt-test" -ForegroundColor Green
+            $Passed++
+        } else {
+            Write-Host "  [FAIL] hlir-opt-test (Failed with exit code $LASTEXITCODE)" -ForegroundColor Red
+            $Failed++
+            $FailedTests += "optimizations/hlir-opt-test (internal)"
+        }
+    } else {
+        Write-Host "  [SKIP] hlir-opt-test (Not found at $handcraftedExe)" -ForegroundColor Yellow
     }
 
     # Cleanup common helper
