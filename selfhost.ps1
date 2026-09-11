@@ -104,7 +104,7 @@ function Build-Stage([string]$StageCompiler, [string]$BuildDir, [string]$TargetE
 
     $outPath = "$BuildDir\$TargetExeName"
     Write-Host "`n--- Linking $outPath ---" -ForegroundColor Cyan
-    gcc "-Wl,--start-group" $objFiles "-Wl,--end-group" -s "-Wl,--stack,16777216" -o $outPath
+    gcc "-Wl,--start-group" $objFiles "-Wl,--end-group" -s "-Wl,--stack,16777216" "-Wl,--subsystem,console" "-Wl,--dynamicbase" "-Wl,--nxcompat" "-Wl,--high-entropy-va" "-Wl,--gc-sections" -o $outPath
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Link failed for $outPath."
         exit 1

@@ -36,6 +36,12 @@ if(WIN32)
 target_sources(chibicc-cli PUBLIC win_src/glob.c win_src/wait.c win_src/win_shims.c win_src/unistd.c)
 
 target_include_directories(chibicc-cli PRIVATE win_includes)
+
+if(MSVC)
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SUBSYSTEM:CONSOLE /DYNAMICBASE /NXCOMPAT")
+    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /OPT:REF /OPT:ICF /INCREMENTAL:NO")
+    set(CMAKE_EXE_LINKER_FLAGS_DEBUG "${CMAKE_EXE_LINKER_FLAGS_DEBUG} /INCREMENTAL")
+endif()
 endif()
 
 add_custom_target(copy_headers ALL

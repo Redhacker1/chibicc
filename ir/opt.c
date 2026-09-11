@@ -803,10 +803,13 @@ bool ir_opt_cfg_simplify(IRFunction *fn) {
 
   // Pass 2: Eliminate redundant unconditional jumps immediately preceding their target label
   for (IRInsn *insn = fn->head; insn; insn = insn->next) {
-    if (insn->kind == IR_JMP && insn->label && insn->next && insn->next->kind == IR_LABEL) {
-      if (insn->next->label && !strcmp(insn->label, insn->next->label)) {
+    if (insn->kind == IR_JMP && insn->label) {
+      IRInsn *nxt = insn->next;
+      while (nxt && nxt->kind == IR_NOP)
+        nxt = nxt->next;
+      if (nxt && nxt->kind == IR_LABEL && nxt->label && !strcmp(insn->label, nxt->label)) {
         IRInsn *to_remove = insn;
-        insn = insn->prev;
+        insn = insn->prev ? insn->prev : fn->head;
         ir_remove_insn(fn, to_remove);
         changed = true;
         if (!insn)
@@ -824,6 +827,19 @@ bool ir_opt_cfg_simplify(IRFunction *fn) {
         insn->label_true = NULL;
         insn->label_false = NULL;
         insn->src1 = NULL;
+        changed = true;
+      }
+    }
+  }
+
+  // Pass 4: Simplify conditional branches where false target is the immediate next label
+  for (IRInsn *insn = fn->head; insn; insn = insn->next) {
+    if (insn->kind == IR_BR && insn->label_false) {
+      IRInsn *nxt = insn->next;
+      while (nxt && nxt->kind == IR_NOP)
+        nxt = nxt->next;
+      if (nxt && nxt->kind == IR_LABEL && nxt->label && !strcmp(insn->label_false, nxt->label)) {
+        insn->label_false = NULL;
         changed = true;
       }
     }

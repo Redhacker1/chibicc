@@ -1,274 +1,987 @@
 ﻿Command finished with exit code 0.
 Command output:
 diff --git a/codegen/x86_64/x86_64.c b/codegen/x86_64/x86_64.c
-index ec217fc..c13c033 100644
+index c13c033..16dac3f 100644
 --- a/codegen/x86_64/x86_64.c
 +++ b/codegen/x86_64/x86_64.c
-@@ -21,36 +21,138 @@ static void compute_materialization(LLIRFunction *fn) {
-   for (int i = 0; i < fn->num_vregs; i++)
-     current_needs_mat[i] = true;
+@@ -31,7 +31,7 @@ static void compute_materialization(LLIRFunction *fn) {
+     }
+   }
  
--  for (int i = 0; i < fn->num_vregs; i++) {
--    LLIRVReg *v = fn->vregs[i];
--    if (!v || !v->def_insn)
--      continue;
-+  int *use_count = calloc(fn->num_vregs, sizeof(int));
-+  for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
-+    if (insn->src1) use_count[insn->src1->id]++;
-+    if (insn->src2) use_count[insn->src2->id]++;
-+    if (insn->src3) use_count[insn->src3->id]++;
-+    for (int a = 0; a < insn->num_args; a++) {
-+      if (insn->args[a]) use_count[insn->args[a]->id]++;
-+    }
-+  }
+-  // Iteratively identify folded address computations and dead pure vregs
++  // Iteratively identify folded address computations, immediate operands, and dead pure vregs
+   bool changed = true;
+   while (changed) {
+     changed = false;
+@@ -125,18 +125,49 @@ static void compute_materialization(LLIRFunction *fn) {
+         }
+       }
  
--    if (v->def_insn->kind == LLIR_LEA && v->def_insn->var) {
--      bool all_uses_foldable = true;
--      for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
--        if (insn->src1 == v) {
--          if (insn->kind != LLIR_LOAD && insn->kind != LLIR_STORE) {
--            all_uses_foldable = false;
--            break;
--          }
-+  // Iteratively identify folded address computations and dead pure vregs
-+  bool changed = true;
-+  while (changed) {
-+    changed = false;
-+
-+    // 1. Foldable ADD / SUB offset calculations
-+    for (int i = 0; i < fn->num_vregs; i++) {
-+      LLIRVReg *v = fn->vregs[i];
-+      if (!v || !v->def_insn || !current_needs_mat[v->id])
-+        continue;
-+
-+      LLIRInsn *def = v->def_insn;
-+      if (def->kind == LLIR_ADD && def->src1 && def->src2) {
-+        LLIRInsn *d1 = def->src1->def_insn;
-+        LLIRInsn *d2 = def->src2->def_insn;
-+        LLIRVReg *base = NULL;
-+        LLIRVReg *imm_vreg = NULL;
-+        if (d2 && d2->kind == LLIR_IMM) {
-+          base = def->src1;
-+          imm_vreg = def->src2;
-+        } else if (d1 && d1->kind == LLIR_IMM) {
-+          base = def->src2;
-+          imm_vreg = def->src1;
-         }
--        if (insn->src2 == v || insn->src3 == v) {
--          all_uses_foldable = false;
--          break;
-+
-+        if (base && imm_vreg) {
-+          bool all_uses_mem = true;
-+          for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
-+            if (insn->src1 == v) {
-+              if (insn->kind != LLIR_LOAD && insn->kind != LLIR_STORE) {
-+                all_uses_mem = false;
-+                break;
-+              }
-+            }
-+            if (insn->src2 == v || insn->src3 == v) {
-+              all_uses_mem = false;
-+              break;
-+            }
-+            for (int a = 0; a < insn->num_args; a++) {
-+              if (insn->args[a] == v) {
-+                all_uses_mem = false;
-+                break;
-+              }
-+            }
-+          }
-+
-+          if (all_uses_mem) {
-+            current_needs_mat[v->id] = false;
-+            changed = true;
-+          }
-         }
--        for (int a = 0; a < insn->num_args; a++) {
--          if (insn->args[a] == v) {
-+      }
-+
-+      // 2. Foldable LEA of variables
-+      if (def->kind == LLIR_LEA && def->var) {
-+        bool all_uses_foldable = true;
-+        for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
+-      // 3. Foldable IMM used only in folded address ADD
++      // 3. Foldable IMM used in foldable immediate operations or address calculations
+       if (def->kind == LLIR_IMM) {
++        int64_t imm = def->imm;
++        bool imm32 = ((int32_t)imm == imm);
+         bool all_uses_folded = true;
+         for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
+-          if (insn->src1 == v || insn->src2 == v || insn->src3 == v) {
 +          if (insn->src1 == v) {
-+            if (insn->kind != LLIR_LOAD && insn->kind != LLIR_STORE) {
-+              // Could be used in a non-materialized ADD
-+              if (insn->kind == LLIR_ADD && insn->dst && !current_needs_mat[insn->dst->id]) {
-+                // folded
-+              } else {
-+                all_uses_foldable = false;
-+                break;
-+              }
++            if (insn->kind == LLIR_ADD && insn->dst && !current_needs_mat[insn->dst->id]) {
++              // address ADD
++            } else if (imm32 && (insn->kind == LLIR_ADD || insn->kind == LLIR_MUL ||
++                                 insn->kind == LLIR_AND || insn->kind == LLIR_OR ||
++                                 insn->kind == LLIR_XOR) && (!insn->ty || !is_flonum(insn->ty))) {
++              // commutative binop with imm
++            } else {
++              all_uses_folded = false;
++              break;
 +            }
 +          }
 +          if (insn->src2 == v) {
-+            if (insn->kind == LLIR_ADD && insn->dst && !current_needs_mat[insn->dst->id]) {
-+              // folded
-+            } else {
-+              all_uses_foldable = false;
-+              break;
-+            }
-+          }
-+          if (insn->src3 == v) {
-             all_uses_foldable = false;
-             break;
+             if (insn->kind == LLIR_ADD && insn->dst && !current_needs_mat[insn->dst->id]) {
+-              // folded into an unmaterialized address ADD
++              // address ADD
++            } else if (imm32 && (insn->kind == LLIR_ADD || insn->kind == LLIR_SUB ||
++                                 insn->kind == LLIR_MUL || insn->kind == LLIR_AND ||
++                                 insn->kind == LLIR_OR || insn->kind == LLIR_XOR) && (!insn->ty || !is_flonum(insn->ty))) {
++              // binop with imm
++            } else if (insn->kind == LLIR_SHL || insn->kind == LLIR_SHR) {
++              // shift with imm
++            } else if (imm32 && (insn->kind == LLIR_CMP_EQ || insn->kind == LLIR_CMP_NE ||
++                                 insn->kind == LLIR_CMP_LT || insn->kind == LLIR_CMP_LE ||
++                                 insn->kind == LLIR_CMP_GT || insn->kind == LLIR_CMP_GE) &&
++                       (!insn->src1 || !insn->src1->ty || !is_flonum(insn->src1->ty))) {
++              // comparison with imm
++            } else if (imm32 && insn->kind == LLIR_STORE && (!insn->ty || (insn->ty->kind != TY_STRUCT && insn->ty->kind != TY_UNION))) {
++              // store imm
+             } else {
+               all_uses_folded = false;
+               break;
+             }
            }
-+          for (int a = 0; a < insn->num_args; a++) {
-+            if (insn->args[a] == v) {
-+              all_uses_foldable = false;
-+              break;
-+            }
++          if (insn->src3 == v) {
++            all_uses_folded = false;
++            break;
 +          }
-+        }
-+
-+        if (all_uses_foldable) {
-+          current_needs_mat[v->id] = false;
-+          changed = true;
-         }
-       }
+           for (int a = 0; a < insn->num_args; a++) {
+             if (insn->args[a] == v) {
+               all_uses_folded = false;
+@@ -2027,7 +2058,7 @@ static void emit_data(Obj *prog, FILE *out) {
+       println("  .globl %s", var->name);
  
--      if (all_uses_foldable)
--        current_needs_mat[v->id] = false;
-+      // 3. Foldable IMM used only in folded address ADD
-+      if (def->kind == LLIR_IMM) {
-+        bool all_uses_folded = true;
-+        for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
-+          if (insn->src1 == v || insn->src2 == v || insn->src3 == v) {
-+            if (insn->kind == LLIR_ADD && insn->dst && !current_needs_mat[insn->dst->id]) {
-+              // folded into an unmaterialized address ADD
-+            } else {
-+              all_uses_folded = false;
-+              break;
-+            }
-+          }
-+          for (int a = 0; a < insn->num_args; a++) {
-+            if (insn->args[a] == v) {
-+              all_uses_folded = false;
-+              break;
-+            }
-+          }
-+        }
-+        if (all_uses_folded) {
-+          current_needs_mat[v->id] = false;
-+          changed = true;
-+        }
-+      }
+     int align =
+-      (var->ty->kind == TY_ARRAY &&
++      (opt_fpic && var->ty->kind == TY_ARRAY &&
+        var->ty->size >= 16)
+         ? MAX(16, var->align)
+         : var->align;
+@@ -2225,13 +2256,13 @@ static void load_vreg(LLIRVReg *v, const char *reg) {
+       cached_rax_vreg = NULL;
+     } else if (sz == 1) {
+       if (v->ty && v->ty->is_unsigned)
+-        println("  movzbq %d(%%rbp), %s", offset, reg);
++        println("  movzbl %d(%%rbp), %s", offset, x86_reg32(reg));
+       else
+         println("  movsbq %d(%%rbp), %s", offset, reg);
+       cached_rax_vreg = (!strcmp(reg, "%rax")) ? v : NULL;
+     } else if (sz == 2) {
+       if (v->ty && v->ty->is_unsigned)
+-        println("  movzwq %d(%%rbp), %s", offset, reg);
++        println("  movzwl %d(%%rbp), %s", offset, x86_reg32(reg));
+       else
+         println("  movswq %d(%%rbp), %s", offset, reg);
+       cached_rax_vreg = (!strcmp(reg, "%rax")) ? v : NULL;
+@@ -2255,6 +2286,13 @@ static void load_vreg(LLIRVReg *v, const char *reg) {
+ 
+ static void store_vreg(const char *reg, LLIRVReg *v) {
+   if (!v) return;
++  if (current_needs_mat && !current_needs_mat[v->id]) {
++    if (!strcmp(reg, "%rax"))
++      cached_rax_vreg = v;
++    else
++      cached_rax_vreg = NULL;
++    return;
++  }
+   int offset = v->spill_offset ? v->spill_offset : -((v->id + 1) * 8);
+   if (v->is_float) {
+     if (reg[1] == 'x') {
+@@ -2371,9 +2409,60 @@ static void x86_64_emit_cmp_result(const char *cc) {
+ static void x86_64_emit_int_cmp(LLIRInsn *insn,
+                                 const char *signed_cc,
+                                 const char *unsigned_cc) {
+-  load_vreg(insn->src1, "%rax");
+-  load_vreg(insn->src2, "%rdx");
+-  println("  cmp %%rdx, %%rax");
++  bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
++  bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
++  if (s1_imm && s2_imm) {
++    int64_t v1 = insn->src1->def_insn->imm;
++    int64_t v2 = insn->src2->def_insn->imm;
++    if (v1 == 0)
++      println("  xor %%eax, %%eax");
++    else if (v1 > 0 && (uint64_t)v1 <= 0xFFFFFFFFULL)
++      println("  mov $%u, %%eax", (uint32_t)v1);
++    else if ((int64_t)(int32_t)v1 == v1)
++      println("  mov $%lld, %%rax", (long long)v1);
++    else
++      println("  movabs $%lld, %%rax", (long long)v1);
++
++    if (v2 == 0)
++      println("  test %%rax, %%rax");
++    else
++      println("  cmp $%lld, %%rax", (long long)v2);
++  } else if (s2_imm && (int32_t)insn->src2->def_insn->imm == insn->src2->def_insn->imm) {
++    int64_t imm = insn->src2->def_insn->imm;
++    load_vreg(insn->src1, "%rax");
++    if (imm == 0)
++      println("  test %%rax, %%rax");
++    else
++      println("  cmp $%lld, %%rax", (long long)imm);
++  } else if (s1_imm && (int32_t)insn->src1->def_insn->imm == insn->src1->def_insn->imm) {
++    int64_t imm = insn->src1->def_insn->imm;
++    load_vreg(insn->src2, "%rax");
++    if (imm == 0)
++      println("  test %%rax, %%rax");
++    else
++      println("  cmp $%lld, %%rax", (long long)imm);
++
++    bool uns = insn->src1 &&
++               insn->src1->ty &&
++               insn->src1->ty->is_unsigned;
++    const char *cc = uns ? unsigned_cc : signed_cc;
++    const char *swapped_cc = cc;
++    if (!strcmp(cc, "l")) swapped_cc = "g";
++    else if (!strcmp(cc, "le")) swapped_cc = "ge";
++    else if (!strcmp(cc, "g")) swapped_cc = "l";
++    else if (!strcmp(cc, "ge")) swapped_cc = "le";
++    else if (!strcmp(cc, "b")) swapped_cc = "a";
++    else if (!strcmp(cc, "be")) swapped_cc = "ae";
++    else if (!strcmp(cc, "a")) swapped_cc = "b";
++    else if (!strcmp(cc, "ae")) swapped_cc = "be";
++    x86_64_emit_cmp_result(swapped_cc);
++    store_vreg("%rax", insn->dst);
++    return;
++  } else {
++    load_vreg(insn->src1, "%rax");
++    load_vreg(insn->src2, "%rdx");
++    println("  cmp %%rdx, %%rax");
++  }
+ 
+   bool uns = insn->src1 &&
+              insn->src1->ty &&
+@@ -2641,6 +2730,26 @@ static void x86_64_emit_store(LLIRInsn *insn) {
+       return;
      }
    }
-+
-+  free(use_count);
- }
- 
- static void gen_expr(Node *node, FILE *out);
-@@ -2583,6 +2685,38 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
- 
-   (void)out;
- 
-+  if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id]) {
-+    switch (insn->kind) {
-+    case LLIR_IMM:
-+    case LLIR_FIMM:
-+    case LLIR_LEA:
-+    case LLIR_MOV:
-+    case LLIR_CAST:
-+    case LLIR_ADD:
-+    case LLIR_SUB:
-+    case LLIR_MUL:
-+    case LLIR_DIV:
-+    case LLIR_MOD:
-+    case LLIR_AND:
-+    case LLIR_OR:
-+    case LLIR_XOR:
-+    case LLIR_SHL:
-+    case LLIR_SHR:
-+    case LLIR_NEG:
-+    case LLIR_NOT:
-+    case LLIR_LOGNOT:
-+    case LLIR_CMP_EQ:
-+    case LLIR_CMP_NE:
-+    case LLIR_CMP_LT:
-+    case LLIR_CMP_LE:
-+    case LLIR_CMP_GT:
-+    case LLIR_CMP_GE:
++  if (insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM &&
++      (int32_t)insn->src2->def_insn->imm == insn->src2->def_insn->imm) {
++    int64_t imm = insn->src2->def_insn->imm;
++    x86_get_addr(insn->src1, &addr);
++    switch (insn->ty ? insn->ty->size : 8) {
++    case 1:
++      println("  movb $%lld, %s", (long long)imm, addr.buf);
++      return;
++    case 2:
++      println("  movw $%lld, %s", (long long)imm, addr.buf);
++      return;
++    case 4:
++      println("  movl $%lld, %s", (long long)imm, addr.buf);
 +      return;
 +    default:
-+      break;
++      println("  movq $%lld, %s", (long long)imm, addr.buf);
++      return;
 +    }
 +  }
 +
-   switch (insn->kind) {
-   case LLIR_NOP:
-   case LLIR_PHI:
-diff --git a/ir/opt.c b/ir/opt.c
-index b95d2d5..0acdf8c 100644
---- a/ir/opt.c
-+++ b/ir/opt.c
-@@ -669,6 +669,24 @@ bool ir_opt_const_fold(IRFunction *fn) {
-         insn->src2 = NULL;
-         changed = true;
+   load_vreg(insn->src2, "%rdx");
+   x86_get_addr(insn->src1, &addr);
+ 
+@@ -2660,14 +2769,46 @@ static void x86_64_emit_store(LLIRInsn *insn) {
+   }
+ }
+ 
++static const char *get_next_label(LLIRInsn *insn) {
++  if (!insn) return NULL;
++  for (LLIRInsn *nxt = insn->next; nxt; nxt = nxt->next) {
++    if (nxt->kind == LLIR_NOP)
++      continue;
++    if (nxt->kind == LLIR_LABEL && nxt->label)
++      return nxt->label;
++    break;
++  }
++  return NULL;
++}
++
++static void emit_branch(LLIRInsn *insn, const char *cc, const char *inv_cc) {
++  const char *next_lbl = get_next_label(insn);
++  if (insn->label_true && insn->label_false) {
++    if (next_lbl && !strcmp(insn->label_false, next_lbl)) {
++      println("  j%s %s", cc, insn->label_true);
++    } else if (next_lbl && !strcmp(insn->label_true, next_lbl)) {
++      println("  j%s %s", inv_cc, insn->label_false);
++    } else {
++      println("  j%s %s", cc, insn->label_true);
++      println("  jmp %s", insn->label_false);
++    }
++  } else if (insn->label_true) {
++    if (!next_lbl || strcmp(insn->label_true, next_lbl) != 0)
++      println("  j%s %s", cc, insn->label_true);
++  } else if (insn->label_false) {
++    if (!next_lbl || strcmp(insn->label_false, next_lbl) != 0)
++      println("  j%s %s", inv_cc, insn->label_false);
++  }
++}
++
+ static void load_call_arg(LLIRVReg *arg, const char *reg) {
+   if (!arg) return;
+   if (arg->is_struct_val && arg->struct_size <= 8) {
+     load_vreg(arg, "%rax");
+     if (arg->struct_size == 1)
+-      println("  movzbq (%%rax), %%rax");
++      println("  movzbl (%%rax), %%eax");
+     else if (arg->struct_size == 2)
+-      println("  movzwq (%%rax), %%rax");
++      println("  movzwl (%%rax), %%eax");
+     else if (arg->struct_size == 4)
+       println("  movl (%%rax), %%eax");
+     else
+@@ -2727,10 +2868,14 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
+     println("%s:", insn->label ? insn->label : "");
+     break;
+ 
+-  case LLIR_JMP:
++  case LLIR_JMP: {
+     invalidate_cached_regs();
++    const char *next_lbl = get_next_label(insn);
++    if (insn->label && next_lbl && !strcmp(insn->label, next_lbl))
++      break;
+     println("  jmp %s", insn->label ? insn->label : "");
+     break;
++  }
+ 
+   case LLIR_BR_COND: {
+     LLIRInsn *def = insn->src1 ? insn->src1->def_insn : NULL;
+@@ -2740,60 +2885,105 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
+         (def->kind == LLIR_CMP_EQ || def->kind == LLIR_CMP_NE ||
+          def->kind == LLIR_CMP_LT || def->kind == LLIR_CMP_LE ||
+          def->kind == LLIR_CMP_GT || def->kind == LLIR_CMP_GE)) {
+-      load_vreg(def->src1, "%rax");
+-      load_vreg(def->src2, "%rdx");
+-      println("  cmp %%rdx, %%rax");
+-
+-      bool uns = def->src1 && def->src1->ty && def->src1->ty->is_unsigned;
++      bool s1_imm = def->src1 && def->src1->def_insn && def->src1->def_insn->kind == LLIR_IMM;
++      bool s2_imm = def->src2 && def->src2->def_insn && def->src2->def_insn->kind == LLIR_IMM;
+       const char *cc = "e";
+       const char *inv_cc = "ne";
+ 
+-      switch (def->kind) {
+-      case LLIR_CMP_EQ: cc = "e";  inv_cc = "ne"; break;
+-      case LLIR_CMP_NE: cc = "ne"; inv_cc = "e";  break;
+-      case LLIR_CMP_LT: cc = uns ? "b" : "l";   inv_cc = uns ? "ae" : "ge"; break;
+-      case LLIR_CMP_LE: cc = uns ? "be" : "le"; inv_cc = uns ? "a" : "g";   break;
+-      case LLIR_CMP_GT: cc = uns ? "a" : "g";   inv_cc = uns ? "be" : "le"; break;
+-      case LLIR_CMP_GE: cc = uns ? "ae" : "ge"; inv_cc = uns ? "b" : "l";   break;
+-      default: break;
+-      }
++      if (s1_imm && s2_imm) {
++        int64_t v1 = def->src1->def_insn->imm;
++        int64_t v2 = def->src2->def_insn->imm;
++        if (v1 == 0)
++          println("  xor %%eax, %%eax");
++        else if (v1 > 0 && (uint64_t)v1 <= 0xFFFFFFFFULL)
++          println("  mov $%u, %%eax", (uint32_t)v1);
++        else if ((int64_t)(int32_t)v1 == v1)
++          println("  mov $%lld, %%rax", (long long)v1);
++        else
++          println("  movabs $%lld, %%rax", (long long)v1);
+ 
+-      if (insn->label_true && insn->label_false) {
+-        println("  j%s %s", cc, insn->label_true);
+-        println("  jmp %s", insn->label_false);
+-      } else if (insn->label_true) {
+-        println("  j%s %s", cc, insn->label_true);
+-      } else if (insn->label_false) {
+-        println("  j%s %s", inv_cc, insn->label_false);
++        if (v2 == 0)
++          println("  test %%rax, %%rax");
++        else
++          println("  cmp $%lld, %%rax", (long long)v2);
++
++        bool uns = def->src1 && def->src1->ty && def->src1->ty->is_unsigned;
++        switch (def->kind) {
++        case LLIR_CMP_EQ: cc = "e";  inv_cc = "ne"; break;
++        case LLIR_CMP_NE: cc = "ne"; inv_cc = "e";  break;
++        case LLIR_CMP_LT: cc = uns ? "b" : "l";   inv_cc = uns ? "ae" : "ge"; break;
++        case LLIR_CMP_LE: cc = uns ? "be" : "le"; inv_cc = uns ? "a" : "g";   break;
++        case LLIR_CMP_GT: cc = uns ? "a" : "g";   inv_cc = uns ? "be" : "le"; break;
++        case LLIR_CMP_GE: cc = uns ? "ae" : "ge"; inv_cc = uns ? "b" : "l";   break;
++        default: break;
++        }
++      } else if (s2_imm && (int32_t)def->src2->def_insn->imm == def->src2->def_insn->imm) {
++        int64_t imm = def->src2->def_insn->imm;
++        load_vreg(def->src1, "%rax");
++        if (imm == 0)
++          println("  test %%rax, %%rax");
++        else
++          println("  cmp $%lld, %%rax", (long long)imm);
++
++        bool uns = def->src1 && def->src1->ty && def->src1->ty->is_unsigned;
++        switch (def->kind) {
++        case LLIR_CMP_EQ: cc = "e";  inv_cc = "ne"; break;
++        case LLIR_CMP_NE: cc = "ne"; inv_cc = "e";  break;
++        case LLIR_CMP_LT: cc = uns ? "b" : "l";   inv_cc = uns ? "ae" : "ge"; break;
++        case LLIR_CMP_LE: cc = uns ? "be" : "le"; inv_cc = uns ? "a" : "g";   break;
++        case LLIR_CMP_GT: cc = uns ? "a" : "g";   inv_cc = uns ? "be" : "le"; break;
++        case LLIR_CMP_GE: cc = uns ? "ae" : "ge"; inv_cc = uns ? "b" : "l";   break;
++        default: break;
++        }
++      } else if (s1_imm && (int32_t)def->src1->def_insn->imm == def->src1->def_insn->imm) {
++        int64_t imm = def->src1->def_insn->imm;
++        load_vreg(def->src2, "%rax");
++        if (imm == 0)
++          println("  test %%rax, %%rax");
++        else
++          println("  cmp $%lld, %%rax", (long long)imm);
++
++        bool uns = def->src1 && def->src1->ty && def->src1->ty->is_unsigned;
++        switch (def->kind) {
++        case LLIR_CMP_EQ: cc = "e";  inv_cc = "ne"; break;
++        case LLIR_CMP_NE: cc = "ne"; inv_cc = "e";  break;
++        case LLIR_CMP_LT: cc = uns ? "a" : "g";   inv_cc = uns ? "be" : "le"; break;
++        case LLIR_CMP_LE: cc = uns ? "ae" : "ge"; inv_cc = uns ? "b" : "l";   break;
++        case LLIR_CMP_GT: cc = uns ? "b" : "l";   inv_cc = uns ? "ae" : "ge"; break;
++        case LLIR_CMP_GE: cc = uns ? "be" : "le"; inv_cc = uns ? "a" : "g";   break;
++        default: break;
++        }
++      } else {
++        load_vreg(def->src1, "%rax");
++        load_vreg(def->src2, "%rdx");
++        println("  cmp %%rdx, %%rax");
++
++        bool uns = def->src1 && def->src1->ty && def->src1->ty->is_unsigned;
++        switch (def->kind) {
++        case LLIR_CMP_EQ: cc = "e";  inv_cc = "ne"; break;
++        case LLIR_CMP_NE: cc = "ne"; inv_cc = "e";  break;
++        case LLIR_CMP_LT: cc = uns ? "b" : "l";   inv_cc = uns ? "ae" : "ge"; break;
++        case LLIR_CMP_LE: cc = uns ? "be" : "le"; inv_cc = uns ? "a" : "g";   break;
++        case LLIR_CMP_GT: cc = uns ? "a" : "g";   inv_cc = uns ? "be" : "le"; break;
++        case LLIR_CMP_GE: cc = uns ? "ae" : "ge"; inv_cc = uns ? "b" : "l";   break;
++        default: break;
++        }
        }
-+    } else if ((insn->kind == IR_EQ || insn->kind == IR_LE || insn->kind == IR_GE) &&
-+               insn->dst && insn->src1 && insn->src2 && insn->src1 == insn->src2 &&
-+               !insn->src1->is_float) {
-+      insn->kind = IR_IMM;
-+      insn->imm = 1;
-+      insn->src1 = insn->src2 = NULL;
-+      is_const[insn->dst->id] = true;
-+      const_vals[insn->dst->id] = 1;
-+      changed = true;
-+    } else if ((insn->kind == IR_NE || insn->kind == IR_LT || insn->kind == IR_GT) &&
-+               insn->dst && insn->src1 && insn->src2 && insn->src1 == insn->src2 &&
-+               !insn->src1->is_float) {
-+      insn->kind = IR_IMM;
-+      insn->imm = 0;
-+      insn->src1 = insn->src2 = NULL;
-+      is_const[insn->dst->id] = true;
-+      const_vals[insn->dst->id] = 0;
-+      changed = true;
++
++      emit_branch(insn, cc, inv_cc);
+       break;
      }
+ 
+     if (def && def->kind == LLIR_LOGNOT) {
+       load_vreg(def->src1, "%rax");
+       println("  test %%rax, %%rax");
+-      if (insn->label_true && insn->label_false) {
+-        println("  je %s", insn->label_true);
+-        println("  jmp %s", insn->label_false);
+-      } else if (insn->label_true) {
+-        println("  je %s", insn->label_true);
+-      } else if (insn->label_false) {
+-        println("  jne %s", insn->label_false);
+-      }
++      emit_branch(insn, "e", "ne");
+       break;
+     }
+ 
+     load_vreg(insn->src1, "%rax");
+     println("  test %%rax, %%rax");
+-
+-    if (insn->label_true && insn->label_false) {
+-      println("  jne %s", insn->label_true);
+-      println("  jmp %s", insn->label_false);
+-    } else if (insn->label_true) {
+-      println("  jne %s", insn->label_true);
+-    } else if (insn->label_false) {
+-      println("  je %s", insn->label_false);
+-    }
++    emit_branch(insn, "ne", "e");
+     break;
    }
  
-diff --git a/ir/regalloc.c b/ir/regalloc.c
-index f0c50f0..fa21133 100644
---- a/ir/regalloc.c
-+++ b/ir/regalloc.c
-@@ -117,33 +117,15 @@ void regalloc_function(IRFunction *fn, const RegAllocPool *pool) {
-       v->phys_reg = allocated_reg;
-       v->is_spilled = false;
-     } else {
--      // Spill to stack slot (reuse expired slots if available)
-+      // Spill to distinct stack slot
-       int sz = v->ty ? v->ty->size : 8;
-       int align = v->ty ? v->ty->align : 8;
-       if (sz < 8) sz = 8;
-       if (align < 8) align = 8;
+@@ -2802,8 +2992,8 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
+       break;
+     if (insn->imm == 0)
+       println("  xor %%eax, %%eax");
+-    else if (insn->imm > 0 && insn->imm <= 0x7FFFFFFFLL)
+-      println("  mov $%lld, %%eax", (long long)insn->imm);
++    else if (insn->imm > 0 && (uint64_t)insn->imm <= 0xFFFFFFFFULL)
++      println("  mov $%u, %%eax", (uint32_t)insn->imm);
+     else if ((int64_t)(int32_t)insn->imm == insn->imm)
+       println("  mov $%lld, %%rax", (long long)insn->imm);
+     else
+@@ -2931,7 +3121,7 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
+       if (to->is_unsigned)
+         println("  movl %%eax, %%eax");
+       else
+-        println("  movslq %%eax, %%rax");
++        println("  cdqe");
+       break;
  
--      int found_slot = -1;
--      for (int s = 0; s < num_slots; s++) {
--        if (slots[s].last_use_pos < v->def_pos && slots[s].size >= sz) {
--          found_slot = s;
--          break;
--        }
--      }
--
--      if (found_slot >= 0) {
--        v->spill_offset = slots[found_slot].offset;
--        slots[found_slot].last_use_pos = v->last_use_pos;
--      } else {
--        spill_offset += sz;
--        spill_offset = align_to(spill_offset, align);
--        v->spill_offset = -spill_offset;
--        slots[num_slots].offset = -spill_offset;
--        slots[num_slots].size = sz;
--        slots[num_slots].last_use_pos = v->last_use_pos;
--        num_slots++;
--      }
--
-+      spill_offset += sz;
-+      spill_offset = align_to(spill_offset, align);
-+      v->spill_offset = -spill_offset;
-       v->phys_reg = -1;
-       v->is_spilled = true;
+     default:
+@@ -2950,17 +3140,137 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
+     x86_64_emit_store(insn);
+     break;
+ 
+-  case LLIR_ADD:
++  case LLIR_ADD: {
++    if (!insn->ty || !is_flonum(insn->ty)) {
++      bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
++      bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
++      if (s1_imm && s2_imm) {
++        int64_t val = insn->src1->def_insn->imm + insn->src2->def_insn->imm;
++        if (val == 0)
++          println("  xor %%eax, %%eax");
++        else if (val > 0 && (uint64_t)val <= 0xFFFFFFFFULL)
++          println("  mov $%u, %%eax", (uint32_t)val);
++        else if ((int64_t)(int32_t)val == val)
++          println("  mov $%lld, %%rax", (long long)val);
++        else
++          println("  movabs $%lld, %%rax", (long long)val);
++        store_vreg("%rax", insn->dst);
++        break;
++      }
++      LLIRVReg *imm_v = NULL;
++      LLIRVReg *base = NULL;
++      if (s2_imm) {
++        imm_v = insn->src2; base = insn->src1;
++      } else if (s1_imm) {
++        imm_v = insn->src1; base = insn->src2;
++      }
++      if (imm_v && base && (int32_t)imm_v->def_insn->imm == imm_v->def_insn->imm) {
++        int64_t imm = imm_v->def_insn->imm;
++        load_vreg(base, "%rax");
++        if (imm == 1) println("  inc %%rax");
++        else if (imm == -1) println("  dec %%rax");
++        else if (imm != 0) println("  add $%lld, %%rax", (long long)imm);
++        store_vreg("%rax", insn->dst);
++        break;
++      }
++    }
+     x86_64_emit_binop(insn, "add", "addss", "addsd");
+     break;
++  }
+ 
+-  case LLIR_SUB:
++  case LLIR_SUB: {
++    if (!insn->ty || !is_flonum(insn->ty)) {
++      bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
++      bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
++      if (s1_imm && s2_imm) {
++        int64_t val = insn->src1->def_insn->imm - insn->src2->def_insn->imm;
++        if (val == 0)
++          println("  xor %%eax, %%eax");
++        else if (val > 0 && (uint64_t)val <= 0xFFFFFFFFULL)
++          println("  mov $%u, %%eax", (uint32_t)val);
++        else if ((int64_t)(int32_t)val == val)
++          println("  mov $%lld, %%rax", (long long)val);
++        else
++          println("  movabs $%lld, %%rax", (long long)val);
++        store_vreg("%rax", insn->dst);
++        break;
++      }
++      if (s2_imm && (int32_t)insn->src2->def_insn->imm == insn->src2->def_insn->imm) {
++        int64_t imm = insn->src2->def_insn->imm;
++        load_vreg(insn->src1, "%rax");
++        if (imm == 1) println("  dec %%rax");
++        else if (imm == -1) println("  inc %%rax");
++        else if (imm != 0) println("  sub $%lld, %%rax", (long long)imm);
++        store_vreg("%rax", insn->dst);
++        break;
++      }
++    }
+     x86_64_emit_binop(insn, "sub", "subss", "subsd");
+     break;
++  }
+ 
+-  case LLIR_MUL:
++  case LLIR_MUL: {
++    if (!insn->ty || !is_flonum(insn->ty)) {
++      bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
++      bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
++      if (s1_imm && s2_imm) {
++        int64_t val = insn->src1->def_insn->imm * insn->src2->def_insn->imm;
++        if (val == 0)
++          println("  xor %%eax, %%eax");
++        else if (val > 0 && (uint64_t)val <= 0xFFFFFFFFULL)
++          println("  mov $%u, %%eax", (uint32_t)val);
++        else if ((int64_t)(int32_t)val == val)
++          println("  mov $%lld, %%rax", (long long)val);
++        else
++          println("  movabs $%lld, %%rax", (long long)val);
++        store_vreg("%rax", insn->dst);
++        break;
++      }
++      LLIRVReg *imm_v = NULL;
++      LLIRVReg *base = NULL;
++      if (s2_imm) {
++        imm_v = insn->src2; base = insn->src1;
++      } else if (s1_imm) {
++        imm_v = insn->src1; base = insn->src2;
++      }
++      if (imm_v && base && (int32_t)imm_v->def_insn->imm == imm_v->def_insn->imm) {
++        int64_t imm = imm_v->def_insn->imm;
++        if (imm == 0) {
++          println("  xor %%eax, %%eax");
++          store_vreg("%rax", insn->dst);
++          break;
++        }
++        if (imm == 1) {
++          load_vreg(base, "%rax");
++          store_vreg("%rax", insn->dst);
++          break;
++        }
++        if (imm == 2) {
++          load_vreg(base, "%rax");
++          println("  add %%rax, %%rax");
++          store_vreg("%rax", insn->dst);
++          break;
++        }
++        if (imm > 0 && (imm & (imm - 1)) == 0) {
++          int shift = 0;
++          while ((1LL << shift) < imm) shift++;
++          load_vreg(base, "%rax");
++          if (shift == 1)
++            println("  shl $1, %%rax");
++          else
++            println("  shl $%d, %%rax", shift);
++          store_vreg("%rax", insn->dst);
++          break;
++        }
++        load_vreg(base, "%rax");
++        println("  imul $%lld, %%rax, %%rax", (long long)imm);
++        store_vreg("%rax", insn->dst);
++        break;
++      }
++    }
+     x86_64_emit_binop(insn, "imul", "mulss", "mulsd");
+     break;
++  }
+ 
+   case LLIR_DIV:
+     if (insn->ty && is_flonum(insn->ty)) {
+@@ -2969,12 +3279,22 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
+       load_vreg(insn->src1, "%rax");
+       load_vreg(insn->src2, "%rcx");
+ 
+-      if (insn->ty && insn->ty->is_unsigned) {
+-        println("  xor %%edx, %%edx");
+-        println("  div %%rcx");
++      if (insn->ty && insn->ty->size <= 4) {
++        if (insn->ty->is_unsigned) {
++          println("  xor %%edx, %%edx");
++          println("  div %%ecx");
++        } else {
++          println("  cdq");
++          println("  idiv %%ecx");
++        }
+       } else {
+-        println("  cqo");
+-        println("  idiv %%rcx");
++        if (insn->ty && insn->ty->is_unsigned) {
++          println("  xor %%edx, %%edx");
++          println("  div %%rcx");
++        } else {
++          println("  cqo");
++          println("  idiv %%rcx");
++        }
+       }
+ 
+       store_vreg("%rax", insn->dst);
+@@ -2985,37 +3305,225 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
+     load_vreg(insn->src1, "%rax");
+     load_vreg(insn->src2, "%rcx");
+ 
+-    if (insn->ty && insn->ty->is_unsigned) {
+-      println("  xor %%edx, %%edx");
+-      println("  div %%rcx");
++    if (insn->ty && insn->ty->size <= 4) {
++      if (insn->ty->is_unsigned) {
++        println("  xor %%edx, %%edx");
++        println("  div %%ecx");
++      } else {
++        println("  cdq");
++        println("  idiv %%ecx");
++      }
+     } else {
+-      println("  cqo");
+-      println("  idiv %%rcx");
++      if (insn->ty && insn->ty->is_unsigned) {
++        println("  xor %%edx, %%edx");
++        println("  div %%rcx");
++      } else {
++        println("  cqo");
++        println("  idiv %%rcx");
++      }
      }
+ 
+     store_vreg("%rdx", insn->dst);
+     break;
+ 
+-  case LLIR_AND:
++  case LLIR_AND: {
++    bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
++    bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
++    if (s1_imm && s2_imm) {
++      int64_t val = insn->src1->def_insn->imm & insn->src2->def_insn->imm;
++      if (val == 0)
++        println("  xor %%eax, %%eax");
++      else if (val > 0 && (uint64_t)val <= 0xFFFFFFFFULL)
++        println("  mov $%u, %%eax", (uint32_t)val);
++      else if ((int64_t)(int32_t)val == val)
++        println("  mov $%lld, %%rax", (long long)val);
++      else
++        println("  movabs $%lld, %%rax", (long long)val);
++      store_vreg("%rax", insn->dst);
++      break;
++    }
++    LLIRVReg *imm_v = NULL;
++    LLIRVReg *base = NULL;
++    if (s2_imm) {
++      imm_v = insn->src2; base = insn->src1;
++    } else if (s1_imm) {
++      imm_v = insn->src1; base = insn->src2;
++    }
++    if (imm_v && base && (int32_t)imm_v->def_insn->imm == imm_v->def_insn->imm) {
++      int64_t imm = imm_v->def_insn->imm;
++      if (imm == 0) {
++        println("  xor %%eax, %%eax");
++        store_vreg("%rax", insn->dst);
++        break;
++      }
++      if (imm == -1) {
++        load_vreg(base, "%rax");
++        store_vreg("%rax", insn->dst);
++        break;
++      }
++      load_vreg(base, "%rax");
++      println("  and $%lld, %%rax", (long long)imm);
++      store_vreg("%rax", insn->dst);
++      break;
++    }
+     x86_64_emit_int_result(insn, "and");
+     break;
++  }
+ 
+-  case LLIR_OR:
++  case LLIR_OR: {
++    bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
++    bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
++    if (s1_imm && s2_imm) {
++      int64_t val = insn->src1->def_insn->imm | insn->src2->def_insn->imm;
++      if (val == 0)
++        println("  xor %%eax, %%eax");
++      else if (val > 0 && (uint64_t)val <= 0xFFFFFFFFULL)
++        println("  mov $%u, %%eax", (uint32_t)val);
++      else if ((int64_t)(int32_t)val == val)
++        println("  mov $%lld, %%rax", (long long)val);
++      else
++        println("  movabs $%lld, %%rax", (long long)val);
++      store_vreg("%rax", insn->dst);
++      break;
++    }
++    LLIRVReg *imm_v = NULL;
++    LLIRVReg *base = NULL;
++    if (s2_imm) {
++      imm_v = insn->src2; base = insn->src1;
++    } else if (s1_imm) {
++      imm_v = insn->src1; base = insn->src2;
++    }
++    if (imm_v && base && (int32_t)imm_v->def_insn->imm == imm_v->def_insn->imm) {
++      int64_t imm = imm_v->def_insn->imm;
++      if (imm == 0) {
++        load_vreg(base, "%rax");
++        store_vreg("%rax", insn->dst);
++        break;
++      }
++      load_vreg(base, "%rax");
++      println("  or $%lld, %%rax", (long long)imm);
++      store_vreg("%rax", insn->dst);
++      break;
++    }
+     x86_64_emit_int_result(insn, "or");
+     break;
++  }
+ 
+-  case LLIR_XOR:
++  case LLIR_XOR: {
++    bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
++    bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
++    if (s1_imm && s2_imm) {
++      int64_t val = insn->src1->def_insn->imm ^ insn->src2->def_insn->imm;
++      if (val == 0)
++        println("  xor %%eax, %%eax");
++      else if (val > 0 && (uint64_t)val <= 0xFFFFFFFFULL)
++        println("  mov $%u, %%eax", (uint32_t)val);
++      else if ((int64_t)(int32_t)val == val)
++        println("  mov $%lld, %%rax", (long long)val);
++      else
++        println("  movabs $%lld, %%rax", (long long)val);
++      store_vreg("%rax", insn->dst);
++      break;
++    }
++    LLIRVReg *imm_v = NULL;
++    LLIRVReg *base = NULL;
++    if (s2_imm) {
++      imm_v = insn->src2; base = insn->src1;
++    } else if (s1_imm) {
++      imm_v = insn->src1; base = insn->src2;
++    }
++    if (imm_v && base && (int32_t)imm_v->def_insn->imm == imm_v->def_insn->imm) {
++      int64_t imm = imm_v->def_insn->imm;
++      if (imm == 0) {
++        load_vreg(base, "%rax");
++        store_vreg("%rax", insn->dst);
++        break;
++      }
++      if (imm == -1) {
++        load_vreg(base, "%rax");
++        println("  not %%rax");
++        store_vreg("%rax", insn->dst);
++        break;
++      }
++      load_vreg(base, "%rax");
++      println("  xor $%lld, %%rax", (long long)imm);
++      store_vreg("%rax", insn->dst);
++      break;
++    }
+     x86_64_emit_int_result(insn, "xor");
+     break;
++  }
+ 
+-  case LLIR_SHL:
++  case LLIR_SHL: {
++    bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
++    bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
++    if (s1_imm && s2_imm) {
++      int64_t val = insn->src1->def_insn->imm << (insn->src2->def_insn->imm & 63);
++      if (val == 0)
++        println("  xor %%eax, %%eax");
++      else if (val > 0 && (uint64_t)val <= 0xFFFFFFFFULL)
++        println("  mov $%u, %%eax", (uint32_t)val);
++      else if ((int64_t)(int32_t)val == val)
++        println("  mov $%lld, %%rax", (long long)val);
++      else
++        println("  movabs $%lld, %%rax", (long long)val);
++      store_vreg("%rax", insn->dst);
++      break;
++    }
++    if (s2_imm) {
++      int64_t imm = insn->src2->def_insn->imm & 63;
++      load_vreg(insn->src1, "%rax");
++      if (imm == 1)
++        println("  shl $1, %%rax");
++      else if (imm > 1)
++        println("  shl $%lld, %%rax", (long long)imm);
++      store_vreg("%rax", insn->dst);
++      break;
++    }
+     load_vreg(insn->src1, "%rax");
+     load_vreg(insn->src2, "%rcx");
+     println("  shl %%cl, %%rax");
+     store_vreg("%rax", insn->dst);
+     break;
++  }
+ 
+-  case LLIR_SHR:
++  case LLIR_SHR: {
++    bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
++    bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
++    if (s1_imm && s2_imm) {
++      int64_t val;
++      if (insn->ty && insn->ty->is_unsigned)
++        val = (uint64_t)insn->src1->def_insn->imm >> (insn->src2->def_insn->imm & 63);
++      else
++        val = insn->src1->def_insn->imm >> (insn->src2->def_insn->imm & 63);
++      if (val == 0)
++        println("  xor %%eax, %%eax");
++      else if (val > 0 && (uint64_t)val <= 0xFFFFFFFFULL)
++        println("  mov $%u, %%eax", (uint32_t)val);
++      else if ((int64_t)(int32_t)val == val)
++        println("  mov $%lld, %%rax", (long long)val);
++      else
++        println("  movabs $%lld, %%rax", (long long)val);
++      store_vreg("%rax", insn->dst);
++      break;
++    }
++    if (s2_imm) {
++      int64_t imm = insn->src2->def_insn->imm & 63;
++      load_vreg(insn->src1, "%rax");
++      if (insn->ty && insn->ty->is_unsigned) {
++        if (imm == 1)
++          println("  shr $1, %%rax");
++        else if (imm > 1)
++          println("  shr $%lld, %%rax", (long long)imm);
++      } else {
++        if (imm == 1)
++          println("  sar $1, %%rax");
++        else if (imm > 1)
++          println("  sar $%lld, %%rax", (long long)imm);
++      }
++      store_vreg("%rax", insn->dst);
++      break;
++    }
+     load_vreg(insn->src1, "%rax");
+     load_vreg(insn->src2, "%rcx");
+ 
+@@ -3026,6 +3534,7 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
+ 
+     store_vreg("%rax", insn->dst);
+     break;
++  }
+ 
+   case LLIR_NEG:
+     x86_64_emit_unary(insn, "neg");
+@@ -3066,7 +3575,7 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
+     x86_64_emit_cmp(insn, "ge", "ae", "ae");
+     break;
+ 
+-  case LLIR_RET:
++  case LLIR_RET: {
+     invalidate_cached_regs();
+     if (insn->src1) {
+       load_vreg(insn->src1, "%rax");
+@@ -3084,8 +3593,13 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
+       }
+     }
+ 
+-    println("  jmp .L.return.%s", current_fn->name);
++    LLIRInsn *nxt = insn->next;
++    while (nxt && (nxt->kind == LLIR_NOP || nxt->kind == LLIR_LABEL))
++      nxt = nxt->next;
++    if (nxt)
++      println("  jmp .L.return.%s", current_fn->name);
+     break;
++  }
+ 
+   case LLIR_CALL: {
+     invalidate_cached_regs();
+@@ -3210,7 +3724,10 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
+     } else {
+       load_vreg(insn->src1, "%rdi");
+       load_vreg(insn->src2, "%rsi");
+-      println("  mov $%lld, %%rcx", (long long)insn->imm);
++      if ((uint64_t)insn->imm <= 0xFFFFFFFFULL)
++        println("  mov $%u, %%ecx", (uint32_t)insn->imm);
++      else
++        println("  mov $%lld, %%rcx", (long long)insn->imm);
+       println("  rep movsb");
+     }
+     break;
+@@ -3234,7 +3751,10 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
+     } else {
+       println("  mov %%rax, %%rdi");
+       println("  xor %%eax, %%eax");
+-      println("  mov $%lld, %%rcx", (long long)insn->imm);
++      if ((uint64_t)insn->imm <= 0xFFFFFFFFULL)
++        println("  mov $%u, %%ecx", (uint32_t)insn->imm);
++      else
++        println("  mov $%lld, %%rcx", (long long)insn->imm);
+       println("  rep stosb");
+     }
+     break;
+@@ -3252,80 +3772,47 @@ static void x86_64_gen_expr(LLIRInsn *insn, FILE *out) {
+ static void emit_text(LLIRProg *prog, FILE *out) {
+   (void)out;
+ 
+-  if (prog->fns && prog->num_fns > 0) {
+-    for (int i = 0; i < prog->num_fns; i++) {
+-      LLIRFunction *fn = prog->fns[i];
+-      Obj *fn_obj = fn->fn_obj;
+-      if (!fn_obj || !fn_obj->is_function || !fn_obj->is_definition || !fn_obj->is_live)
+-        continue;
+-
+-      if (current_objfmt && current_objfmt->emit_fn_decl)
+-        current_objfmt->emit_fn_decl(fn_obj, output_file);
+-      else if (!fn_obj->is_static)
+-        println("  .globl %s", fn->name);
+-
+-      println("  .text");
+-
+-      if (current_objfmt && current_objfmt->emit_fn_type)
+-        current_objfmt->emit_fn_type(fn_obj, output_file);
+-
+-      println("%s:", fn->name);
+-
+-      current_fn = fn_obj;
+-
+-      ABI *fn_abi = fn->abi ? fn->abi : get_fn_abi(fn_obj);
+-
+-      if (fn_abi && fn_abi->emit_prologue)
+-        fn_abi->emit_prologue(fn_obj, output_file);
+-
+-      compute_materialization(fn);
+-      invalidate_cached_regs();
+-
+-      // Assemble LLIR instructions directly from LLIRFunction
+-      for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
+-        x86_64_gen_insn(insn, output_file);
+-      }
+-
+-      if (strcmp(fn->name, "main") == 0)
+-        println("  xor %%eax, %%eax");
+-
+-      if (fn_abi && fn_abi->emit_epilogue)
+-        fn_abi->emit_epilogue(fn_obj, output_file);
+-    }
++  if (!prog || !prog->fns)
+     return;
+-  }
+ 
+-  for (Obj *fn = prog->globals; fn; fn = fn->next) {
+-    if (!fn->is_function || !fn->is_definition || !fn->is_live)
++  for (int i = 0; i < prog->num_fns; i++) {
++    LLIRFunction *fn = prog->fns[i];
++    Obj *fn_obj = fn->fn_obj;
++    if (!fn_obj || !fn_obj->is_function || !fn_obj->is_definition || !fn_obj->is_live)
+       continue;
+ 
+     if (current_objfmt && current_objfmt->emit_fn_decl)
+-      current_objfmt->emit_fn_decl(fn, output_file);
+-    else if (!fn->is_static)
++      current_objfmt->emit_fn_decl(fn_obj, output_file);
++    else if (!fn_obj->is_static)
+       println("  .globl %s", fn->name);
+ 
+     println("  .text");
+ 
+     if (current_objfmt && current_objfmt->emit_fn_type)
+-      current_objfmt->emit_fn_type(fn, output_file);
++      current_objfmt->emit_fn_type(fn_obj, output_file);
+ 
+     println("%s:", fn->name);
+ 
+-    current_fn = fn;
++    current_fn = fn_obj;
+ 
+-    ABI *fn_abi = get_fn_abi(fn);
++    ABI *fn_abi = fn->abi ? fn->abi : get_fn_abi(fn_obj);
+ 
+     if (fn_abi && fn_abi->emit_prologue)
+-      fn_abi->emit_prologue(fn, output_file);
++      fn_abi->emit_prologue(fn_obj, output_file);
+ 
+-    gen_stmt(fn->body, output_file);
+-    assert(depth == 0);
++    compute_materialization(fn);
++    invalidate_cached_regs();
++
++    // Assemble LLIR instructions directly from LLIRFunction
++    for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
++      x86_64_gen_insn(insn, output_file);
++    }
+ 
+     if (strcmp(fn->name, "main") == 0)
+       println("  xor %%eax, %%eax");
+ 
+     if (fn_abi && fn_abi->emit_epilogue)
+-      fn_abi->emit_epilogue(fn, output_file);
++      fn_abi->emit_epilogue(fn_obj, output_file);
+   }
+ }
