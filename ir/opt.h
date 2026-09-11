@@ -85,6 +85,8 @@ struct IRPass {
   const char *name;
   const char *description;
   IRPassType type;
+  bool enabled;
+  int default_opt_level;
   bool (*run_on_function)(IRFunction *fn, IRPassContext *ctx);
   bool (*run_on_prog)(IRProg *prog, IRPassContext *ctx);
 };
@@ -106,11 +108,16 @@ bool ir_pass_manager_add_by_name(IRPassManager *pm, const char *name);
 bool ir_pass_manager_run_function(IRPassManager *pm, IRFunction *fn, IRPassContext *ctx);
 bool ir_pass_manager_run_prog(IRPassManager *pm, IRProg *prog, IRPassContext *ctx);
 
-// Pass Registry API
+// Pass Registry & Fine-Tuning API
 void ir_register_pass(IRPass *pass);
 IRPass *ir_find_pass(const char *name);
 IRPass **ir_get_all_passes(int *count);
 void ir_init_pass_registry(void);
+void ir_opt_init(void);
+void ir_opt_set_level(int opt_level);
+bool ir_opt_set_pass_enabled(const char *name, bool enabled);
+bool ir_opt_is_pass_enabled(const char *name);
+void ir_opt_print_passes(FILE *out);
 
 // Pipeline Creation & Invocation
 IRPassManager *ir_create_opt_pipeline(int opt_level);
@@ -145,6 +152,13 @@ bool ir_opt_cfg_simplify(IRFunction *fn);
 bool ir_opt_peephole(IRFunction *fn);
 bool ir_opt_local_cse(IRFunction *fn);
 
+// High-Level IR (HLIR) Optimization Passes & Helpers
+void hlir_remove_insn(HLIRFunction *fn, HLIRInsn *insn);
+bool hlir_opt_const_fold(HLIRFunction *fn);
+bool hlir_opt_algebraic(HLIRFunction *fn);
+bool hlir_opt_control_flow(HLIRFunction *fn);
+bool hlir_opt_dead_code(HLIRFunction *fn);
+
 // Built-in Pass Singletons
 extern IRPass pass_const_fold;
 extern IRPass pass_copy_prop;
@@ -153,5 +167,9 @@ extern IRPass pass_cfg_simplify;
 extern IRPass pass_peephole;
 extern IRPass pass_local_cse;
 extern IRPass pass_verifier;
+extern IRPass pass_hlir_const_fold;
+extern IRPass pass_hlir_algebraic;
+extern IRPass pass_hlir_control_flow;
+extern IRPass pass_hlir_dead_code;
 
 #endif // CHIBICC_OPT_H

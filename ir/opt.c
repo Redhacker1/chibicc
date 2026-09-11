@@ -921,6 +921,55 @@ bool ir_opt_peephole(IRFunction *fn) {
       }
     }
 
+    // 4b. Strength reduction: unsigned division by power of 2 -> shift right
+    if (insn->kind == IR_DIV && insn->dst && insn->src1 && insn->src2 && !insn->dst->is_float &&
+        insn->dst->ty && insn->dst->ty->is_unsigned) {
+      for (IRInsn *def = fn->head; def != insn; def = def->next) {
+        if (def->kind == IR_IMM && def->dst == insn->src2) {
+          int64_t val = def->imm;
+          if (val > 0 && (val & (val - 1)) == 0) {
+            int shift = 0;
+            while ((1LL << shift) < val)
+              shift++;
+            if ((1LL << shift) == val) {
+              IRVReg *shift_vreg = ir_new_vreg(fn, def->dst->ty);
+              IRInsn *imm_insn = ir_new_insn(IR_IMM);
+              imm_insn->dst = shift_vreg;
+              imm_insn->imm = shift;
+              ir_insert_before(fn, insn, imm_insn);
+
+              insn->kind = IR_SHR;
+              insn->src2 = shift_vreg;
+              changed = true;
+            }
+          }
+          break;
+        }
+      }
+    }
+
+    // 4c. Strength reduction: unsigned modulo by power of 2 -> bitwise and (val - 1)
+    if (insn->kind == IR_MOD && insn->dst && insn->src1 && insn->src2 && !insn->dst->is_float &&
+        insn->dst->ty && insn->dst->ty->is_unsigned) {
+      for (IRInsn *def = fn->head; def != insn; def = def->next) {
+        if (def->kind == IR_IMM && def->dst == insn->src2) {
+          int64_t val = def->imm;
+          if (val > 0 && (val & (val - 1)) == 0) {
+            IRVReg *mask_vreg = ir_new_vreg(fn, def->dst->ty);
+            IRInsn *imm_insn = ir_new_insn(IR_IMM);
+            imm_insn->dst = mask_vreg;
+            imm_insn->imm = val - 1;
+            ir_insert_before(fn, insn, imm_insn);
+
+            insn->kind = IR_BITAND;
+            insn->src2 = mask_vreg;
+            changed = true;
+          }
+          break;
+        }
+      }
+    }
+
     // 5. Redundant load-after-store elimination:
     // STORE addr, val  followed closely by  dst = LOAD addr
     if (insn->kind == IR_STORE && insn->src1 && insn->src2) {
@@ -1027,6 +1076,393 @@ bool ir_opt_local_cse(IRFunction *fn) {
 }
 
 // ============================================================================
+// High-Level IR (HLIR) Optimization Passes & Helpers
+// ============================================================================
+
+void hlir_remove_insn(HLIRFunction *fn, HLIRInsn *insn) {
+  if (!insn || !fn)
+    return;
+  if (insn->prev)
+    insn->prev->next = insn->next;
+  else
+    fn->head = insn->next;
+  if (insn->next)
+    insn->next->prev = insn->prev;
+  else
+    fn->tail = insn->prev;
+  insn->prev = insn->next = NULL;
+  fn->num_insns--;
+}
+
+bool hlir_opt_const_fold(HLIRFunction *fn) {
+  if (!fn || fn->num_vals == 0)
+    return false;
+
+  bool changed = false;
+  int64_t *const_vals = calloc(fn->num_vals, sizeof(int64_t));
+  bool *is_const = calloc(fn->num_vals, sizeof(bool));
+
+  for (HLIRInsn *insn = fn->head; insn; insn = insn->next) {
+    if (insn->kind == HLIR_LABEL || insn->kind == HLIR_JMP ||
+        insn->kind == HLIR_JMP_IF_ZERO || insn->kind == HLIR_JMP_IF_NZ ||
+        insn->kind == HLIR_CALL) {
+      memset(is_const, 0, fn->num_vals * sizeof(bool));
+      continue;
+    }
+
+    if (insn->kind == HLIR_ICONST && insn->dst) {
+      is_const[insn->dst->id] = true;
+      const_vals[insn->dst->id] = insn->imm;
+      continue;
+    }
+
+    if (insn->src1 && is_const[insn->src1->id] && insn->src2 && is_const[insn->src2->id]) {
+      int64_t c1 = const_vals[insn->src1->id];
+      int64_t c2 = const_vals[insn->src2->id];
+      int64_t res = 0;
+      bool folded = true;
+
+      switch (insn->kind) {
+      case HLIR_ADD: res = c1 + c2; break;
+      case HLIR_SUB: res = c1 - c2; break;
+      case HLIR_MUL: res = c1 * c2; break;
+      case HLIR_DIV: if (c2 != 0) res = c1 / c2; else folded = false; break;
+      case HLIR_MOD: if (c2 != 0) res = c1 % c2; else folded = false; break;
+      case HLIR_BITAND: res = c1 & c2; break;
+      case HLIR_BITOR:  res = c1 | c2; break;
+      case HLIR_BITXOR: res = c1 ^ c2; break;
+      case HLIR_SHL: if (c2 >= 0 && c2 < 64) res = c1 << c2; else folded = false; break;
+      case HLIR_SHR: if (c2 >= 0 && c2 < 64) res = c1 >> c2; else folded = false; break;
+      case HLIR_CMP_EQ: res = (c1 == c2); break;
+      case HLIR_CMP_NE: res = (c1 != c2); break;
+      case HLIR_CMP_LT: res = (c1 < c2); break;
+      case HLIR_CMP_LE: res = (c1 <= c2); break;
+      case HLIR_CMP_GT: res = (c1 > c2); break;
+      case HLIR_CMP_GE: res = (c1 >= c2); break;
+      default: folded = false; break;
+      }
+
+      if (folded && insn->dst) {
+        insn->kind = HLIR_ICONST;
+        insn->imm = res;
+        insn->src1 = NULL;
+        insn->src2 = NULL;
+        is_const[insn->dst->id] = true;
+        const_vals[insn->dst->id] = res;
+        changed = true;
+        continue;
+      }
+    }
+
+    if (insn->src1 && is_const[insn->src1->id] && !insn->src2 && insn->dst) {
+      int64_t c = const_vals[insn->src1->id];
+      int64_t res = 0;
+      bool folded = true;
+
+      switch (insn->kind) {
+      case HLIR_NEG: res = -c; break;
+      case HLIR_BITNOT: res = ~c; break;
+      case HLIR_LOGNOT: res = !c; break;
+      case HLIR_CAST: {
+        if (insn->ty && is_flonum(insn->ty)) {
+          folded = false;
+        } else {
+          int sz = insn->ty ? insn->ty->size : 8;
+          bool is_unsigned = insn->ty ? insn->ty->is_unsigned : false;
+          res = c;
+          if (sz == 1) res = is_unsigned ? (uint8_t)c : (int8_t)c;
+          else if (sz == 2) res = is_unsigned ? (uint16_t)c : (int16_t)c;
+          else if (sz == 4) res = is_unsigned ? (uint32_t)c : (int32_t)c;
+        }
+        break;
+      }
+      default: folded = false; break;
+      }
+
+      if (folded) {
+        insn->kind = HLIR_ICONST;
+        insn->imm = res;
+        insn->src1 = NULL;
+        is_const[insn->dst->id] = true;
+        const_vals[insn->dst->id] = res;
+        changed = true;
+        continue;
+      }
+    }
+  }
+
+  free(const_vals);
+  free(is_const);
+  return changed;
+}
+
+bool hlir_opt_algebraic(HLIRFunction *fn) {
+  if (!fn || fn->num_vals == 0)
+    return false;
+
+  bool changed = false;
+  int64_t *const_vals = calloc(fn->num_vals, sizeof(int64_t));
+  bool *is_const = calloc(fn->num_vals, sizeof(bool));
+
+  for (HLIRInsn *insn = fn->head; insn; insn = insn->next) {
+    if (insn->kind == HLIR_LABEL || insn->kind == HLIR_JMP ||
+        insn->kind == HLIR_JMP_IF_ZERO || insn->kind == HLIR_JMP_IF_NZ ||
+        insn->kind == HLIR_CALL) {
+      memset(is_const, 0, fn->num_vals * sizeof(bool));
+      continue;
+    }
+
+    if (insn->kind == HLIR_ICONST && insn->dst) {
+      is_const[insn->dst->id] = true;
+      const_vals[insn->dst->id] = insn->imm;
+      continue;
+    }
+
+    // x + 0 = x, 0 + x = x
+    if (insn->kind == HLIR_ADD && insn->dst && insn->src1 && insn->src2) {
+      if (is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) {
+        insn->kind = HLIR_CAST;
+        insn->src2 = NULL;
+        changed = true;
+      } else if (is_const[insn->src1->id] && const_vals[insn->src1->id] == 0) {
+        insn->kind = HLIR_CAST;
+        insn->src1 = insn->src2;
+        insn->src2 = NULL;
+        changed = true;
+      }
+    }
+    // x - 0 = x, x - x = 0
+    else if (insn->kind == HLIR_SUB && insn->dst && insn->src1 && insn->src2) {
+      if (is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) {
+        insn->kind = HLIR_CAST;
+        insn->src2 = NULL;
+        changed = true;
+      } else if (insn->src1 == insn->src2) {
+        insn->kind = HLIR_ICONST;
+        insn->imm = 0;
+        insn->src1 = insn->src2 = NULL;
+        is_const[insn->dst->id] = true;
+        const_vals[insn->dst->id] = 0;
+        changed = true;
+      }
+    }
+    // x * 1 = x, 1 * x = x, x * 0 = 0, 0 * x = 0
+    else if (insn->kind == HLIR_MUL && insn->dst && insn->src1 && insn->src2) {
+      if (is_const[insn->src2->id] && const_vals[insn->src2->id] == 1) {
+        insn->kind = HLIR_CAST;
+        insn->src2 = NULL;
+        changed = true;
+      } else if (is_const[insn->src1->id] && const_vals[insn->src1->id] == 1) {
+        insn->kind = HLIR_CAST;
+        insn->src1 = insn->src2;
+        insn->src2 = NULL;
+        changed = true;
+      } else if ((is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) ||
+                 (is_const[insn->src1->id] && const_vals[insn->src1->id] == 0)) {
+        insn->kind = HLIR_ICONST;
+        insn->imm = 0;
+        insn->src1 = insn->src2 = NULL;
+        is_const[insn->dst->id] = true;
+        const_vals[insn->dst->id] = 0;
+        changed = true;
+      }
+    }
+    // x / 1 = x, x / x = 1
+    else if (insn->kind == HLIR_DIV && insn->dst && insn->src1 && insn->src2) {
+      if (is_const[insn->src2->id] && const_vals[insn->src2->id] == 1) {
+        insn->kind = HLIR_CAST;
+        insn->src2 = NULL;
+        changed = true;
+      } else if (insn->src1 == insn->src2) {
+        insn->kind = HLIR_ICONST;
+        insn->imm = 1;
+        insn->src1 = insn->src2 = NULL;
+        is_const[insn->dst->id] = true;
+        const_vals[insn->dst->id] = 1;
+        changed = true;
+      }
+    }
+    // x ^ x = 0, x & 0 = 0, x & x = x, x | 0 = x, x | x = x, x ^ 0 = x
+    else if (insn->kind == HLIR_BITXOR && insn->dst && insn->src1 && insn->src2) {
+      if (insn->src1 == insn->src2) {
+        insn->kind = HLIR_ICONST;
+        insn->imm = 0;
+        insn->src1 = insn->src2 = NULL;
+        is_const[insn->dst->id] = true;
+        const_vals[insn->dst->id] = 0;
+        changed = true;
+      } else if (is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) {
+        insn->kind = HLIR_CAST;
+        insn->src2 = NULL;
+        changed = true;
+      } else if (is_const[insn->src1->id] && const_vals[insn->src1->id] == 0) {
+        insn->kind = HLIR_CAST;
+        insn->src1 = insn->src2;
+        insn->src2 = NULL;
+        changed = true;
+      }
+    } else if (insn->kind == HLIR_BITAND && insn->dst && insn->src1 && insn->src2) {
+      if (insn->src1 == insn->src2) {
+        insn->kind = HLIR_CAST;
+        insn->src2 = NULL;
+        changed = true;
+      } else if ((is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) ||
+                 (is_const[insn->src1->id] && const_vals[insn->src1->id] == 0)) {
+        insn->kind = HLIR_ICONST;
+        insn->imm = 0;
+        insn->src1 = insn->src2 = NULL;
+        is_const[insn->dst->id] = true;
+        const_vals[insn->dst->id] = 0;
+        changed = true;
+      }
+    } else if (insn->kind == HLIR_BITOR && insn->dst && insn->src1 && insn->src2) {
+      if (insn->src1 == insn->src2) {
+        insn->kind = HLIR_CAST;
+        insn->src2 = NULL;
+        changed = true;
+      } else if (is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) {
+        insn->kind = HLIR_CAST;
+        insn->src2 = NULL;
+        changed = true;
+      } else if (is_const[insn->src1->id] && const_vals[insn->src1->id] == 0) {
+        insn->kind = HLIR_CAST;
+        insn->src1 = insn->src2;
+        insn->src2 = NULL;
+        changed = true;
+      }
+    }
+  }
+
+  free(const_vals);
+  free(is_const);
+  return changed;
+}
+
+bool hlir_opt_control_flow(HLIRFunction *fn) {
+  if (!fn || !fn->head)
+    return false;
+
+  bool changed = false;
+  int64_t *const_vals = calloc(fn->num_vals ? fn->num_vals : 1, sizeof(int64_t));
+  bool *is_const = calloc(fn->num_vals ? fn->num_vals : 1, sizeof(bool));
+
+  for (HLIRInsn *insn = fn->head; insn; insn = insn->next) {
+    if (insn->kind == HLIR_LABEL || insn->kind == HLIR_JMP || insn->kind == HLIR_CALL) {
+      memset(is_const, 0, (fn->num_vals ? fn->num_vals : 1) * sizeof(bool));
+      continue;
+    }
+
+    if (insn->kind == HLIR_ICONST && insn->dst) {
+      is_const[insn->dst->id] = true;
+      const_vals[insn->dst->id] = insn->imm;
+      continue;
+    }
+
+    if (insn->kind == HLIR_JMP_IF_ZERO && insn->src1 && is_const[insn->src1->id]) {
+      if (const_vals[insn->src1->id] == 0) {
+        insn->kind = HLIR_JMP;
+        insn->src1 = NULL;
+        changed = true;
+      } else {
+        HLIRInsn *del = insn;
+        insn = insn->prev ? insn->prev : fn->head;
+        hlir_remove_insn(fn, del);
+        changed = true;
+        if (!insn) break;
+        continue;
+      }
+    }
+
+    if (insn->kind == HLIR_JMP_IF_NZ && insn->src1 && is_const[insn->src1->id]) {
+      if (const_vals[insn->src1->id] != 0) {
+        insn->kind = HLIR_JMP;
+        insn->src1 = NULL;
+        changed = true;
+      } else {
+        HLIRInsn *del = insn;
+        insn = insn->prev ? insn->prev : fn->head;
+        hlir_remove_insn(fn, del);
+        changed = true;
+        if (!insn) break;
+        continue;
+      }
+    }
+
+    // Eliminate jump to immediate next label
+    if (insn->kind == HLIR_JMP && insn->label) {
+      HLIRInsn *nxt = insn->next;
+      while (nxt && nxt->kind == HLIR_NOP)
+        nxt = nxt->next;
+      if (nxt && nxt->kind == HLIR_LABEL && nxt->label && !strcmp(insn->label, nxt->label)) {
+        HLIRInsn *del = insn;
+        insn = insn->prev ? insn->prev : fn->head;
+        hlir_remove_insn(fn, del);
+        changed = true;
+        if (!insn) break;
+        continue;
+      }
+    }
+  }
+
+  free(const_vals);
+  free(is_const);
+  return changed;
+}
+
+bool hlir_opt_dead_code(HLIRFunction *fn) {
+  if (!fn || !fn->head)
+    return false;
+
+  bool changed = false;
+
+  // Eliminate instructions after unconditional jump or return until the next label
+  for (HLIRInsn *insn = fn->head; insn; insn = insn->next) {
+    if (insn->kind == HLIR_JMP || insn->kind == HLIR_RET) {
+      while (insn->next && insn->next->kind != HLIR_LABEL) {
+        hlir_remove_insn(fn, insn->next);
+        changed = true;
+      }
+    }
+  }
+
+  return changed;
+}
+
+void hlir_optimize(HLIRProg *prog, int opt_level) {
+  if (!prog)
+    return;
+
+  ir_init_pass_registry();
+
+  int max_iter = 1;
+  if (opt_level >= 2)
+    max_iter = (opt_level >= 3) ? 8 : 4;
+  else if (opt_level == 1)
+    max_iter = 2;
+
+  for (int i = 0; i < prog->num_fns; i++) {
+    HLIRFunction *fn = prog->fns[i];
+    if (!fn) continue;
+
+    for (int iter = 0; iter < max_iter; iter++) {
+      bool changed = false;
+
+      if (pass_hlir_const_fold.enabled)
+        changed |= hlir_opt_const_fold(fn);
+      if (pass_hlir_algebraic.enabled)
+        changed |= hlir_opt_algebraic(fn);
+      if (pass_hlir_control_flow.enabled)
+        changed |= hlir_opt_control_flow(fn);
+      if (pass_hlir_dead_code.enabled)
+        changed |= hlir_opt_dead_code(fn);
+
+      if (!changed)
+        break;
+    }
+  }
+}
+
+// ============================================================================
 // Pass Wrappers & Pass Singletons
 // ============================================================================
 
@@ -1070,6 +1506,8 @@ IRPass pass_const_fold = {
   .name = "const-fold",
   .description = "Constant folding and algebraic simplification",
   .type = IR_PASS_FUNCTION,
+  .enabled = false,
+  .default_opt_level = 1,
   .run_on_function = run_pass_const_fold,
 };
 
@@ -1077,6 +1515,8 @@ IRPass pass_copy_prop = {
   .name = "copy-prop",
   .description = "Copy propagation",
   .type = IR_PASS_FUNCTION,
+  .enabled = false,
+  .default_opt_level = 1,
   .run_on_function = run_pass_copy_prop,
 };
 
@@ -1084,6 +1524,8 @@ IRPass pass_dce = {
   .name = "dce",
   .description = "Dead code elimination",
   .type = IR_PASS_FUNCTION,
+  .enabled = false,
+  .default_opt_level = 1,
   .run_on_function = run_pass_dce,
 };
 
@@ -1091,6 +1533,8 @@ IRPass pass_cfg_simplify = {
   .name = "cfg-simplify",
   .description = "Control flow simplification & unreachable code elimination",
   .type = IR_PASS_FUNCTION,
+  .enabled = false,
+  .default_opt_level = 1,
   .run_on_function = run_pass_cfg_simplify,
 };
 
@@ -1098,6 +1542,8 @@ IRPass pass_peephole = {
   .name = "peephole",
   .description = "IR peephole optimizations and strength reduction",
   .type = IR_PASS_FUNCTION,
+  .enabled = false,
+  .default_opt_level = 2,
   .run_on_function = run_pass_peephole,
 };
 
@@ -1105,6 +1551,8 @@ IRPass pass_local_cse = {
   .name = "local-cse",
   .description = "Local common subexpression elimination",
   .type = IR_PASS_FUNCTION,
+  .enabled = false,
+  .default_opt_level = 2,
   .run_on_function = run_pass_local_cse,
 };
 
@@ -1112,11 +1560,45 @@ IRPass pass_verifier = {
   .name = "verifier",
   .description = "IR integrity verification pass",
   .type = IR_PASS_FUNCTION,
+  .enabled = true,
+  .default_opt_level = 0,
   .run_on_function = run_pass_verifier,
 };
 
+IRPass pass_hlir_const_fold = {
+  .name = "hlir-const-fold",
+  .description = "High-Level IR constant folding",
+  .type = IR_PASS_FUNCTION,
+  .enabled = false,
+  .default_opt_level = 1,
+};
+
+IRPass pass_hlir_algebraic = {
+  .name = "hlir-algebraic",
+  .description = "High-Level IR algebraic simplification",
+  .type = IR_PASS_FUNCTION,
+  .enabled = false,
+  .default_opt_level = 1,
+};
+
+IRPass pass_hlir_control_flow = {
+  .name = "hlir-control-flow",
+  .description = "High-Level IR control flow simplification",
+  .type = IR_PASS_FUNCTION,
+  .enabled = false,
+  .default_opt_level = 1,
+};
+
+IRPass pass_hlir_dead_code = {
+  .name = "hlir-dead-code",
+  .description = "High-Level IR dead code elimination",
+  .type = IR_PASS_FUNCTION,
+  .enabled = false,
+  .default_opt_level = 1,
+};
+
 // ============================================================================
-// Pass Registry
+// Pass Registry & Fine-Tuning API
 // ============================================================================
 
 static IRPass *pass_registry[64];
@@ -1164,11 +1646,212 @@ void ir_init_pass_registry(void) {
 
   ir_register_pass(&pass_const_fold);
   ir_register_pass(&pass_copy_prop);
-  ir_register_pass(&pass_dce);
-  ir_register_pass(&pass_cfg_simplify);
-  ir_register_pass(&pass_peephole);
   ir_register_pass(&pass_local_cse);
+  ir_register_pass(&pass_peephole);
+  ir_register_pass(&pass_cfg_simplify);
+  ir_register_pass(&pass_dce);
   ir_register_pass(&pass_verifier);
+  ir_register_pass(&pass_hlir_const_fold);
+  ir_register_pass(&pass_hlir_algebraic);
+  ir_register_pass(&pass_hlir_control_flow);
+  ir_register_pass(&pass_hlir_dead_code);
+}
+
+void ir_opt_set_level(int opt_level) {
+  ir_init_pass_registry();
+  if (opt_level <= 0) {
+    for (int i = 0; i < pass_registry_count; i++) {
+      if (pass_registry[i] != &pass_verifier)
+        pass_registry[i]->enabled = false;
+    }
+  } else if (opt_level == 1) {
+    pass_const_fold.enabled = true;
+    pass_copy_prop.enabled = true;
+    pass_dce.enabled = true;
+    pass_cfg_simplify.enabled = true;
+    pass_local_cse.enabled = false;
+    pass_peephole.enabled = false;
+    pass_verifier.enabled = true;
+    pass_hlir_const_fold.enabled = true;
+    pass_hlir_algebraic.enabled = true;
+    pass_hlir_control_flow.enabled = true;
+    pass_hlir_dead_code.enabled = true;
+  } else if (opt_level >= 2) {
+    for (int i = 0; i < pass_registry_count; i++)
+      pass_registry[i]->enabled = true;
+  }
+}
+
+static bool str_case_hyphen_equal(const char *a, const char *b) {
+  if (!a || !b) return false;
+  while (*a && *b) {
+    char ca = *a;
+    char cb = *b;
+    if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+    if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+    if (ca == '_') ca = '-';
+    if (cb == '_') cb = '-';
+    if (ca != cb) return false;
+    a++;
+    b++;
+  }
+  return *a == '\0' && *b == '\0';
+}
+
+bool ir_opt_set_pass_enabled(const char *name, bool enabled) {
+  if (!name) return false;
+  ir_init_pass_registry();
+
+  if (str_case_hyphen_equal(name, "all")) {
+    for (int i = 0; i < pass_registry_count; i++) {
+      if (pass_registry[i] != &pass_verifier)
+        pass_registry[i]->enabled = enabled;
+    }
+    return true;
+  }
+
+  if (str_case_hyphen_equal(name, "hlir") ||
+      str_case_hyphen_equal(name, "hlir-opt") ||
+      str_case_hyphen_equal(name, "hlir-all")) {
+    pass_hlir_const_fold.enabled = enabled;
+    pass_hlir_algebraic.enabled = enabled;
+    pass_hlir_control_flow.enabled = enabled;
+    pass_hlir_dead_code.enabled = enabled;
+    return true;
+  }
+
+  if (str_case_hyphen_equal(name, "const-fold") ||
+      str_case_hyphen_equal(name, "constant-folding") ||
+      str_case_hyphen_equal(name, "tree-ccp") ||
+      str_case_hyphen_equal(name, "ccp")) {
+    pass_const_fold.enabled = enabled;
+    return true;
+  }
+
+  if (str_case_hyphen_equal(name, "copy-prop") ||
+      str_case_hyphen_equal(name, "copy-propagation") ||
+      str_case_hyphen_equal(name, "tree-copy-prop")) {
+    pass_copy_prop.enabled = enabled;
+    return true;
+  }
+
+  if (str_case_hyphen_equal(name, "dce") ||
+      str_case_hyphen_equal(name, "dead-code-elimination") ||
+      str_case_hyphen_equal(name, "tree-dce")) {
+    pass_dce.enabled = enabled;
+    return true;
+  }
+
+  if (str_case_hyphen_equal(name, "cfg-simplify") ||
+      str_case_hyphen_equal(name, "simplify-cfg") ||
+      str_case_hyphen_equal(name, "tree-dominator-opts")) {
+    pass_cfg_simplify.enabled = enabled;
+    return true;
+  }
+
+  if (str_case_hyphen_equal(name, "peephole") ||
+      str_case_hyphen_equal(name, "peephole2") ||
+      str_case_hyphen_equal(name, "strength-reduce") ||
+      str_case_hyphen_equal(name, "strength-reduction")) {
+    pass_peephole.enabled = enabled;
+    return true;
+  }
+
+  if (str_case_hyphen_equal(name, "local-cse") ||
+      str_case_hyphen_equal(name, "cse") ||
+      str_case_hyphen_equal(name, "tree-cse")) {
+    pass_local_cse.enabled = enabled;
+    return true;
+  }
+
+  if (str_case_hyphen_equal(name, "verifier")) {
+    pass_verifier.enabled = enabled;
+    return true;
+  }
+
+  if (str_case_hyphen_equal(name, "hlir-const-fold")) {
+    pass_hlir_const_fold.enabled = enabled;
+    return true;
+  }
+
+  if (str_case_hyphen_equal(name, "hlir-algebraic")) {
+    pass_hlir_algebraic.enabled = enabled;
+    return true;
+  }
+
+  if (str_case_hyphen_equal(name, "hlir-control-flow") ||
+      str_case_hyphen_equal(name, "hlir-cfg")) {
+    pass_hlir_control_flow.enabled = enabled;
+    return true;
+  }
+
+  if (str_case_hyphen_equal(name, "hlir-dead-code") ||
+      str_case_hyphen_equal(name, "hlir-dce")) {
+    pass_hlir_dead_code.enabled = enabled;
+    return true;
+  }
+
+  // Check registry
+  for (int i = 0; i < pass_registry_count; i++) {
+    if (str_case_hyphen_equal(pass_registry[i]->name, name)) {
+      pass_registry[i]->enabled = enabled;
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool ir_opt_is_pass_enabled(const char *name) {
+  if (!name) return false;
+  ir_init_pass_registry();
+
+  if (str_case_hyphen_equal(name, "const-fold") || str_case_hyphen_equal(name, "tree-ccp"))
+    return pass_const_fold.enabled;
+  if (str_case_hyphen_equal(name, "copy-prop") || str_case_hyphen_equal(name, "tree-copy-prop"))
+    return pass_copy_prop.enabled;
+  if (str_case_hyphen_equal(name, "dce") || str_case_hyphen_equal(name, "tree-dce"))
+    return pass_dce.enabled;
+  if (str_case_hyphen_equal(name, "cfg-simplify") || str_case_hyphen_equal(name, "simplify-cfg"))
+    return pass_cfg_simplify.enabled;
+  if (str_case_hyphen_equal(name, "peephole") || str_case_hyphen_equal(name, "strength-reduce"))
+    return pass_peephole.enabled;
+  if (str_case_hyphen_equal(name, "local-cse") || str_case_hyphen_equal(name, "cse"))
+    return pass_local_cse.enabled;
+  if (str_case_hyphen_equal(name, "hlir-const-fold"))
+    return pass_hlir_const_fold.enabled;
+  if (str_case_hyphen_equal(name, "hlir-algebraic"))
+    return pass_hlir_algebraic.enabled;
+  if (str_case_hyphen_equal(name, "hlir-control-flow"))
+    return pass_hlir_control_flow.enabled;
+  if (str_case_hyphen_equal(name, "hlir-dead-code"))
+    return pass_hlir_dead_code.enabled;
+  if (str_case_hyphen_equal(name, "verifier"))
+    return pass_verifier.enabled;
+
+  for (int i = 0; i < pass_registry_count; i++) {
+    if (str_case_hyphen_equal(pass_registry[i]->name, name))
+      return pass_registry[i]->enabled;
+  }
+  return false;
+}
+
+void ir_opt_print_passes(FILE *out) {
+  if (!out) out = stdout;
+  ir_init_pass_registry();
+  fprintf(out, "Registered Optimization Passes:\n");
+  for (int i = 0; i < pass_registry_count; i++) {
+    fprintf(out, "  %-20s [%s] (default >= -O%d): %s\n",
+            pass_registry[i]->name,
+            pass_registry[i]->enabled ? "ENABLED " : "DISABLED",
+            pass_registry[i]->default_opt_level,
+            pass_registry[i]->description ? pass_registry[i]->description : "");
+  }
+}
+
+void ir_opt_init(void) {
+  ir_init_pass_registry();
+  ir_opt_set_level(opt_O);
 }
 
 // ============================================================================
@@ -1276,23 +1959,33 @@ IRPassManager *ir_create_opt_pipeline(int opt_level) {
   IRPassManager *pm = ir_pass_manager_new();
 
   if (opt_level <= 0) {
-    // -O0: Basic cleanup only
     pm->fixed_point = false;
-    ir_pass_manager_add(pm, &pass_verifier);
-    return pm;
+    pm->max_fixed_point_iterations = 1;
+  } else if (opt_level == 1) {
+    pm->fixed_point = true;
+    pm->max_fixed_point_iterations = 4;
+  } else if (opt_level == 2) {
+    pm->fixed_point = true;
+    pm->max_fixed_point_iterations = 8;
+  } else {
+    pm->fixed_point = true;
+    pm->max_fixed_point_iterations = 12;
   }
 
-  // -O1, -O2, -O3, -Os
-  pm->fixed_point = true;
-  pm->max_fixed_point_iterations = (opt_level >= 2) ? 8 : 4;
-
-  ir_pass_manager_add(pm, &pass_const_fold);
-  ir_pass_manager_add(pm, &pass_copy_prop);
-  ir_pass_manager_add(pm, &pass_local_cse);
-  ir_pass_manager_add(pm, &pass_peephole);
-  ir_pass_manager_add(pm, &pass_cfg_simplify);
-  ir_pass_manager_add(pm, &pass_dce);
-  ir_pass_manager_add(pm, &pass_verifier);
+  if (pass_const_fold.enabled)
+    ir_pass_manager_add(pm, &pass_const_fold);
+  if (pass_copy_prop.enabled)
+    ir_pass_manager_add(pm, &pass_copy_prop);
+  if (pass_local_cse.enabled)
+    ir_pass_manager_add(pm, &pass_local_cse);
+  if (pass_peephole.enabled)
+    ir_pass_manager_add(pm, &pass_peephole);
+  if (pass_cfg_simplify.enabled)
+    ir_pass_manager_add(pm, &pass_cfg_simplify);
+  if (pass_dce.enabled)
+    ir_pass_manager_add(pm, &pass_dce);
+  if (pass_verifier.enabled)
+    ir_pass_manager_add(pm, &pass_verifier);
 
   return pm;
 }
@@ -1302,9 +1995,14 @@ void ir_optimize_level(IRProg *prog, int opt_level) {
     return;
 
   IRPassManager *pm = ir_create_opt_pipeline(opt_level);
+  if (pm->num_passes == 0) {
+    ir_pass_manager_free(pm);
+    return;
+  }
+
   IRPassContext ctx = {
     .opt_level = opt_level,
-    .verify_each = true,
+    .verify_each = pass_verifier.enabled,
   };
 
   ir_pass_manager_run_prog(pm, prog, &ctx);
@@ -1315,4 +2013,10 @@ void ir_optimize_level(IRProg *prog, int opt_level) {
 
 void ir_optimize(IRProg *prog) {
   ir_optimize_level(prog, 2);
+}
+
+void llir_optimize(LLIRProg *prog, int opt_level) {
+  if (!prog)
+    return;
+  ir_optimize_level((IRProg *)prog, opt_level);
 }

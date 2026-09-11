@@ -1,4 +1,5 @@
 #include "chibicc.h"
+#include "ir/opt.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -410,18 +411,30 @@ static void parse_args(const int argc, char **argv) {
     }
 
     if (!strncmp(argv[i], "-O", 2)) {
-      if (argv[i][2] == '\0')
+      if (argv[i][2] == '\0') {
         opt_O = 1;
-      else if (argv[i][2] == 's')
+        ir_opt_set_level(1);
+      } else if (argv[i][2] == 's' || argv[i][2] == 'z') {
         opt_O = 2;
-      else if (argv[i][2] >= '0' && argv[i][2] <= '9')
+        ir_opt_set_level(2);
+      } else if (argv[i][2] >= '0' && argv[i][2] <= '9') {
         opt_O = argv[i][2] - '0';
+        ir_opt_set_level(opt_O);
+      }
       continue;
     }
 
     if (!strcmp(argv[i], "-fdump-ir") || !strcmp(argv[i], "--dump-ir")) {
       opt_dump_ir = true;
       continue;
+    }
+
+    if (!strncmp(argv[i], "-fno-", 5)) {
+      if (ir_opt_set_pass_enabled(argv[i] + 5, false))
+        continue;
+    } else if (!strncmp(argv[i], "-f", 2)) {
+      if (ir_opt_set_pass_enabled(argv[i] + 2, true))
+        continue;
     }
 
     if (!strncmp(argv[i], "-g", 2)) {
@@ -882,6 +895,7 @@ int main(const int argc, char **argv)
   atexit(cleanup);
   init_all_targets_and_abis();
   init_macros();
+  ir_opt_init();
   parse_args(argc, argv);
 
   if (opt_cc1) {

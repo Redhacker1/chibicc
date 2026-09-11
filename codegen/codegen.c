@@ -88,13 +88,11 @@ void codegen(Obj *prog, FILE *out) {
 
   // 1. Lower AST to High-Level Bytecode Intermediate Representation (HLIR)
   HLIRProg *hlir = ast_to_hlir(prog);
-  if (opt_O > 0)
-    hlir_optimize(hlir, opt_O);
+  hlir_optimize(hlir, opt_O);
 
   // 2. Lower HLIR to Abstract SSA Low-Level Assembly Intermediate Representation (LLIR)
   LLIRProg *llir = hlir_to_llir(hlir);
-  if (opt_O > 0)
-    llir_optimize(llir, opt_O);
+  llir_optimize(llir, opt_O);
 
   if (opt_dump_ir)
     llir_dump(stderr, llir);

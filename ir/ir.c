@@ -1727,19 +1727,8 @@ HLIRProg *ast_to_hlir(Obj *prog) {
   return hlir_prog;
 }
 
-void hlir_optimize(HLIRProg *prog, int opt_level) {
-  (void)prog;
-  (void)opt_level;
-}
-
 LLIRProg *hlir_to_llir(HLIRProg *hlir) {
   if (!hlir)
     return NULL;
   return ast_to_ir(hlir->globals);
-}
-
-void llir_optimize(LLIRProg *prog, int opt_level) {
-  if (opt_level <= 0 || !prog)
-    return;
-  ir_optimize_level((IRProg *)prog, opt_level);
 }
