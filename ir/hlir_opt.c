@@ -3,132 +3,326 @@
 #include <stdlib.h>
 #include <string.h>
 
-// 1. HLIR Constant Folding Pass
+// ==============================================================================
+// 1. Instruction Classification Predicates & Properties
+// ==============================================================================
+
+// Pure instructions have no side-effects, do not access memory, and do not branch.
+static bool hlir_is_pure(HLIRKind kind) {
+  switch (kind) {
+  case HLIR_ICONST:
+  case HLIR_FCONST:
+  case HLIR_SCONST:
+  case HLIR_ADDR_VAR:
+  case HLIR_CAST:
+  case HLIR_ADD:
+  case HLIR_SUB:
+  case HLIR_MUL:
+  case HLIR_DIV:
+  case HLIR_MOD:
+  case HLIR_BITAND:
+  case HLIR_BITOR:
+  case HLIR_BITXOR:
+  case HLIR_SHL:
+  case HLIR_SHR:
+  case HLIR_NEG:
+  case HLIR_BITNOT:
+  case HLIR_LOGNOT:
+  case HLIR_CMP_EQ:
+  case HLIR_CMP_NE:
+  case HLIR_CMP_LT:
+  case HLIR_CMP_LE:
+  case HLIR_CMP_GT:
+  case HLIR_CMP_GE:
+    return true;
+  default:
+    return false;
+  }
+}
+
+// Commutative binary operators where src1 and src2 can be safely swapped.
+static bool hlir_is_commutative(HLIRKind kind) {
+  switch (kind) {
+  case HLIR_ADD:
+  case HLIR_MUL:
+  case HLIR_BITAND:
+  case HLIR_BITOR:
+  case HLIR_BITXOR:
+  case HLIR_CMP_EQ:
+  case HLIR_CMP_NE:
+    return true;
+  default:
+    return false;
+  }
+}
+
+// Relational comparisons.
+static bool hlir_is_relational(HLIRKind kind) {
+  switch (kind) {
+  case HLIR_CMP_EQ:
+  case HLIR_CMP_NE:
+  case HLIR_CMP_LT:
+  case HLIR_CMP_LE:
+  case HLIR_CMP_GT:
+  case HLIR_CMP_GE:
+    return true;
+  default:
+    return false;
+  }
+}
+
+// Swapped comparison operator when reversing operands: (A op B) <=> (B swap(op) A).
+static HLIRKind hlir_swap_cmp(HLIRKind kind) {
+  switch (kind) {
+  case HLIR_CMP_LT: return HLIR_CMP_GT;
+  case HLIR_CMP_LE: return HLIR_CMP_GE;
+  case HLIR_CMP_GT: return HLIR_CMP_LT;
+  case HLIR_CMP_GE: return HLIR_CMP_LE;
+  default: return kind;
+  }
+}
+
+// Inverted comparison operator for logical negation: !(A op B) <=> (A invert(op) B).
+static HLIRKind hlir_invert_cmp(HLIRKind kind) {
+  switch (kind) {
+  case HLIR_CMP_EQ: return HLIR_CMP_NE;
+  case HLIR_CMP_NE: return HLIR_CMP_EQ;
+  case HLIR_CMP_LT: return HLIR_CMP_GE;
+  case HLIR_CMP_LE: return HLIR_CMP_GT;
+  case HLIR_CMP_GT: return HLIR_CMP_LE;
+  case HLIR_CMP_GE: return HLIR_CMP_LT;
+  default: return HLIR_NOP;
+  }
+}
+
+// Basic-block boundaries and control flow barriers that invalidate straight-line state.
+static bool hlir_is_bb_barrier(HLIRKind kind) {
+  switch (kind) {
+  case HLIR_LABEL:
+  case HLIR_JMP:
+  case HLIR_JMP_IF_ZERO:
+  case HLIR_JMP_IF_NZ:
+  case HLIR_CALL:
+  case HLIR_RET:
+  case HLIR_ASM:
+  case HLIR_CAS:
+  case HLIR_EXCH:
+    return true;
+  default:
+    return false;
+  }
+}
+
+// Check if value is a positive power of two and extract shift exponent.
+static bool hlir_is_power_of_two(int64_t val, int *out_shift) {
+  if (val <= 0 || (val & (val - 1)) != 0)
+    return false;
+  int shift = 0;
+  while ((1LL << shift) < val)
+    shift++;
+  if ((1LL << shift) == val) {
+    if (out_shift) *out_shift = shift;
+    return true;
+  }
+  return false;
+}
+
+// ==============================================================================
+// 2. Instruction Modification Helpers
+// ==============================================================================
+
+static void hlir_set_iconst(HLIRInsn *insn, int64_t imm) {
+  insn->kind = HLIR_ICONST;
+  insn->imm = imm;
+  insn->src1 = NULL;
+  insn->src2 = NULL;
+  insn->src3 = NULL;
+}
+
+static void hlir_set_cast(HLIRInsn *insn, HLIRVal *src) {
+  insn->kind = HLIR_CAST;
+  insn->src1 = src;
+  insn->src2 = NULL;
+  insn->src3 = NULL;
+}
+
+static void hlir_set_unary(HLIRInsn *insn, HLIRKind kind, HLIRVal *src) {
+  insn->kind = kind;
+  insn->src1 = src;
+  insn->src2 = NULL;
+  insn->src3 = NULL;
+}
+
+// ==============================================================================
+// 3. Block-Local Environment Tracking (Constants & Definitions)
+// ==============================================================================
+
+typedef struct {
+  int num_vals;
+  int64_t *const_vals;
+  bool *is_const;
+  HLIRInsn **defs;
+} HLIREnv;
+
+static void hlir_env_init(HLIREnv *env, int num_vals, bool track_defs) {
+  env->num_vals = num_vals;
+  env->const_vals = calloc(num_vals ? num_vals : 1, sizeof(int64_t));
+  env->is_const = calloc(num_vals ? num_vals : 1, sizeof(bool));
+  env->defs = track_defs ? calloc(num_vals ? num_vals : 1, sizeof(HLIRInsn *)) : NULL;
+}
+
+static void hlir_env_reset(HLIREnv *env) {
+  if (env->num_vals > 0) {
+    memset(env->is_const, 0, env->num_vals * sizeof(bool));
+    if (env->defs)
+      memset(env->defs, 0, env->num_vals * sizeof(HLIRInsn *));
+  }
+}
+
+static void hlir_env_free(HLIREnv *env) {
+  free(env->const_vals);
+  free(env->is_const);
+  if (env->defs) free(env->defs);
+}
+
+static void hlir_env_set_const(HLIREnv *env, HLIRVal *val, int64_t imm) {
+  if (val && val->id < env->num_vals) {
+    env->is_const[val->id] = true;
+    env->const_vals[val->id] = imm;
+  }
+}
+
+static void hlir_env_set_def(HLIREnv *env, HLIRVal *val, HLIRInsn *insn) {
+  if (env->defs && val && val->id < env->num_vals) {
+    env->defs[val->id] = insn;
+  }
+}
+
+static bool hlir_env_get_const(HLIREnv *env, HLIRVal *val, int64_t *out_imm) {
+  if (val && val->id < env->num_vals && env->is_const[val->id]) {
+    if (out_imm) *out_imm = env->const_vals[val->id];
+    return true;
+  }
+  return false;
+}
+
+static bool hlir_env_is_const(HLIREnv *env, HLIRVal *val) {
+  return val && val->id < env->num_vals && env->is_const[val->id];
+}
+
+static bool hlir_env_is_const_val(HLIREnv *env, HLIRVal *val, int64_t imm) {
+  return val && val->id < env->num_vals && env->is_const[val->id] && env->const_vals[val->id] == imm;
+}
+
+static HLIRInsn *hlir_env_get_def(HLIREnv *env, HLIRVal *val) {
+  if (env->defs && val && val->id < env->num_vals)
+    return env->defs[val->id];
+  return NULL;
+}
+
+// ==============================================================================
+// 4. Constant Folding Evaluation Helpers
+// ==============================================================================
+
+static bool hlir_fold_binary(HLIRKind kind, int64_t c1, int64_t c2, int64_t *out_res) {
+  switch (kind) {
+  case HLIR_ADD: *out_res = c1 + c2; return true;
+  case HLIR_SUB: *out_res = c1 - c2; return true;
+  case HLIR_MUL: *out_res = c1 * c2; return true;
+  case HLIR_DIV: if (c2 != 0) { *out_res = c1 / c2; return true; } return false;
+  case HLIR_MOD: if (c2 != 0) { *out_res = c1 % c2; return true; } return false;
+  case HLIR_BITAND: *out_res = c1 & c2; return true;
+  case HLIR_BITOR:  *out_res = c1 | c2; return true;
+  case HLIR_BITXOR: *out_res = c1 ^ c2; return true;
+  case HLIR_SHL: if (c2 >= 0 && c2 < 64) { *out_res = c1 << c2; return true; } return false;
+  case HLIR_SHR: if (c2 >= 0 && c2 < 64) { *out_res = c1 >> c2; return true; } return false;
+  case HLIR_CMP_EQ: *out_res = (c1 == c2); return true;
+  case HLIR_CMP_NE: *out_res = (c1 != c2); return true;
+  case HLIR_CMP_LT: *out_res = (c1 < c2); return true;
+  case HLIR_CMP_LE: *out_res = (c1 <= c2); return true;
+  case HLIR_CMP_GT: *out_res = (c1 > c2); return true;
+  case HLIR_CMP_GE: *out_res = (c1 >= c2); return true;
+  default: return false;
+  }
+}
+
+static bool hlir_fold_unary(HLIRKind kind, Type *ty, int64_t c, int64_t *out_res) {
+  switch (kind) {
+  case HLIR_NEG: *out_res = -c; return true;
+  case HLIR_BITNOT: *out_res = ~c; return true;
+  case HLIR_LOGNOT: *out_res = !c; return true;
+  case HLIR_CAST: {
+    if (ty && is_flonum(ty))
+      return false;
+    int sz = ty ? ty->size : 8;
+    bool is_unsigned = ty ? ty->is_unsigned : false;
+    int64_t res = c;
+    if (sz == 1) res = is_unsigned ? (uint8_t)c : (int8_t)c;
+    else if (sz == 2) res = is_unsigned ? (uint16_t)c : (int16_t)c;
+    else if (sz == 4) res = is_unsigned ? (uint32_t)c : (int32_t)c;
+    *out_res = res;
+    return true;
+  }
+  default:
+    return false;
+  }
+}
+
+// ==============================================================================
+// 5. HLIR Optimization Passes
+// ==============================================================================
+
+// Pass 1: Constant Folding & Operand Canonicalization
 bool hlir_opt_const_fold(HLIRFunction *fn) {
   if (!fn || fn->num_vals == 0)
     return false;
 
   bool changed = false;
-  int64_t *const_vals = calloc(fn->num_vals, sizeof(int64_t));
-  bool *is_const = calloc(fn->num_vals, sizeof(bool));
+  HLIREnv env;
+  hlir_env_init(&env, fn->num_vals, false);
 
   for (HLIRInsn *insn = fn->head; insn; insn = insn->next) {
-    if (insn->kind == HLIR_LABEL || insn->kind == HLIR_JMP ||
-        insn->kind == HLIR_JMP_IF_ZERO || insn->kind == HLIR_JMP_IF_NZ ||
-        insn->kind == HLIR_CALL) {
-      memset(is_const, 0, fn->num_vals * sizeof(bool));
+    if (hlir_is_bb_barrier(insn->kind)) {
+      hlir_env_reset(&env);
       continue;
     }
 
     if (insn->kind == HLIR_ICONST && insn->dst) {
-      is_const[insn->dst->id] = true;
-      const_vals[insn->dst->id] = insn->imm;
+      hlir_env_set_const(&env, insn->dst, insn->imm);
       continue;
     }
 
-    if (insn->src1 && is_const[insn->src1->id] && insn->src2 && is_const[insn->src2->id]) {
-      int64_t c1 = const_vals[insn->src1->id];
-      int64_t c2 = const_vals[insn->src2->id];
-      int64_t res = 0;
-      bool folded = true;
-
-      switch (insn->kind) {
-      case HLIR_ADD: res = c1 + c2; break;
-      case HLIR_SUB: res = c1 - c2; break;
-      case HLIR_MUL: res = c1 * c2; break;
-      case HLIR_DIV: if (c2 != 0) res = c1 / c2; else folded = false; break;
-      case HLIR_MOD: if (c2 != 0) res = c1 % c2; else folded = false; break;
-      case HLIR_BITAND: res = c1 & c2; break;
-      case HLIR_BITOR:  res = c1 | c2; break;
-      case HLIR_BITXOR: res = c1 ^ c2; break;
-      case HLIR_SHL: if (c2 >= 0 && c2 < 64) res = c1 << c2; else folded = false; break;
-      case HLIR_SHR: if (c2 >= 0 && c2 < 64) res = c1 >> c2; else folded = false; break;
-      case HLIR_CMP_EQ: res = (c1 == c2); break;
-      case HLIR_CMP_NE: res = (c1 != c2); break;
-      case HLIR_CMP_LT: res = (c1 < c2); break;
-      case HLIR_CMP_LE: res = (c1 <= c2); break;
-      case HLIR_CMP_GT: res = (c1 > c2); break;
-      case HLIR_CMP_GE: res = (c1 >= c2); break;
-      default: folded = false; break;
-      }
-
-      if (folded && insn->dst) {
-        insn->kind = HLIR_ICONST;
-        insn->imm = res;
-        insn->src1 = NULL;
-        insn->src2 = NULL;
-        is_const[insn->dst->id] = true;
-        const_vals[insn->dst->id] = res;
-        changed = true;
-        continue;
-      }
+    int64_t c1, c2, res;
+    // Fold binary constant operations
+    if (insn->src1 && insn->src2 && insn->dst &&
+        hlir_env_get_const(&env, insn->src1, &c1) &&
+        hlir_env_get_const(&env, insn->src2, &c2) &&
+        hlir_fold_binary(insn->kind, c1, c2, &res)) {
+      hlir_set_iconst(insn, res);
+      hlir_env_set_const(&env, insn->dst, res);
+      changed = true;
+      continue;
     }
 
-    if (insn->src1 && is_const[insn->src1->id] && !insn->src2 && insn->dst) {
-      int64_t c = const_vals[insn->src1->id];
-      int64_t res = 0;
-      bool folded = true;
-
-      switch (insn->kind) {
-      case HLIR_NEG: res = -c; break;
-      case HLIR_BITNOT: res = ~c; break;
-      case HLIR_LOGNOT: res = !c; break;
-      case HLIR_CAST: {
-        if (insn->ty && is_flonum(insn->ty)) {
-          folded = false;
-        } else {
-          int sz = insn->ty ? insn->ty->size : 8;
-          bool is_unsigned = insn->ty ? insn->ty->is_unsigned : false;
-          res = c;
-          if (sz == 1) res = is_unsigned ? (uint8_t)c : (int8_t)c;
-          else if (sz == 2) res = is_unsigned ? (uint16_t)c : (int16_t)c;
-          else if (sz == 4) res = is_unsigned ? (uint32_t)c : (int32_t)c;
-        }
-        break;
-      }
-      default: folded = false; break;
-      }
-
-      if (folded) {
-        insn->kind = HLIR_ICONST;
-        insn->imm = res;
-        insn->src1 = NULL;
-        is_const[insn->dst->id] = true;
-        const_vals[insn->dst->id] = res;
-        changed = true;
-        continue;
-      }
+    // Fold unary constant operations
+    if (insn->src1 && !insn->src2 && insn->dst &&
+        hlir_env_get_const(&env, insn->src1, &c1) &&
+        hlir_fold_unary(insn->kind, insn->ty, c1, &res)) {
+      hlir_set_iconst(insn, res);
+      hlir_env_set_const(&env, insn->dst, res);
+      changed = true;
+      continue;
     }
 
     // Canonicalize: place constant in src2 for commutative and relational operations
-    if (insn->src1 && is_const[insn->src1->id] && insn->src2 && !is_const[insn->src2->id]) {
-      if (insn->kind == HLIR_ADD || insn->kind == HLIR_MUL ||
-          insn->kind == HLIR_BITAND || insn->kind == HLIR_BITOR || insn->kind == HLIR_BITXOR ||
-          insn->kind == HLIR_CMP_EQ || insn->kind == HLIR_CMP_NE) {
+    if (hlir_env_is_const(&env, insn->src1) && insn->src2 && !hlir_env_is_const(&env, insn->src2)) {
+      if (hlir_is_commutative(insn->kind)) {
         HLIRVal *tmp = insn->src1;
         insn->src1 = insn->src2;
         insn->src2 = tmp;
         changed = true;
-      } else if (insn->kind == HLIR_CMP_LT) {
-        insn->kind = HLIR_CMP_GT;
-        HLIRVal *tmp = insn->src1;
-        insn->src1 = insn->src2;
-        insn->src2 = tmp;
-        changed = true;
-      } else if (insn->kind == HLIR_CMP_LE) {
-        insn->kind = HLIR_CMP_GE;
-        HLIRVal *tmp = insn->src1;
-        insn->src1 = insn->src2;
-        insn->src2 = tmp;
-        changed = true;
-      } else if (insn->kind == HLIR_CMP_GT) {
-        insn->kind = HLIR_CMP_LT;
-        HLIRVal *tmp = insn->src1;
-        insn->src1 = insn->src2;
-        insn->src2 = tmp;
-        changed = true;
-      } else if (insn->kind == HLIR_CMP_GE) {
-        insn->kind = HLIR_CMP_LE;
+      } else if (hlir_is_relational(insn->kind)) {
+        insn->kind = hlir_swap_cmp(insn->kind);
         HLIRVal *tmp = insn->src1;
         insn->src1 = insn->src2;
         insn->src2 = tmp;
@@ -137,334 +331,278 @@ bool hlir_opt_const_fold(HLIRFunction *fn) {
     }
   }
 
-  free(const_vals);
-  free(is_const);
+  hlir_env_free(&env);
   return changed;
 }
 
-// 2. HLIR Constant & Algebraic Optimizations Pass
+// Pass 2: Algebraic Identities & Strength Reduction
 bool hlir_opt_algebraic(HLIRFunction *fn) {
   if (!fn || fn->num_vals == 0)
     return false;
 
   bool changed = false;
-  int orig_vals = fn->num_vals;
-  int64_t *const_vals = calloc(orig_vals, sizeof(int64_t));
-  bool *is_const = calloc(orig_vals, sizeof(bool));
-  HLIRInsn **defs = calloc(orig_vals, sizeof(HLIRInsn *));
+  HLIREnv env;
+  hlir_env_init(&env, fn->num_vals, true);
 
   for (HLIRInsn *insn = fn->head; insn; insn = insn->next) {
-    if (insn->kind == HLIR_LABEL || insn->kind == HLIR_JMP ||
-        insn->kind == HLIR_JMP_IF_ZERO || insn->kind == HLIR_JMP_IF_NZ ||
-        insn->kind == HLIR_CALL) {
-      memset(is_const, 0, orig_vals * sizeof(bool));
-      memset(defs, 0, orig_vals * sizeof(HLIRInsn *));
+    if (hlir_is_bb_barrier(insn->kind)) {
+      hlir_env_reset(&env);
       continue;
     }
 
-    if (insn->dst && insn->dst->id < orig_vals) {
-      defs[insn->dst->id] = insn;
-    }
+    if (insn->dst)
+      hlir_env_set_def(&env, insn->dst, insn);
 
-    if (insn->kind == HLIR_ICONST && insn->dst && insn->dst->id < orig_vals) {
-      is_const[insn->dst->id] = true;
-      const_vals[insn->dst->id] = insn->imm;
+    if (insn->kind == HLIR_ICONST && insn->dst) {
+      hlir_env_set_const(&env, insn->dst, insn->imm);
       continue;
     }
 
-    // Double unary operations: -(-x) = x, ~(~x) = x
-    if (insn->kind == HLIR_NEG && insn->dst && insn->src1 && insn->src1->id < orig_vals && defs[insn->src1->id] && defs[insn->src1->id]->kind == HLIR_NEG) {
-      insn->kind = HLIR_CAST;
-      insn->src1 = defs[insn->src1->id]->src1;
-      changed = true;
-    } else if (insn->kind == HLIR_BITNOT && insn->dst && insn->src1 && insn->src1->id < orig_vals && defs[insn->src1->id] && defs[insn->src1->id]->kind == HLIR_BITNOT) {
-      insn->kind = HLIR_CAST;
-      insn->src1 = defs[insn->src1->id]->src1;
-      changed = true;
-    } else if (insn->kind == HLIR_LOGNOT && insn->dst && insn->src1 && insn->src1->id < orig_vals && defs[insn->src1->id]) {
-      HLIRInsn *def = defs[insn->src1->id];
-      if (def->kind == HLIR_CMP_EQ) {
-        insn->kind = HLIR_CMP_NE; insn->src1 = def->src1; insn->src2 = def->src2; changed = true;
-      } else if (def->kind == HLIR_CMP_NE) {
-        insn->kind = HLIR_CMP_EQ; insn->src1 = def->src1; insn->src2 = def->src2; changed = true;
-      } else if (def->kind == HLIR_CMP_LT) {
-        insn->kind = HLIR_CMP_GE; insn->src1 = def->src1; insn->src2 = def->src2; changed = true;
-      } else if (def->kind == HLIR_CMP_LE) {
-        insn->kind = HLIR_CMP_GT; insn->src1 = def->src1; insn->src2 = def->src2; changed = true;
-      } else if (def->kind == HLIR_CMP_GT) {
-        insn->kind = HLIR_CMP_LE; insn->src1 = def->src1; insn->src2 = def->src2; changed = true;
-      } else if (def->kind == HLIR_CMP_GE) {
-        insn->kind = HLIR_CMP_LT; insn->src1 = def->src1; insn->src2 = def->src2; changed = true;
-      }
-    }
-
-    // x + 0 = x, 0 + x = x
-    if (insn->kind == HLIR_ADD && insn->dst && insn->src1 && insn->src2) {
-      if (insn->src2->id < orig_vals && is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) {
-        insn->kind = HLIR_CAST;
-        insn->src2 = NULL;
-        changed = true;
-      } else if (insn->src1->id < orig_vals && is_const[insn->src1->id] && const_vals[insn->src1->id] == 0) {
-        insn->kind = HLIR_CAST;
-        insn->src1 = insn->src2;
-        insn->src2 = NULL;
-        changed = true;
-      }
-    }
-    // x - 0 = x, 0 - x = -x, x - x = 0
-    else if (insn->kind == HLIR_SUB && insn->dst && insn->src1 && insn->src2) {
-      if (insn->src2->id < orig_vals && is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) {
-        insn->kind = HLIR_CAST;
-        insn->src2 = NULL;
-        changed = true;
-      } else if (insn->src1->id < orig_vals && is_const[insn->src1->id] && const_vals[insn->src1->id] == 0) {
-        insn->kind = HLIR_NEG;
-        insn->src1 = insn->src2;
-        insn->src2 = NULL;
-        changed = true;
-      } else if (insn->src1 == insn->src2) {
-        insn->kind = HLIR_ICONST;
-        insn->imm = 0;
-        insn->src1 = insn->src2 = NULL;
-        if (insn->dst->id < orig_vals) {
-          is_const[insn->dst->id] = true;
-          const_vals[insn->dst->id] = 0;
-        }
-        changed = true;
-      }
-    }
-    // x * 1 = x, 1 * x = x, x * 0 = 0, 0 * x = 0, x * -1 = -x, -1 * x = -x
-    else if (insn->kind == HLIR_MUL && insn->dst && insn->src1 && insn->src2) {
-      if (insn->src2->id < orig_vals && is_const[insn->src2->id] && const_vals[insn->src2->id] == 1) {
-        insn->kind = HLIR_CAST;
-        insn->src2 = NULL;
-        changed = true;
-      } else if (insn->src1->id < orig_vals && is_const[insn->src1->id] && const_vals[insn->src1->id] == 1) {
-        insn->kind = HLIR_CAST;
-        insn->src1 = insn->src2;
-        insn->src2 = NULL;
-        changed = true;
-      } else if (insn->src2->id < orig_vals && is_const[insn->src2->id] && const_vals[insn->src2->id] == -1) {
-        insn->kind = HLIR_NEG;
-        insn->src2 = NULL;
-        changed = true;
-      } else if (insn->src1->id < orig_vals && is_const[insn->src1->id] && const_vals[insn->src1->id] == -1) {
-        insn->kind = HLIR_NEG;
-        insn->src1 = insn->src2;
-        insn->src2 = NULL;
-        changed = true;
-      } else if ((insn->src2->id < orig_vals && is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) ||
-                 (insn->src1->id < orig_vals && is_const[insn->src1->id] && const_vals[insn->src1->id] == 0)) {
-        insn->kind = HLIR_ICONST;
-        insn->imm = 0;
-        insn->src1 = insn->src2 = NULL;
-        if (insn->dst->id < orig_vals) {
-          is_const[insn->dst->id] = true;
-          const_vals[insn->dst->id] = 0;
-        }
-        changed = true;
-      } else if (insn->src2->id < orig_vals && is_const[insn->src2->id] && (!insn->ty || !is_flonum(insn->ty))) {
-        // Strength reduction: multiply by power of 2 -> shift left
-        int64_t val = const_vals[insn->src2->id];
-        if (val > 0 && (val & (val - 1)) == 0) {
-          int shift = 0;
-          while ((1LL << shift) < val)
-            shift++;
-          if ((1LL << shift) == val) {
-            HLIRVal *shift_val = hlir_new_val(fn, insn->src2->ty);
-            HLIRInsn *imm_insn = hlir_new_insn(HLIR_ICONST);
-            imm_insn->dst = shift_val;
-            imm_insn->imm = shift;
-            hlir_insert_before(fn, insn, imm_insn);
-
-            insn->kind = HLIR_SHL;
-            insn->src2 = shift_val;
-            changed = true;
-          }
-        }
-      }
-    }
-    // x / 1 = x, x / x = 1, unsigned x / (2^k) = x >> k
-    else if (insn->kind == HLIR_DIV && insn->dst && insn->src1 && insn->src2) {
-      if (insn->src2->id < orig_vals && is_const[insn->src2->id] && const_vals[insn->src2->id] == 1) {
-        insn->kind = HLIR_CAST;
-        insn->src2 = NULL;
-        changed = true;
-      } else if (insn->src1 == insn->src2) {
-        insn->kind = HLIR_ICONST;
-        insn->imm = 1;
-        insn->src1 = insn->src2 = NULL;
-        if (insn->dst->id < orig_vals) {
-          is_const[insn->dst->id] = true;
-          const_vals[insn->dst->id] = 1;
-        }
-        changed = true;
-      } else if (insn->src2->id < orig_vals && is_const[insn->src2->id] &&
-                 insn->ty && insn->ty->is_unsigned) {
-        int64_t val = const_vals[insn->src2->id];
-        if (val > 0 && (val & (val - 1)) == 0) {
-          int shift = 0;
-          while ((1LL << shift) < val)
-            shift++;
-          if ((1LL << shift) == val) {
-            HLIRVal *shift_val = hlir_new_val(fn, insn->src2->ty);
-            HLIRInsn *imm_insn = hlir_new_insn(HLIR_ICONST);
-            imm_insn->dst = shift_val;
-            imm_insn->imm = shift;
-            hlir_insert_before(fn, insn, imm_insn);
-
-            insn->kind = HLIR_SHR;
-            insn->src2 = shift_val;
-            changed = true;
-          }
-        }
-      }
-    }
-    // unsigned x % (2^k) = x & (2^k - 1), x % 1 = 0
-    else if (insn->kind == HLIR_MOD && insn->dst && insn->src1 && insn->src2) {
-      if (insn->src2->id < orig_vals && is_const[insn->src2->id] && const_vals[insn->src2->id] == 1) {
-        insn->kind = HLIR_ICONST;
-        insn->imm = 0;
-        insn->src1 = insn->src2 = NULL;
-        if (insn->dst->id < orig_vals) {
-          is_const[insn->dst->id] = true;
-          const_vals[insn->dst->id] = 0;
-        }
-        changed = true;
-      } else if (insn->src2->id < orig_vals && is_const[insn->src2->id] &&
-                 insn->ty && insn->ty->is_unsigned) {
-        int64_t val = const_vals[insn->src2->id];
-        if (val > 0 && (val & (val - 1)) == 0) {
-          HLIRVal *mask_val = hlir_new_val(fn, insn->src2->ty);
-          HLIRInsn *imm_insn = hlir_new_insn(HLIR_ICONST);
-          imm_insn->dst = mask_val;
-          imm_insn->imm = val - 1;
-          hlir_insert_before(fn, insn, imm_insn);
-
-          insn->kind = HLIR_BITAND;
-          insn->src2 = mask_val;
+    // Double unary operations: -(-x) = x, ~(~x) = x, !(x cmp y) = x inv_cmp y
+    if (insn->dst && insn->src1) {
+      HLIRInsn *def = hlir_env_get_def(&env, insn->src1);
+      if (def) {
+        if ((insn->kind == HLIR_NEG && def->kind == HLIR_NEG) ||
+            (insn->kind == HLIR_BITNOT && def->kind == HLIR_BITNOT)) {
+          hlir_set_cast(insn, def->src1);
           changed = true;
+          continue;
+        } else if (insn->kind == HLIR_LOGNOT && hlir_is_relational(def->kind)) {
+          insn->kind = hlir_invert_cmp(def->kind);
+          insn->src1 = def->src1;
+          insn->src2 = def->src2;
+          changed = true;
+          continue;
         }
       }
     }
-    // x ^ x = 0, x & 0 = 0, x & x = x, x | 0 = x, x | x = x, x ^ 0 = x, x ^ -1 = ~x
-    else if (insn->kind == HLIR_BITXOR && insn->dst && insn->src1 && insn->src2) {
+
+    // Binary operations algebraic rules
+    if (!insn->dst || !insn->src1 || !insn->src2)
+      continue;
+
+    int64_t val;
+    int shift;
+
+    switch (insn->kind) {
+    case HLIR_ADD:
+      // x + 0 = x, 0 + x = x
+      if (hlir_env_is_const_val(&env, insn->src2, 0)) {
+        hlir_set_cast(insn, insn->src1);
+        changed = true;
+      } else if (hlir_env_is_const_val(&env, insn->src1, 0)) {
+        hlir_set_cast(insn, insn->src2);
+        changed = true;
+      }
+      break;
+
+    case HLIR_SUB:
+      // x - 0 = x, 0 - x = -x, x - x = 0
+      if (hlir_env_is_const_val(&env, insn->src2, 0)) {
+        hlir_set_cast(insn, insn->src1);
+        changed = true;
+      } else if (hlir_env_is_const_val(&env, insn->src1, 0)) {
+        hlir_set_unary(insn, HLIR_NEG, insn->src2);
+        changed = true;
+      } else if (insn->src1 == insn->src2) {
+        hlir_set_iconst(insn, 0);
+        hlir_env_set_const(&env, insn->dst, 0);
+        changed = true;
+      }
+      break;
+
+    case HLIR_MUL:
+      // x * 1 = x, 1 * x = x
+      if (hlir_env_is_const_val(&env, insn->src2, 1)) {
+        hlir_set_cast(insn, insn->src1);
+        changed = true;
+      } else if (hlir_env_is_const_val(&env, insn->src1, 1)) {
+        hlir_set_cast(insn, insn->src2);
+        changed = true;
+      }
+      // x * -1 = -x, -1 * x = -x
+      else if (hlir_env_is_const_val(&env, insn->src2, -1)) {
+        hlir_set_unary(insn, HLIR_NEG, insn->src1);
+        changed = true;
+      } else if (hlir_env_is_const_val(&env, insn->src1, -1)) {
+        hlir_set_unary(insn, HLIR_NEG, insn->src2);
+        changed = true;
+      }
+      // x * 0 = 0, 0 * x = 0
+      else if (hlir_env_is_const_val(&env, insn->src2, 0) ||
+               hlir_env_is_const_val(&env, insn->src1, 0)) {
+        hlir_set_iconst(insn, 0);
+        hlir_env_set_const(&env, insn->dst, 0);
+        changed = true;
+      }
+      // Strength reduction: x * 2^k = x << k (integer)
+      else if (hlir_env_get_const(&env, insn->src2, &val) && (!insn->ty || !is_flonum(insn->ty)) &&
+               hlir_is_power_of_two(val, &shift)) {
+        HLIRVal *shift_val = hlir_new_val(fn, insn->src2->ty);
+        HLIRInsn *imm_insn = hlir_new_insn(HLIR_ICONST);
+        imm_insn->dst = shift_val;
+        imm_insn->imm = shift;
+        hlir_insert_before(fn, insn, imm_insn);
+
+        insn->kind = HLIR_SHL;
+        insn->src2 = shift_val;
+        changed = true;
+      }
+      break;
+
+    case HLIR_DIV:
+      // x / 1 = x, x / x = 1, unsigned x / 2^k = x >> k
+      if (hlir_env_is_const_val(&env, insn->src2, 1)) {
+        hlir_set_cast(insn, insn->src1);
+        changed = true;
+      } else if (insn->src1 == insn->src2) {
+        hlir_set_iconst(insn, 1);
+        hlir_env_set_const(&env, insn->dst, 1);
+        changed = true;
+      } else if (insn->ty && insn->ty->is_unsigned &&
+                 hlir_env_get_const(&env, insn->src2, &val) &&
+                 hlir_is_power_of_two(val, &shift)) {
+        HLIRVal *shift_val = hlir_new_val(fn, insn->src2->ty);
+        HLIRInsn *imm_insn = hlir_new_insn(HLIR_ICONST);
+        imm_insn->dst = shift_val;
+        imm_insn->imm = shift;
+        hlir_insert_before(fn, insn, imm_insn);
+
+        insn->kind = HLIR_SHR;
+        insn->src2 = shift_val;
+        changed = true;
+      }
+      break;
+
+    case HLIR_MOD:
+      // x % 1 = 0, unsigned x % 2^k = x & (2^k - 1)
+      if (hlir_env_is_const_val(&env, insn->src2, 1)) {
+        hlir_set_iconst(insn, 0);
+        hlir_env_set_const(&env, insn->dst, 0);
+        changed = true;
+      } else if (insn->ty && insn->ty->is_unsigned &&
+                 hlir_env_get_const(&env, insn->src2, &val) &&
+                 hlir_is_power_of_two(val, NULL)) {
+        HLIRVal *mask_val = hlir_new_val(fn, insn->src2->ty);
+        HLIRInsn *imm_insn = hlir_new_insn(HLIR_ICONST);
+        imm_insn->dst = mask_val;
+        imm_insn->imm = val - 1;
+        hlir_insert_before(fn, insn, imm_insn);
+
+        insn->kind = HLIR_BITAND;
+        insn->src2 = mask_val;
+        changed = true;
+      }
+      break;
+
+    case HLIR_BITXOR:
+      // x ^ x = 0, x ^ 0 = x, 0 ^ x = x, x ^ -1 = ~x, -1 ^ x = ~x
       if (insn->src1 == insn->src2) {
-        insn->kind = HLIR_ICONST;
-        insn->imm = 0;
-        insn->src1 = insn->src2 = NULL;
-        if (insn->dst->id < orig_vals) {
-          is_const[insn->dst->id] = true;
-          const_vals[insn->dst->id] = 0;
-        }
+        hlir_set_iconst(insn, 0);
+        hlir_env_set_const(&env, insn->dst, 0);
         changed = true;
-      } else if (insn->src2->id < orig_vals && is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) {
-        insn->kind = HLIR_CAST;
-        insn->src2 = NULL;
+      } else if (hlir_env_is_const_val(&env, insn->src2, 0)) {
+        hlir_set_cast(insn, insn->src1);
         changed = true;
-      } else if (insn->src1->id < orig_vals && is_const[insn->src1->id] && const_vals[insn->src1->id] == 0) {
-        insn->kind = HLIR_CAST;
-        insn->src1 = insn->src2;
-        insn->src2 = NULL;
+      } else if (hlir_env_is_const_val(&env, insn->src1, 0)) {
+        hlir_set_cast(insn, insn->src2);
         changed = true;
-      } else if (insn->src2->id < orig_vals && is_const[insn->src2->id] && const_vals[insn->src2->id] == -1) {
-        insn->kind = HLIR_BITNOT;
-        insn->src2 = NULL;
+      } else if (hlir_env_is_const_val(&env, insn->src2, -1)) {
+        hlir_set_unary(insn, HLIR_BITNOT, insn->src1);
         changed = true;
-      } else if (insn->src1->id < orig_vals && is_const[insn->src1->id] && const_vals[insn->src1->id] == -1) {
-        insn->kind = HLIR_BITNOT;
-        insn->src1 = insn->src2;
-        insn->src2 = NULL;
+      } else if (hlir_env_is_const_val(&env, insn->src1, -1)) {
+        hlir_set_unary(insn, HLIR_BITNOT, insn->src2);
         changed = true;
       }
-    } else if (insn->kind == HLIR_BITAND && insn->dst && insn->src1 && insn->src2) {
+      break;
+
+    case HLIR_BITAND:
+      // x & x = x, x & 0 = 0, 0 & x = 0, x & -1 = x, -1 & x = x
       if (insn->src1 == insn->src2) {
-        insn->kind = HLIR_CAST;
-        insn->src2 = NULL;
+        hlir_set_cast(insn, insn->src1);
         changed = true;
-      } else if ((insn->src2->id < orig_vals && is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) ||
-                 (insn->src1->id < orig_vals && is_const[insn->src1->id] && const_vals[insn->src1->id] == 0)) {
-        insn->kind = HLIR_ICONST;
-        insn->imm = 0;
-        insn->src1 = insn->src2 = NULL;
-        if (insn->dst->id < orig_vals) {
-          is_const[insn->dst->id] = true;
-          const_vals[insn->dst->id] = 0;
-        }
+      } else if (hlir_env_is_const_val(&env, insn->src2, 0) ||
+                 hlir_env_is_const_val(&env, insn->src1, 0)) {
+        hlir_set_iconst(insn, 0);
+        hlir_env_set_const(&env, insn->dst, 0);
         changed = true;
-      } else if (insn->src2->id < orig_vals && is_const[insn->src2->id] && const_vals[insn->src2->id] == -1) {
-        insn->kind = HLIR_CAST;
-        insn->src2 = NULL;
+      } else if (hlir_env_is_const_val(&env, insn->src2, -1)) {
+        hlir_set_cast(insn, insn->src1);
         changed = true;
-      } else if (insn->src1->id < orig_vals && is_const[insn->src1->id] && const_vals[insn->src1->id] == -1) {
-        insn->kind = HLIR_CAST;
-        insn->src1 = insn->src2;
-        insn->src2 = NULL;
+      } else if (hlir_env_is_const_val(&env, insn->src1, -1)) {
+        hlir_set_cast(insn, insn->src2);
         changed = true;
       }
-    } else if (insn->kind == HLIR_BITOR && insn->dst && insn->src1 && insn->src2) {
+      break;
+
+    case HLIR_BITOR:
+      // x | x = x, x | 0 = x, 0 | x = x, x | -1 = -1, -1 | x = -1
       if (insn->src1 == insn->src2) {
-        insn->kind = HLIR_CAST;
-        insn->src2 = NULL;
+        hlir_set_cast(insn, insn->src1);
         changed = true;
-      } else if (insn->src2->id < orig_vals && is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) {
-        insn->kind = HLIR_CAST;
-        insn->src2 = NULL;
+      } else if (hlir_env_is_const_val(&env, insn->src2, 0)) {
+        hlir_set_cast(insn, insn->src1);
         changed = true;
-      } else if (insn->src1->id < orig_vals && is_const[insn->src1->id] && const_vals[insn->src1->id] == 0) {
-        insn->kind = HLIR_CAST;
-        insn->src1 = insn->src2;
-        insn->src2 = NULL;
+      } else if (hlir_env_is_const_val(&env, insn->src1, 0)) {
+        hlir_set_cast(insn, insn->src2);
         changed = true;
-      } else if ((insn->src2->id < orig_vals && is_const[insn->src2->id] && const_vals[insn->src2->id] == -1) ||
-                 (insn->src1->id < orig_vals && is_const[insn->src1->id] && const_vals[insn->src1->id] == -1)) {
-        insn->kind = HLIR_ICONST;
-        insn->imm = -1;
-        insn->src1 = insn->src2 = NULL;
-        if (insn->dst->id < orig_vals) {
-          is_const[insn->dst->id] = true;
-          const_vals[insn->dst->id] = -1;
-        }
+      } else if (hlir_env_is_const_val(&env, insn->src2, -1) ||
+                 hlir_env_is_const_val(&env, insn->src1, -1)) {
+        hlir_set_iconst(insn, -1);
+        hlir_env_set_const(&env, insn->dst, -1);
         changed = true;
       }
-    } else if ((insn->kind == HLIR_SHL || insn->kind == HLIR_SHR) && insn->dst && insn->src1 && insn->src2) {
-      if (insn->src2->id < orig_vals && is_const[insn->src2->id] && const_vals[insn->src2->id] == 0) {
-        insn->kind = HLIR_CAST;
-        insn->src2 = NULL;
+      break;
+
+    case HLIR_SHL:
+    case HLIR_SHR:
+      // x << 0 = x, x >> 0 = x
+      if (hlir_env_is_const_val(&env, insn->src2, 0)) {
+        hlir_set_cast(insn, insn->src1);
         changed = true;
       }
-    } else if ((insn->kind == HLIR_CMP_EQ || insn->kind == HLIR_CMP_LE || insn->kind == HLIR_CMP_GE) &&
-               insn->dst && insn->src1 && insn->src2 && insn->src1 == insn->src2 &&
-               (!insn->src1->ty || !is_flonum(insn->src1->ty))) {
-      insn->kind = HLIR_ICONST;
-      insn->imm = 1;
-      insn->src1 = insn->src2 = NULL;
-      if (insn->dst->id < orig_vals) {
-        is_const[insn->dst->id] = true;
-        const_vals[insn->dst->id] = 1;
+      break;
+
+    case HLIR_CMP_EQ:
+    case HLIR_CMP_LE:
+    case HLIR_CMP_GE:
+      // x == x -> 1, x <= x -> 1, x >= x -> 1 (non-float)
+      if (insn->src1 == insn->src2 && (!insn->src1->ty || !is_flonum(insn->src1->ty))) {
+        hlir_set_iconst(insn, 1);
+        hlir_env_set_const(&env, insn->dst, 1);
+        changed = true;
       }
-      changed = true;
-    } else if ((insn->kind == HLIR_CMP_NE || insn->kind == HLIR_CMP_LT || insn->kind == HLIR_CMP_GT) &&
-               insn->dst && insn->src1 && insn->src2 && insn->src1 == insn->src2 &&
-               (!insn->src1->ty || !is_flonum(insn->src1->ty))) {
-      insn->kind = HLIR_ICONST;
-      insn->imm = 0;
-      insn->src1 = insn->src2 = NULL;
-      if (insn->dst->id < orig_vals) {
-        is_const[insn->dst->id] = true;
-        const_vals[insn->dst->id] = 0;
+      break;
+
+    case HLIR_CMP_NE:
+    case HLIR_CMP_LT:
+    case HLIR_CMP_GT:
+      // x != x -> 0, x < x -> 0, x > x -> 0 (non-float)
+      if (insn->src1 == insn->src2 && (!insn->src1->ty || !is_flonum(insn->src1->ty))) {
+        hlir_set_iconst(insn, 0);
+        hlir_env_set_const(&env, insn->dst, 0);
+        changed = true;
       }
-      changed = true;
+      break;
+
+    default:
+      break;
     }
   }
 
-  free(const_vals);
-  free(is_const);
-  free(defs);
+  hlir_env_free(&env);
   return changed;
 }
 
-// 3. HLIR Copy Propagation Pass
+// Pass 3: Copy Propagation
+static HLIRVal *hlir_resolve_alias(HLIRVal **aliases, HLIRVal *val, int num_vals) {
+  if (!val) return NULL;
+  HLIRVal *root = val;
+  while (root && root->id < num_vals && aliases[root->id])
+    root = aliases[root->id];
+  return root;
+}
+
 bool hlir_opt_copy_prop(HLIRFunction *fn) {
   if (!fn || fn->num_vals == 0)
     return false;
@@ -473,9 +611,7 @@ bool hlir_opt_copy_prop(HLIRFunction *fn) {
   HLIRVal **aliases = calloc(fn->num_vals, sizeof(HLIRVal *));
 
   for (HLIRInsn *insn = fn->head; insn; insn = insn->next) {
-    if (insn->kind == HLIR_LABEL || insn->kind == HLIR_JMP ||
-        insn->kind == HLIR_JMP_IF_ZERO || insn->kind == HLIR_JMP_IF_NZ ||
-        insn->kind == HLIR_CALL) {
+    if (hlir_is_bb_barrier(insn->kind)) {
       memset(aliases, 0, fn->num_vals * sizeof(HLIRVal *));
       continue;
     }
@@ -502,11 +638,11 @@ bool hlir_opt_copy_prop(HLIRFunction *fn) {
     if (insn->kind == HLIR_CAST && insn->dst && insn->src1) {
       Type *t1 = insn->dst->ty;
       Type *t2 = insn->src1->ty;
-      if (t1 && t2 && t1->size == t2->size && is_flonum(t1) == is_flonum(t2) && t1->is_unsigned == t2->is_unsigned) {
-        HLIRVal *root = insn->src1;
-        while (root->id < fn->num_vals && aliases[root->id])
-          root = aliases[root->id];
-        if (root != insn->dst && insn->dst->id < fn->num_vals)
+      if (t1 && t2 && t1->size == t2->size &&
+          is_flonum(t1) == is_flonum(t2) &&
+          t1->is_unsigned == t2->is_unsigned) {
+        HLIRVal *root = hlir_resolve_alias(aliases, insn->src1, fn->num_vals);
+        if (root && root != insn->dst && insn->dst->id < fn->num_vals)
           aliases[insn->dst->id] = root;
       }
     }
@@ -516,7 +652,34 @@ bool hlir_opt_copy_prop(HLIRFunction *fn) {
   return changed;
 }
 
-// 4. HLIR Local Common Subexpression Elimination (CSE)
+// Pass 4: Local Common Subexpression Elimination (CSE)
+static bool hlir_insn_match_cse(HLIRInsn *a, HLIRInsn *b) {
+  if (a->kind != b->kind)
+    return false;
+
+  if (hlir_is_relational(a->kind) || a->kind == HLIR_ADD || a->kind == HLIR_SUB ||
+      a->kind == HLIR_MUL || a->kind == HLIR_DIV || a->kind == HLIR_MOD ||
+      a->kind == HLIR_BITAND || a->kind == HLIR_BITOR || a->kind == HLIR_BITXOR ||
+      a->kind == HLIR_SHL || a->kind == HLIR_SHR) {
+    if (a->src1 == b->src1 && a->src2 == b->src2)
+      return true;
+    if (hlir_is_commutative(a->kind) && a->src1 == b->src2 && a->src2 == b->src1)
+      return true;
+    return false;
+  }
+
+  if (a->kind == HLIR_NEG || a->kind == HLIR_BITNOT || a->kind == HLIR_LOGNOT)
+    return a->src1 == b->src1;
+
+  if (a->kind == HLIR_ADDR_VAR)
+    return a->var == b->var;
+
+  if (a->kind == HLIR_ICONST)
+    return a->imm == b->imm;
+
+  return false;
+}
+
 bool hlir_opt_local_cse(HLIRFunction *fn) {
   if (!fn || !fn->head)
     return false;
@@ -524,59 +687,16 @@ bool hlir_opt_local_cse(HLIRFunction *fn) {
   bool changed = false;
 
   for (HLIRInsn *insn = fn->head; insn; insn = insn->next) {
-    if (!insn->dst || insn->kind == HLIR_NOP || insn->kind == HLIR_CAST)
-      continue;
-
-    bool is_arith = (insn->kind == HLIR_ADD || insn->kind == HLIR_SUB ||
-                     insn->kind == HLIR_MUL || insn->kind == HLIR_BITAND ||
-                     insn->kind == HLIR_BITOR || insn->kind == HLIR_BITXOR ||
-                     insn->kind == HLIR_SHL || insn->kind == HLIR_SHR ||
-                     insn->kind == HLIR_CMP_EQ || insn->kind == HLIR_CMP_NE ||
-                     insn->kind == HLIR_CMP_LT || insn->kind == HLIR_CMP_LE ||
-                     insn->kind == HLIR_CMP_GT || insn->kind == HLIR_CMP_GE);
-    bool is_unary = (insn->kind == HLIR_NEG || insn->kind == HLIR_BITNOT || insn->kind == HLIR_LOGNOT);
-    bool is_addr = (insn->kind == HLIR_ADDR_VAR);
-    bool is_iconst = (insn->kind == HLIR_ICONST);
-
-    if (!is_arith && !is_unary && !is_addr && !is_iconst)
+    if (!insn->dst || !hlir_is_pure(insn->kind) || insn->kind == HLIR_CAST)
       continue;
 
     for (HLIRInsn *sub = insn->next; sub; sub = sub->next) {
-      if (sub->kind == HLIR_LABEL || sub->kind == HLIR_JMP ||
-          sub->kind == HLIR_JMP_IF_ZERO || sub->kind == HLIR_JMP_IF_NZ ||
-          sub->kind == HLIR_CALL || sub->kind == HLIR_RET ||
-          sub->kind == HLIR_ASM || sub->kind == HLIR_CAS || sub->kind == HLIR_EXCH)
+      if (hlir_is_bb_barrier(sub->kind))
         break;
 
-      if (sub->kind == insn->kind && sub->dst) {
-        bool match = false;
-        if (is_arith) {
-          if (sub->src1 == insn->src1 && sub->src2 == insn->src2)
-            match = true;
-          else if ((insn->kind == HLIR_ADD || insn->kind == HLIR_MUL ||
-                    insn->kind == HLIR_BITAND || insn->kind == HLIR_BITOR ||
-                    insn->kind == HLIR_BITXOR || insn->kind == HLIR_CMP_EQ ||
-                    insn->kind == HLIR_CMP_NE) &&
-                   sub->src1 == insn->src2 && sub->src2 == insn->src1)
-            match = true;
-        } else if (is_unary) {
-          if (sub->src1 == insn->src1)
-            match = true;
-        } else if (is_addr) {
-          if (sub->var == insn->var)
-            match = true;
-        } else if (is_iconst) {
-          if (sub->imm == insn->imm)
-            match = true;
-        }
-
-        if (match) {
-          sub->kind = HLIR_CAST;
-          sub->src1 = insn->dst;
-          sub->src2 = NULL;
-          sub->src3 = NULL;
-          changed = true;
-        }
+      if (sub->dst && hlir_insn_match_cse(insn, sub)) {
+        hlir_set_cast(sub, insn->dst);
+        changed = true;
       }
     }
   }
@@ -584,7 +704,7 @@ bool hlir_opt_local_cse(HLIRFunction *fn) {
   return changed;
 }
 
-// 5. HLIR Redundant Load-After-Store & Dead Store Elimination
+// Pass 5: Redundant Load-After-Store & Dead Store Elimination
 bool hlir_opt_load_store(HLIRFunction *fn) {
   if (!fn || !fn->head)
     return false;
@@ -598,10 +718,7 @@ bool hlir_opt_load_store(HLIRFunction *fn) {
       HLIRVal *val = insn->src1;
 
       for (HLIRInsn *cur = insn->next; cur; cur = cur->next) {
-        if (cur->kind == HLIR_LABEL || cur->kind == HLIR_JMP ||
-            cur->kind == HLIR_JMP_IF_ZERO || cur->kind == HLIR_JMP_IF_NZ ||
-            cur->kind == HLIR_CALL || cur->kind == HLIR_RET ||
-            cur->kind == HLIR_ASM || cur->kind == HLIR_CAS || cur->kind == HLIR_EXCH ||
+        if (hlir_is_bb_barrier(cur->kind) ||
             cur->kind == HLIR_STORE_PTR || cur->kind == HLIR_MEMCPY || cur->kind == HLIR_MEMZERO)
           break;
 
@@ -612,9 +729,7 @@ bool hlir_opt_load_store(HLIRFunction *fn) {
           break;
 
         if (cur->kind == HLIR_LOAD_VAR && cur->var == var && cur->dst) {
-          cur->kind = HLIR_CAST;
-          cur->src1 = val;
-          cur->src2 = NULL;
+          hlir_set_cast(cur, val);
           changed = true;
           break;
         }
@@ -626,12 +741,8 @@ bool hlir_opt_load_store(HLIRFunction *fn) {
       Obj *var = insn->var;
 
       for (HLIRInsn *cur = insn->next; cur; cur = cur->next) {
-        if (cur->kind == HLIR_LABEL || cur->kind == HLIR_JMP ||
-            cur->kind == HLIR_JMP_IF_ZERO || cur->kind == HLIR_JMP_IF_NZ ||
-            cur->kind == HLIR_CALL || cur->kind == HLIR_RET ||
-            cur->kind == HLIR_ASM || cur->kind == HLIR_CAS || cur->kind == HLIR_EXCH ||
-            cur->kind == HLIR_LOAD_PTR || cur->kind == HLIR_STORE_PTR ||
-            cur->kind == HLIR_MEMCPY || cur->kind == HLIR_MEMZERO)
+        if (hlir_is_bb_barrier(cur->kind) || cur->kind == HLIR_LOAD_PTR ||
+            cur->kind == HLIR_STORE_PTR || cur->kind == HLIR_MEMCPY || cur->kind == HLIR_MEMZERO)
           break;
 
         if (cur->kind == HLIR_ADDR_VAR && cur->var == var)
@@ -655,90 +766,17 @@ bool hlir_opt_load_store(HLIRFunction *fn) {
   return changed;
 }
 
-// 6. HLIR Dead Branch Elimination & Control Flow Simplification
+// Pass 6: Dead Branch Elimination & Control Flow Simplification
 bool hlir_opt_control_flow(HLIRFunction *fn) {
   if (!fn || !fn->head)
     return false;
 
   bool changed = false;
-  int orig_vals = fn->num_vals ? fn->num_vals : 1;
-  int64_t *const_vals = calloc(orig_vals, sizeof(int64_t));
-  bool *is_const = calloc(orig_vals, sizeof(bool));
-  HLIRInsn **defs = calloc(orig_vals, sizeof(HLIRInsn *));
+  HLIREnv env;
+  hlir_env_init(&env, fn->num_vals, true);
 
   for (HLIRInsn *insn = fn->head; insn; insn = insn->next) {
-    if (insn->kind == HLIR_LABEL || insn->kind == HLIR_JMP || insn->kind == HLIR_CALL) {
-      memset(is_const, 0, orig_vals * sizeof(bool));
-      memset(defs, 0, orig_vals * sizeof(HLIRInsn *));
-      continue;
-    }
-
-    if (insn->dst && insn->dst->id < orig_vals) {
-      defs[insn->dst->id] = insn;
-    }
-
-    if (insn->kind == HLIR_ICONST && insn->dst && insn->dst->id < orig_vals) {
-      is_const[insn->dst->id] = true;
-      const_vals[insn->dst->id] = insn->imm;
-      continue;
-    }
-
-    if (insn->kind == HLIR_JMP_IF_ZERO && insn->src1 && insn->src1->id < orig_vals && is_const[insn->src1->id]) {
-      if (const_vals[insn->src1->id] == 0) {
-        insn->kind = HLIR_JMP;
-        insn->src1 = NULL;
-        changed = true;
-      } else {
-        HLIRInsn *del = insn;
-        insn = insn->prev ? insn->prev : fn->head;
-        hlir_remove_insn(fn, del);
-        changed = true;
-        if (!insn) break;
-        continue;
-      }
-    }
-
-    if (insn->kind == HLIR_JMP_IF_NZ && insn->src1 && insn->src1->id < orig_vals && is_const[insn->src1->id]) {
-      if (const_vals[insn->src1->id] != 0) {
-        insn->kind = HLIR_JMP;
-        insn->src1 = NULL;
-        changed = true;
-      } else {
-        HLIRInsn *del = insn;
-        insn = insn->prev ? insn->prev : fn->head;
-        hlir_remove_insn(fn, del);
-        changed = true;
-        if (!insn) break;
-        continue;
-      }
-    }
-
-    // Conditional branch simplification for comparison with 0
-    if (insn->kind == HLIR_JMP_IF_ZERO && insn->src1 && insn->src1->id < orig_vals && defs[insn->src1->id]) {
-      HLIRInsn *cmp = defs[insn->src1->id];
-      if (cmp->kind == HLIR_CMP_EQ && cmp->src1 && cmp->src2 && cmp->src2->id < orig_vals && is_const[cmp->src2->id] && const_vals[cmp->src2->id] == 0) {
-        insn->kind = HLIR_JMP_IF_NZ;
-        insn->src1 = cmp->src1;
-        changed = true;
-      } else if (cmp->kind == HLIR_CMP_NE && cmp->src1 && cmp->src2 && cmp->src2->id < orig_vals && is_const[cmp->src2->id] && const_vals[cmp->src2->id] == 0) {
-        insn->kind = HLIR_JMP_IF_ZERO;
-        insn->src1 = cmp->src1;
-        changed = true;
-      }
-    } else if (insn->kind == HLIR_JMP_IF_NZ && insn->src1 && insn->src1->id < orig_vals && defs[insn->src1->id]) {
-      HLIRInsn *cmp = defs[insn->src1->id];
-      if (cmp->kind == HLIR_CMP_EQ && cmp->src1 && cmp->src2 && cmp->src2->id < orig_vals && is_const[cmp->src2->id] && const_vals[cmp->src2->id] == 0) {
-        insn->kind = HLIR_JMP_IF_ZERO;
-        insn->src1 = cmp->src1;
-        changed = true;
-      } else if (cmp->kind == HLIR_CMP_NE && cmp->src1 && cmp->src2 && cmp->src2->id < orig_vals && is_const[cmp->src2->id] && const_vals[cmp->src2->id] == 0) {
-        insn->kind = HLIR_JMP_IF_NZ;
-        insn->src1 = cmp->src1;
-        changed = true;
-      }
-    }
-
-    // Eliminate jump to immediate next label
+    // 1. Eliminate jump to immediate next label
     if (insn->kind == HLIR_JMP && insn->label) {
       HLIRInsn *nxt = insn->next;
       while (nxt && nxt->kind == HLIR_NOP)
@@ -748,19 +786,77 @@ bool hlir_opt_control_flow(HLIRFunction *fn) {
         insn = insn->prev ? insn->prev : fn->head;
         hlir_remove_insn(fn, del);
         changed = true;
+        hlir_env_reset(&env);
         if (!insn) break;
         continue;
       }
     }
+
+    if (insn->kind == HLIR_LABEL || insn->kind == HLIR_JMP || insn->kind == HLIR_CALL) {
+      hlir_env_reset(&env);
+      continue;
+    }
+
+    if (insn->dst)
+      hlir_env_set_def(&env, insn->dst, insn);
+
+    if (insn->kind == HLIR_ICONST && insn->dst) {
+      hlir_env_set_const(&env, insn->dst, insn->imm);
+      continue;
+    }
+
+    // 2. Branch on constant values
+    int64_t c;
+    if (insn->kind == HLIR_JMP_IF_ZERO && hlir_env_get_const(&env, insn->src1, &c)) {
+      if (c == 0) {
+        insn->kind = HLIR_JMP;
+        insn->src1 = NULL;
+        changed = true;
+      } else {
+        HLIRInsn *del = insn;
+        insn = insn->prev ? insn->prev : fn->head;
+        hlir_remove_insn(fn, del);
+        changed = true;
+        if (!insn) break;
+        continue;
+      }
+    } else if (insn->kind == HLIR_JMP_IF_NZ && hlir_env_get_const(&env, insn->src1, &c)) {
+      if (c != 0) {
+        insn->kind = HLIR_JMP;
+        insn->src1 = NULL;
+        changed = true;
+      } else {
+        HLIRInsn *del = insn;
+        insn = insn->prev ? insn->prev : fn->head;
+        hlir_remove_insn(fn, del);
+        changed = true;
+        if (!insn) break;
+        continue;
+      }
+    }
+
+    // 3. Conditional branch simplification for comparison with 0
+    if ((insn->kind == HLIR_JMP_IF_ZERO || insn->kind == HLIR_JMP_IF_NZ) && insn->src1) {
+      HLIRInsn *cmp = hlir_env_get_def(&env, insn->src1);
+      if (cmp && cmp->src1 && hlir_env_is_const_val(&env, cmp->src2, 0)) {
+        if (cmp->kind == HLIR_CMP_EQ) {
+          insn->kind = (insn->kind == HLIR_JMP_IF_ZERO) ? HLIR_JMP_IF_NZ : HLIR_JMP_IF_ZERO;
+          insn->src1 = cmp->src1;
+          changed = true;
+        } else if (cmp->kind == HLIR_CMP_NE) {
+          insn->kind = (insn->kind == HLIR_JMP_IF_ZERO) ? HLIR_JMP_IF_ZERO : HLIR_JMP_IF_NZ;
+          insn->src1 = cmp->src1;
+          changed = true;
+        }
+      }
+    }
   }
 
-  free(const_vals);
-  free(is_const);
-  free(defs);
+  hlir_env_free(&env);
   return changed;
 }
 
-// 7. HLIR Dead Value Elimination (Remove unused values)
+// Pass 7: Dead Value Elimination (DCE)
 bool hlir_opt_dce(HLIRFunction *fn) {
   if (!fn || fn->num_vals == 0)
     return false;
@@ -782,39 +878,7 @@ bool hlir_opt_dce(HLIRFunction *fn) {
     HLIRInsn *next = insn->next;
 
     if (insn->dst && insn->dst->id < fn->num_vals && !used[insn->dst->id]) {
-      bool can_remove = false;
-      switch (insn->kind) {
-      case HLIR_ICONST:
-      case HLIR_FCONST:
-      case HLIR_SCONST:
-      case HLIR_ADDR_VAR:
-      case HLIR_CAST:
-      case HLIR_ADD:
-      case HLIR_SUB:
-      case HLIR_MUL:
-      case HLIR_DIV:
-      case HLIR_MOD:
-      case HLIR_BITAND:
-      case HLIR_BITOR:
-      case HLIR_BITXOR:
-      case HLIR_SHL:
-      case HLIR_SHR:
-      case HLIR_NEG:
-      case HLIR_BITNOT:
-      case HLIR_LOGNOT:
-      case HLIR_CMP_EQ:
-      case HLIR_CMP_NE:
-      case HLIR_CMP_LT:
-      case HLIR_CMP_LE:
-      case HLIR_CMP_GT:
-      case HLIR_CMP_GE:
-        can_remove = true;
-        break;
-      default:
-        break;
-      }
-
-      if (can_remove) {
+      if (hlir_is_pure(insn->kind)) {
         hlir_remove_insn(fn, insn);
         changed = true;
       }
@@ -827,7 +891,7 @@ bool hlir_opt_dce(HLIRFunction *fn) {
   return changed;
 }
 
-// 8. HLIR Dead Code / Unreachable Code Elimination
+// Pass 8: Dead / Unreachable Code Elimination
 bool hlir_opt_dead_code(HLIRFunction *fn) {
   if (!fn || !fn->head)
     return false;
@@ -847,7 +911,7 @@ bool hlir_opt_dead_code(HLIRFunction *fn) {
   return changed;
 }
 
-// 9. HLIR Function Inlining Pass
+// Pass 9: Function Inlining
 bool hlir_opt_inlining(HLIRProg *prog) {
   if (!prog || prog->num_fns == 0)
     return false;
@@ -874,10 +938,7 @@ bool hlir_opt_inlining(HLIRProg *prog) {
         }
       }
 
-      if (!callee || callee == caller)
-        continue;
-
-      if (callee->num_insns > 20)
+      if (!callee || callee == caller || callee->num_insns > 20)
         continue;
 
       int ret_count = 0;
@@ -952,7 +1013,10 @@ bool hlir_opt_inlining(HLIRProg *prog) {
   return changed;
 }
 
-// HLIR Optimization Driver
+// ==============================================================================
+// 6. Fixed-Point Optimization Pipeline Driver
+// ==============================================================================
+
 void hlir_optimize(HLIRProg *prog, int opt_level) {
   if (!prog)
     return;
@@ -965,12 +1029,49 @@ void hlir_optimize(HLIRProg *prog, int opt_level) {
     hlir_opt_inlining(prog);
   }
 
-  for (int i = 0; i < prog->num_fns; i++) {
+  for (int i = 0; i < prog->num_fns; i++)
+  {
     HLIRFunction *fn = prog->fns[i];
     if (!fn) continue;
 
-    for (int iter = 0; iter < max_iter; iter++) {
-      bool changed = false;
+    bool changed = true;
+
+
+    // On higher performance machines, we can just do this indefinitely (although might be worth say stop at a certain number of iterations)
+
+    const int total_max_iters = 500; // if we get this many iterations and are still changing, we are probably in some loop
+    int iterCount = 0;
+    do
+    {
+      changed = false;
+
+      if (iterCount == total_max_iters)
+        break;
+
+      iterCount++;
+
+      if (pass_hlir_const_fold.enabled)
+        changed |= hlir_opt_const_fold(fn);
+      if (pass_hlir_algebraic.enabled)
+        changed |= hlir_opt_algebraic(fn);
+      if (pass_hlir_copy_prop.enabled)
+        changed |= hlir_opt_copy_prop(fn);
+      if (pass_hlir_local_cse.enabled)
+        changed |= hlir_opt_local_cse(fn);
+      if (pass_hlir_load_store.enabled)
+        changed |= hlir_opt_load_store(fn);
+      if (pass_hlir_control_flow.enabled)
+        changed |= hlir_opt_control_flow(fn);
+      if (pass_hlir_dead_code.enabled) {
+        changed |= hlir_opt_dead_code(fn);
+        changed |= hlir_opt_dce(fn);
+      }
+    } while (changed);
+
+
+    /*
+    //for (int iter = 0; iter < max_iter; iter++)
+    {
 
       if (pass_hlir_const_fold.enabled)
         changed |= hlir_opt_const_fold(fn);
@@ -992,5 +1093,12 @@ void hlir_optimize(HLIRProg *prog, int opt_level) {
       if (!changed)
         break;
     }
+
+    if (changed) {
+      printf("May be worth increasing optimization iteration count for function %s\n", fn->name);
+      fflush(stdout);
+    }
+    */
+
   }
 }

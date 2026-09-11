@@ -6,7 +6,7 @@
 // Analysis Infrastructure: CFG, Dominator Tree, Liveness
 // ============================================================================
 
-int opt_max_passes = 7;
+int opt_max_passes = 2;
 
 void ir_opt_set_max_passes(int max_passes) {
   if (max_passes > 0)
@@ -174,7 +174,7 @@ IRCFG *ir_build_cfg(IRFunction *fn) {
     queue[qtail++] = cfg->entry_block;
 
     while (qhead < qtail) {
-      IRBasicBlock *b = queue[qhead++];
+      const IRBasicBlock *b = queue[qhead++];
       for (int s = 0; s < b->num_succs; s++) {
         IRBasicBlock *succ = b->succs[s];
         if (!succ->reachable) {
@@ -210,7 +210,7 @@ void ir_dump_cfg(FILE *out, IRCFG *cfg) {
 
   fprintf(out, "CFG for %s (%d blocks):\n", cfg->fn ? cfg->fn->name : "(anon)", cfg->num_blocks);
   for (int i = 0; i < cfg->num_blocks; i++) {
-    IRBasicBlock *bb = cfg->blocks[i];
+    const IRBasicBlock *bb = cfg->blocks[i];
     fprintf(out, "  Block BB%d [label=%s, reachable=%s]:\n",
             bb->id, bb->label ? bb->label : "none", bb->reachable ? "true" : "false");
     fprintf(out, "    Preds: ");
@@ -251,7 +251,7 @@ IRDomTree *ir_build_dom_tree(IRCFG *cfg) {
   while (changed) {
     changed = false;
     for (int i = 0; i < cfg->num_blocks; i++) {
-      IRBasicBlock *b = cfg->blocks[i];
+      const IRBasicBlock *b = cfg->blocks[i];
       if (b == cfg->entry_block || !b->reachable)
         continue;
 
@@ -299,7 +299,7 @@ IRDomTree *ir_build_dom_tree(IRCFG *cfg) {
   for (int i = 0; i < cfg->num_blocks; i++) {
     IRBasicBlock *b = cfg->blocks[i];
     int depth = 0;
-    IRBasicBlock *curr = b;
+    const IRBasicBlock *curr = b;
     while (curr && dt->idom[curr->id] && dt->idom[curr->id] != curr) {
       depth++;
       curr = dt->idom[curr->id];
@@ -324,7 +324,7 @@ bool ir_dom_dominates(IRDomTree *dt, IRBasicBlock *a, IRBasicBlock *b) {
   if (a == b)
     return true;
 
-  IRBasicBlock *curr = b;
+  const IRBasicBlock *curr = b;
   while (curr && dt->idom[curr->id] && dt->idom[curr->id] != curr) {
     curr = dt->idom[curr->id];
     if (curr == a)
@@ -351,7 +351,7 @@ IRLiveness *ir_compute_liveness(IRFunction *fn) {
   }
 
   int last_call_pos = -1;
-  for (IRInsn *insn = fn->head; insn; insn = insn->next) {
+  for (const IRInsn *insn = fn->head; insn; insn = insn->next) {
     if (insn->kind == IR_CALL)
       last_call_pos = insn->pos;
 
@@ -363,7 +363,7 @@ IRLiveness *ir_compute_liveness(IRFunction *fn) {
 
     IRVReg *srcs[] = {insn->src1, insn->src2, insn->src3};
     for (int s = 0; s < 3; s++) {
-      IRVReg *v = srcs[s];
+      const IRVReg *v = srcs[s];
       if (v && v->id >= 0 && v->id < fn->num_vregs) {
         if (liv->def_pos[v->id] == -1)
           liv->def_pos[v->id] = insn->pos;
@@ -374,7 +374,7 @@ IRLiveness *ir_compute_liveness(IRFunction *fn) {
     }
 
     for (int a = 0; a < insn->num_args; a++) {
-      IRVReg *v = insn->args[a];
+      const IRVReg *v = insn->args[a];
       if (v && v->id >= 0 && v->id < fn->num_vregs) {
         if (liv->def_pos[v->id] == -1)
           liv->def_pos[v->id] = insn->pos;
@@ -405,7 +405,7 @@ bool ir_verify_function(IRFunction *fn, char **err_out) {
     return false;
   }
 
-  IRInsn *prev = NULL;
+  const IRInsn *prev = NULL;
   int count = 0;
 
   for (IRInsn *insn = fn->head; insn; insn = insn->next) {
@@ -458,110 +458,7 @@ bool ir_verify_prog(IRProg *prog, char **err_out) {
 // Optimization Passes
 // ============================================================================
 
-// 1. Constant Folding Pass (Machine-Independent Low-Level Constant Propagation & Evaluation)
-bool ir_opt_const_fold(IRFunction *fn) {
-  if (!fn || fn->num_vregs == 0)
-    return false;
-
-  bool changed = false;
-  int64_t *const_vals = calloc(fn->num_vregs, sizeof(int64_t));
-  bool *is_const = calloc(fn->num_vregs, sizeof(bool));
-
-  for (IRInsn *insn = fn->head; insn; insn = insn->next) {
-    if (insn->kind == IR_LABEL || insn->kind == IR_BR || insn->kind == IR_JMP || insn->kind == IR_CALL) {
-      memset(is_const, 0, fn->num_vregs * sizeof(bool));
-      continue;
-    }
-
-    if (insn->kind == IR_IMM && insn->dst) {
-      is_const[insn->dst->id] = true;
-      const_vals[insn->dst->id] = insn->imm;
-      continue;
-    }
-
-    // Both operands constant: compile-time evaluation
-    if (insn->src1 && is_const[insn->src1->id] && insn->src2 && is_const[insn->src2->id]) {
-      int64_t c1 = const_vals[insn->src1->id];
-      int64_t c2 = const_vals[insn->src2->id];
-      int64_t res = 0;
-      bool folded = true;
-
-      switch (insn->kind) {
-      case IR_ADD: res = c1 + c2; break;
-      case IR_SUB: res = c1 - c2; break;
-      case IR_MUL: res = c1 * c2; break;
-      case IR_DIV: if (c2 != 0) res = c1 / c2; else folded = false; break;
-      case IR_MOD: if (c2 != 0) res = c1 % c2; else folded = false; break;
-      case IR_BITAND: res = c1 & c2; break;
-      case IR_BITOR:  res = c1 | c2; break;
-      case IR_BITXOR: res = c1 ^ c2; break;
-      case IR_SHL: if (c2 >= 0 && c2 < 64) res = c1 << c2; else folded = false; break;
-      case IR_SHR: if (c2 >= 0 && c2 < 64) res = c1 >> c2; else folded = false; break;
-      case IR_EQ: res = (c1 == c2); break;
-      case IR_NE: res = (c1 != c2); break;
-      case IR_LT: res = (c1 < c2); break;
-      case IR_LE: res = (c1 <= c2); break;
-      case IR_GT: res = (c1 > c2); break;
-      case IR_GE: res = (c1 >= c2); break;
-      default: folded = false; break;
-      }
-
-      if (folded && insn->dst) {
-        insn->kind = IR_IMM;
-        insn->imm = res;
-        insn->src1 = NULL;
-        insn->src2 = NULL;
-        is_const[insn->dst->id] = true;
-        const_vals[insn->dst->id] = res;
-        changed = true;
-        continue;
-      }
-    }
-
-    // Unary constant folding
-    if (insn->src1 && is_const[insn->src1->id] && !insn->src2 && insn->dst) {
-      int64_t c = const_vals[insn->src1->id];
-      int64_t res = 0;
-      bool folded = true;
-
-      switch (insn->kind) {
-      case IR_NEG: res = -c; break;
-      case IR_BITNOT: res = ~c; break;
-      case IR_LOGNOT: res = !c; break;
-      case IR_CAST: {
-        if (insn->dst->is_float) {
-          folded = false;
-        } else {
-          int sz = insn->dst->ty ? insn->dst->ty->size : 8;
-          bool is_unsigned = insn->dst->ty ? insn->dst->ty->is_unsigned : false;
-          res = c;
-          if (sz == 1) res = is_unsigned ? (uint8_t)c : (int8_t)c;
-          else if (sz == 2) res = is_unsigned ? (uint16_t)c : (int16_t)c;
-          else if (sz == 4) res = is_unsigned ? (uint32_t)c : (int32_t)c;
-        }
-        break;
-      }
-      default: folded = false; break;
-      }
-
-      if (folded) {
-        insn->kind = IR_IMM;
-        insn->imm = res;
-        insn->src1 = NULL;
-        is_const[insn->dst->id] = true;
-        const_vals[insn->dst->id] = res;
-        changed = true;
-        continue;
-      }
-    }
-  }
-
-  free(const_vals);
-  free(is_const);
-  return changed;
-}
-
-// 2. Copy Propagation Pass
+// 1. Copy Propagation Pass
 bool ir_opt_copy_prop(IRFunction *fn) {
   if (!fn || fn->num_vregs == 0)
     return false;
@@ -570,7 +467,7 @@ bool ir_opt_copy_prop(IRFunction *fn) {
   IRVReg **aliases = calloc(fn->num_vregs, sizeof(IRVReg *));
 
   for (IRInsn *insn = fn->head; insn; insn = insn->next) {
-    if (insn->kind == IR_LABEL || insn->kind == IR_BR || insn->kind == IR_JMP) {
+    if (insn->kind == IR_LABEL || insn->kind == IR_BR || insn->kind == IR_JMP || insn->kind == IR_CALL) {
       memset(aliases, 0, fn->num_vregs * sizeof(IRVReg *));
       continue;
     }
@@ -595,7 +492,9 @@ bool ir_opt_copy_prop(IRFunction *fn) {
     }
 
     if (insn->kind == IR_MOV && insn->dst && insn->src1 && !insn->dst->is_float && !insn->src1->is_float) {
-      if (insn->dst->ty && insn->src1->ty && insn->dst->ty->size == insn->src1->ty->size) {
+      int dst_sz = insn->dst->ty ? insn->dst->ty->size : 8;
+      int src_sz = insn->src1->ty ? insn->src1->ty->size : 8;
+      if (dst_sz == src_sz) {
         IRVReg *root = insn->src1;
         while (aliases[root->id])
           root = aliases[root->id];
@@ -623,7 +522,7 @@ bool ir_opt_dce(IRFunction *fn) {
     memset(used, 0, fn->num_vregs * sizeof(bool));
 
     // Mark all used VRegs
-    for (IRInsn *insn = fn->head; insn; insn = insn->next) {
+    for (const IRInsn *insn = fn->head; insn; insn = insn->next) {
       if (insn->src1) used[insn->src1->id] = true;
       if (insn->src2) used[insn->src2->id] = true;
       if (insn->src3) used[insn->src3->id] = true;
@@ -658,13 +557,13 @@ bool ir_opt_cfg_simplify(IRFunction *fn) {
   bool changed = false;
 
   // Pass 0: Simplify conditional branches with constant condition within same basic block
-  int num_v = fn->num_vregs ? fn->num_vregs : 1;
+  const int num_v = fn->num_vregs ? fn->num_vregs : 1;
   int64_t *const_vals = calloc(num_v, sizeof(int64_t));
   bool *is_const = calloc(num_v, sizeof(bool));
 
   for (IRInsn *insn = fn->head; insn; insn = insn->next) {
     if (insn->kind == IR_BR && insn->src1 && is_const[insn->src1->id]) {
-      int64_t c = const_vals[insn->src1->id];
+      const int64_t c = const_vals[insn->src1->id];
       if (c != 0) {
         if (insn->label_true) {
           insn->kind = IR_JMP;
@@ -714,7 +613,7 @@ bool ir_opt_cfg_simplify(IRFunction *fn) {
   free(is_const);
 
   // Pass 1: Eliminate unreachable instructions following unconditional jumps/returns
-  for (IRInsn *insn = fn->head; insn; insn = insn->next) {
+  for (const IRInsn *insn = fn->head; insn; insn = insn->next) {
     if (insn->kind == IR_JMP || insn->kind == IR_RET) {
       while (insn->next && insn->next->kind != IR_LABEL) {
         ir_remove_insn(fn, insn->next);
@@ -726,7 +625,7 @@ bool ir_opt_cfg_simplify(IRFunction *fn) {
   // Pass 2: Eliminate redundant unconditional jumps immediately preceding their target label
   for (IRInsn *insn = fn->head; insn; insn = insn->next) {
     if (insn->kind == IR_JMP && insn->label) {
-      IRInsn *nxt = insn->next;
+      const IRInsn *nxt = insn->next;
       while (nxt && nxt->kind == IR_NOP)
         nxt = nxt->next;
       if (nxt && nxt->kind == IR_LABEL && nxt->label && !strcmp(insn->label, nxt->label)) {
@@ -757,7 +656,7 @@ bool ir_opt_cfg_simplify(IRFunction *fn) {
   // Pass 4: Simplify conditional branches where false target is the immediate next label
   for (IRInsn *insn = fn->head; insn; insn = insn->next) {
     if (insn->kind == IR_BR && insn->label_false) {
-      IRInsn *nxt = insn->next;
+      const IRInsn *nxt = insn->next;
       while (nxt && nxt->kind == IR_NOP)
         nxt = nxt->next;
       if (nxt && nxt->kind == IR_LABEL && nxt->label && !strcmp(insn->label_false, nxt->label)) {
@@ -780,7 +679,7 @@ bool ir_opt_peephole(IRFunction *fn) {
   for (IRInsn *insn = fn->head; insn; insn = insn->next) {
     // 1. Redundant self-move: dst = mov dst
     if (insn->kind == IR_MOV && insn->dst && insn->src1 && insn->dst == insn->src1) {
-      IRInsn *next = insn->next;
+      const IRInsn *next = insn->next;
       ir_remove_insn(fn, insn);
       insn = next ? next->prev : fn->tail;
       changed = true;
@@ -791,7 +690,7 @@ bool ir_opt_peephole(IRFunction *fn) {
     // 2. Redundant load-after-store elimination:
     // STORE addr, val  followed closely by  dst = LOAD addr
     if (insn->kind == IR_STORE && insn->src1 && insn->src2) {
-      IRVReg *addr = insn->src1;
+      const IRVReg *addr = insn->src1;
       IRVReg *val = insn->src2;
 
       for (IRInsn *cur = insn->next; cur; cur = cur->next) {
@@ -801,12 +700,15 @@ bool ir_opt_peephole(IRFunction *fn) {
           break; // Any store or memory clobber breaks alias safety
 
         if (cur->kind == IR_LOAD && cur->src1 == addr && cur->dst && val &&
-            cur->dst->ty && val->ty && cur->dst->ty->size == val->ty->size &&
             cur->dst->is_float == val->is_float) {
-          cur->kind = IR_MOV;
-          cur->src1 = val;
-          changed = true;
-          break;
+          int dst_sz = cur->dst->ty ? cur->dst->ty->size : 8;
+          int val_sz = val->ty ? val->ty->size : 8;
+          if (dst_sz == val_sz) {
+            cur->kind = IR_MOV;
+            cur->src1 = val;
+            changed = true;
+            break;
+          }
         }
       }
     }
@@ -814,8 +716,8 @@ bool ir_opt_peephole(IRFunction *fn) {
     // 3. Dead store elimination:
     // STORE addr, val1 followed by STORE addr, val2 with no reads or barriers in between
     if (insn->kind == IR_STORE && insn->src1 && insn->src2) {
-      IRVReg *addr = insn->src1;
-      for (IRInsn *cur = insn->next; cur; cur = cur->next) {
+      const IRVReg *addr = insn->src1;
+      for (const IRInsn *cur = insn->next; cur; cur = cur->next) {
         if (cur->kind == IR_CALL || cur->kind == IR_LABEL || cur->kind == IR_JMP || cur->kind == IR_BR || cur->kind == IR_RET)
           break; // Barrier
         if (cur->kind == IR_LOAD || cur->kind == IR_MEMCPY || cur->kind == IR_MEMZERO || cur->kind == IR_CAS || cur->kind == IR_EXCH)
@@ -834,8 +736,9 @@ bool ir_opt_peephole(IRFunction *fn) {
 
     // 4. Redundant sign/zero extension:
     if (insn->kind == IR_CAST && insn->dst && insn->src1) {
-      if (insn->dst->ty && insn->src1->ty &&
-          insn->dst->ty->size == insn->src1->ty->size &&
+      int dst_sz = insn->dst->ty ? insn->dst->ty->size : 8;
+      int src_sz = insn->src1->ty ? insn->src1->ty->size : 8;
+      if (dst_sz == src_sz &&
           insn->dst->is_float == insn->src1->is_float) {
         insn->kind = IR_MOV;
         changed = true;
@@ -846,60 +749,9 @@ bool ir_opt_peephole(IRFunction *fn) {
   return changed;
 }
 
-// 6. Local Common Subexpression Elimination (within straight-line code)
-bool ir_opt_local_cse(IRFunction *fn) {
-  if (!fn || !fn->head)
-    return false;
-
-  bool changed = false;
-
-  for (IRInsn *insn = fn->head; insn; insn = insn->next) {
-    if (ir_insn_has_side_effects(insn) || !insn->dst || insn->kind == IR_NOP)
-      continue;
-
-    // Check subsequent instructions in same basic block (stop at labels, branches, calls, stores)
-    for (IRInsn *sub = insn->next; sub; sub = sub->next) {
-      if (sub->kind == IR_LABEL || sub->kind == IR_JMP || sub->kind == IR_BR || sub->kind == IR_RET || sub->kind == IR_CALL)
-        break;
-
-      if (insn->kind == IR_LOAD && (sub->kind == IR_STORE || sub->kind == IR_MEMCPY || sub->kind == IR_MEMZERO))
-        break; // Memory dependency
-
-      if (sub->kind == insn->kind && sub->dst) {
-        if (sub->var != insn->var)
-          continue;
-        if ((sub->label || insn->label) && (!sub->label || !insn->label || strcmp(sub->label, insn->label) != 0))
-          continue;
-
-        bool match = false;
-        if (sub->src1 == insn->src1 && sub->src2 == insn->src2 && sub->src3 == insn->src3 && sub->imm == insn->imm && sub->fimm == insn->fimm) {
-          match = true;
-        } else if (ir_insn_is_commutative(insn->kind) && sub->src1 == insn->src2 && sub->src2 == insn->src1) {
-          match = true;
-        }
-
-        if (match) {
-          sub->kind = IR_MOV;
-          sub->src1 = insn->dst;
-          sub->src2 = NULL;
-          sub->src3 = NULL;
-          changed = true;
-        }
-      }
-    }
-  }
-
-  return changed;
-}
-
 // ============================================================================
 // Pass Wrappers & Pass Singletons
 // ============================================================================
-
-static bool run_pass_const_fold(IRFunction *fn, IRPassContext *ctx) {
-  (void)ctx;
-  return ir_opt_const_fold(fn);
-}
 
 static bool run_pass_copy_prop(IRFunction *fn, IRPassContext *ctx) {
   (void)ctx;
@@ -921,25 +773,11 @@ static bool run_pass_peephole(IRFunction *fn, IRPassContext *ctx) {
   return ir_opt_peephole(fn);
 }
 
-static bool run_pass_local_cse(IRFunction *fn, IRPassContext *ctx) {
-  (void)ctx;
-  return ir_opt_local_cse(fn);
-}
-
 static bool run_pass_verifier(IRFunction *fn, IRPassContext *ctx) {
   (void)ctx;
   char *err = NULL;
   return ir_verify_function(fn, &err);
 }
-
-IRPass pass_const_fold = {
-  .name = "const-fold",
-  .description = "Constant folding and algebraic simplification",
-  .type = IR_PASS_FUNCTION,
-  .enabled = false,
-  .default_opt_level = 1,
-  .run_on_function = run_pass_const_fold,
-};
 
 IRPass pass_copy_prop = {
   .name = "copy-prop",
@@ -975,15 +813,6 @@ IRPass pass_peephole = {
   .enabled = false,
   .default_opt_level = 2,
   .run_on_function = run_pass_peephole,
-};
-
-IRPass pass_local_cse = {
-  .name = "local-cse",
-  .description = "Local common subexpression elimination",
-  .type = IR_PASS_FUNCTION,
-  .enabled = false,
-  .default_opt_level = 2,
-  .run_on_function = run_pass_local_cse,
 };
 
 IRPass pass_verifier = {
@@ -1114,9 +943,7 @@ void ir_init_pass_registry(void) {
     return;
   registry_initialized = true;
 
-  ir_register_pass(&pass_const_fold);
   ir_register_pass(&pass_copy_prop);
-  ir_register_pass(&pass_local_cse);
   ir_register_pass(&pass_peephole);
   ir_register_pass(&pass_cfg_simplify);
   ir_register_pass(&pass_dce);
@@ -1139,14 +966,23 @@ void ir_opt_set_level(int opt_level) {
       if (pass_registry[i] != &pass_verifier)
         pass_registry[i]->enabled = false;
     }
-  } else if (opt_level == 1) {
-    pass_const_fold.enabled = true;
+
+    // Common-sense optimizations enabled even at -O0:
+    // Safe, preserve full debuggability and variable lifetime mapping,
+    // while offering executable size reductions and runtime performance boosts.
+    pass_hlir_const_fold.enabled = true;
+    pass_hlir_algebraic.enabled = true;
+    pass_hlir_copy_prop.enabled = true;
+    pass_hlir_control_flow.enabled = true;
+    pass_hlir_dead_code.enabled = true;
+    pass_hlir_dce.enabled = true;
     pass_copy_prop.enabled = true;
-    pass_dce.enabled = true;
     pass_cfg_simplify.enabled = true;
-    pass_local_cse.enabled = false;
-    pass_peephole.enabled = false;
+    pass_peephole.enabled = true;
+    pass_dce.enabled = true;
     pass_verifier.enabled = true;
+  } else if (opt_level == 1) {
+    // HLIR tier: High-level type/value/control-flow optimizations
     pass_hlir_const_fold.enabled = true;
     pass_hlir_algebraic.enabled = true;
     pass_hlir_copy_prop.enabled = true;
@@ -1156,7 +992,15 @@ void ir_opt_set_level(int opt_level) {
     pass_hlir_dead_code.enabled = true;
     pass_hlir_dce.enabled = true;
     pass_hlir_inlining.enabled = false;
+
+    // LLIR tier: Machine-independent low-level transformations & cleanup
+    pass_copy_prop.enabled = true;
+    pass_peephole.enabled = true;
+    pass_cfg_simplify.enabled = true;
+    pass_dce.enabled = true;
+    pass_verifier.enabled = true;
   } else if (opt_level >= 2) {
+    // Enable HLIR and LLIR passes
     for (int i = 0; i < pass_registry_count; i++)
       pass_registry[i]->enabled = true;
   }
@@ -1208,8 +1052,9 @@ bool ir_opt_set_pass_enabled(const char *name, bool enabled) {
   if (str_case_hyphen_equal(name, "const-fold") ||
       str_case_hyphen_equal(name, "constant-folding") ||
       str_case_hyphen_equal(name, "tree-ccp") ||
-      str_case_hyphen_equal(name, "ccp")) {
-    pass_const_fold.enabled = enabled;
+      str_case_hyphen_equal(name, "ccp") ||
+      str_case_hyphen_equal(name, "hlir-const-fold")) {
+    pass_hlir_const_fold.enabled = enabled;
     return true;
   }
 
@@ -1244,18 +1089,15 @@ bool ir_opt_set_pass_enabled(const char *name, bool enabled) {
 
   if (str_case_hyphen_equal(name, "local-cse") ||
       str_case_hyphen_equal(name, "cse") ||
-      str_case_hyphen_equal(name, "tree-cse")) {
-    pass_local_cse.enabled = enabled;
+      str_case_hyphen_equal(name, "tree-cse") ||
+      str_case_hyphen_equal(name, "hlir-local-cse") ||
+      str_case_hyphen_equal(name, "hlir-cse")) {
+    pass_hlir_local_cse.enabled = enabled;
     return true;
   }
 
   if (str_case_hyphen_equal(name, "verifier")) {
     pass_verifier.enabled = enabled;
-    return true;
-  }
-
-  if (str_case_hyphen_equal(name, "hlir-const-fold")) {
-    pass_hlir_const_fold.enabled = enabled;
     return true;
   }
 
@@ -1267,12 +1109,6 @@ bool ir_opt_set_pass_enabled(const char *name, bool enabled) {
   if (str_case_hyphen_equal(name, "hlir-copy-prop") ||
       str_case_hyphen_equal(name, "hlir-copy-propagation")) {
     pass_hlir_copy_prop.enabled = enabled;
-    return true;
-  }
-
-  if (str_case_hyphen_equal(name, "hlir-local-cse") ||
-      str_case_hyphen_equal(name, "hlir-cse")) {
-    pass_hlir_local_cse.enabled = enabled;
     return true;
   }
 
@@ -1328,8 +1164,8 @@ bool ir_opt_is_pass_enabled(const char *name) {
   if (!name) return false;
   ir_init_pass_registry();
 
-  if (str_case_hyphen_equal(name, "const-fold") || str_case_hyphen_equal(name, "tree-ccp"))
-    return pass_const_fold.enabled;
+  if (str_case_hyphen_equal(name, "const-fold") || str_case_hyphen_equal(name, "tree-ccp") || str_case_hyphen_equal(name, "hlir-const-fold"))
+    return pass_hlir_const_fold.enabled;
   if (str_case_hyphen_equal(name, "copy-prop") || str_case_hyphen_equal(name, "tree-copy-prop"))
     return pass_copy_prop.enabled;
   if (str_case_hyphen_equal(name, "dce") || str_case_hyphen_equal(name, "tree-dce"))
@@ -1338,10 +1174,8 @@ bool ir_opt_is_pass_enabled(const char *name) {
     return pass_cfg_simplify.enabled;
   if (str_case_hyphen_equal(name, "peephole") || str_case_hyphen_equal(name, "strength-reduce"))
     return pass_peephole.enabled;
-  if (str_case_hyphen_equal(name, "local-cse") || str_case_hyphen_equal(name, "cse"))
-    return pass_local_cse.enabled;
-  if (str_case_hyphen_equal(name, "hlir-const-fold"))
-    return pass_hlir_const_fold.enabled;
+  if (str_case_hyphen_equal(name, "local-cse") || str_case_hyphen_equal(name, "cse") || str_case_hyphen_equal(name, "hlir-local-cse"))
+    return pass_hlir_local_cse.enabled;
   if (str_case_hyphen_equal(name, "hlir-algebraic"))
     return pass_hlir_algebraic.enabled;
   if (str_case_hyphen_equal(name, "hlir-control-flow"))
@@ -1420,13 +1254,13 @@ bool ir_pass_manager_run_function(IRPassManager *pm, IRFunction *fn, IRPassConte
     return false;
 
   bool fn_changed = false;
-  int max_iter = pm->fixed_point ? pm->max_fixed_point_iterations : 1;
+  const int max_iter = pm->fixed_point ? pm->max_fixed_point_iterations : 1;
 
   for (int iter = 0; iter < max_iter; iter++) {
     bool iter_changed = false;
 
     for (int p = 0; p < pm->num_passes; p++) {
-      IRPass *pass = pm->passes[p];
+      const IRPass *pass = pm->passes[p];
       if (pass->type == IR_PASS_FUNCTION && pass->run_on_function) {
         bool pass_changed = pass->run_on_function(fn, ctx);
         if (pass_changed) {
@@ -1458,7 +1292,7 @@ bool ir_pass_manager_run_prog(IRPassManager *pm, IRProg *prog, IRPassContext *ct
 
   // Run program-level passes
   for (int p = 0; p < pm->num_passes; p++) {
-    IRPass *pass = pm->passes[p];
+    const IRPass *pass = pm->passes[p];
     if (pass->type == IR_PASS_PROG && pass->run_on_prog) {
       if (pass->run_on_prog(prog, ctx))
         prog_changed = true;
@@ -1480,20 +1314,11 @@ IRPassManager *ir_create_opt_pipeline(int opt_level) {
   ir_init_pass_registry();
   IRPassManager *pm = ir_pass_manager_new();
 
-  if (opt_level <= 0) {
-    pm->fixed_point = false;
-    pm->max_fixed_point_iterations = 1;
-  } else {
-    pm->fixed_point = true;
-    pm->max_fixed_point_iterations = opt_max_passes;
-  }
+  pm->fixed_point = true;
+  pm->max_fixed_point_iterations = (opt_level <= 0) ? 4 : opt_max_passes;
 
-  if (pass_const_fold.enabled)
-    ir_pass_manager_add(pm, &pass_const_fold);
   if (pass_copy_prop.enabled)
     ir_pass_manager_add(pm, &pass_copy_prop);
-  if (pass_local_cse.enabled)
-    ir_pass_manager_add(pm, &pass_local_cse);
   if (pass_peephole.enabled)
     ir_pass_manager_add(pm, &pass_peephole);
   if (pass_cfg_simplify.enabled)

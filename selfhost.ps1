@@ -91,7 +91,10 @@ function Build-Stage([string]$StageCompiler, [string]$BuildDir, [string]$TargetE
         $objFiles += $objFile
 
         Write-Host "  [CC] $s -> $safeName"
-        & $StageCompiler -c $s -o $objFile $IncludeFlags -target x86_64-win64 -D_WIN32 -D__GNUC__
+        $ccOutput = & $StageCompiler -c $s -o $objFile $IncludeFlags -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>&1
+        if ($ccOutput) {
+            $ccOutput | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+        }
         if ($LASTEXITCODE -ne 0) {
             Write-Host "  [FAIL] Compilation failed for $s" -ForegroundColor Red
             $failed = $true
@@ -106,7 +109,10 @@ function Build-Stage([string]$StageCompiler, [string]$BuildDir, [string]$TargetE
 
     $outPath = "$BuildDir\$TargetExeName"
     Write-Host "`n--- Linking $outPath ---" -ForegroundColor Cyan
-    gcc "-Wl,--start-group" $objFiles "-Wl,--end-group" -s "-Wl,--stack,16777216" "-Wl,--subsystem,console" "-Wl,--dynamicbase" "-Wl,--nxcompat" "-Wl,--high-entropy-va" "-Wl,--gc-sections" -o $outPath
+    $linkOutput = gcc "-Wl,--start-group" $objFiles "-Wl,--end-group" -s "-Wl,--stack,16777216" "-Wl,--subsystem,console" "-Wl,--dynamicbase" "-Wl,--nxcompat" "-Wl,--high-entropy-va" "-Wl,--gc-sections" -o $outPath 2>&1
+    if ($linkOutput) {
+        $linkOutput | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+    }
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Link failed for $outPath."
         exit 1

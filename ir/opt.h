@@ -4,7 +4,6 @@
 #include "ir/ir.h"
 #include "ir/hlir_opt.h"
 #include <stdbool.h>
-#include <stdint.h>
 #include <stdio.h>
 
 // Forward declarations
@@ -148,20 +147,16 @@ bool ir_verify_function(IRFunction *fn, char **err_out);
 bool ir_verify_prog(IRProg *prog, char **err_out);
 
 // Individual Low-Level (LLIR) Pass Functions
-bool ir_opt_const_fold(IRFunction *fn);
 bool ir_opt_copy_prop(IRFunction *fn);
 bool ir_opt_dce(IRFunction *fn);
 bool ir_opt_cfg_simplify(IRFunction *fn);
 bool ir_opt_peephole(IRFunction *fn);
-bool ir_opt_local_cse(IRFunction *fn);
 
 // Built-in Pass Singletons
-extern IRPass pass_const_fold;
 extern IRPass pass_copy_prop;
 extern IRPass pass_dce;
 extern IRPass pass_cfg_simplify;
 extern IRPass pass_peephole;
-extern IRPass pass_local_cse;
 extern IRPass pass_verifier;
 extern IRPass pass_hlir_const_fold;
 extern IRPass pass_hlir_algebraic;

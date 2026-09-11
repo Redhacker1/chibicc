@@ -3,8 +3,6 @@
 
 #include "ir/hlir.h"
 #include <stdbool.h>
-#include <stdint.h>
-#include <stdio.h>
 
 // HLIR Optimization Passes
 bool hlir_opt_const_fold(HLIRFunction *fn);

@@ -17,6 +17,15 @@ static void compute_materialization(LLIRFunction *fn) {
   if (!fn || fn->num_vregs == 0)
     return;
 
+  for (int i = 0; i < fn->num_vregs; i++) {
+    if (fn->vregs[i])
+      fn->vregs[i]->def_insn = NULL;
+  }
+  for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
+    if (insn->dst)
+      insn->dst->def_insn = insn;
+  }
+
   current_needs_mat = calloc(fn->num_vregs, sizeof(bool));
   for (int i = 0; i < fn->num_vregs; i++)
     current_needs_mat[i] = true;
@@ -36,13 +45,24 @@ static void compute_materialization(LLIRFunction *fn) {
   while (changed) {
     changed = false;
 
-    // 1. Foldable ADD / SUB offset calculations
     for (int i = 0; i < fn->num_vregs; i++) {
       LLIRVReg *v = fn->vregs[i];
       if (!v || !v->def_insn || !current_needs_mat[v->id])
         continue;
 
       LLIRInsn *def = v->def_insn;
+
+      // Unused pure result
+      if (use_count[v->id] == 0) {
+        if (def->kind == LLIR_IMM || def->kind == LLIR_LEA || def->kind == LLIR_MOV ||
+            def->kind == LLIR_ADD || def->kind == LLIR_SUB || def->kind == LLIR_CAST) {
+          current_needs_mat[v->id] = false;
+          changed = true;
+          continue;
+        }
+      }
+
+      // 1. Foldable ADD / SUB offset calculations
       if (def->kind == LLIR_ADD && def->src1 && def->src2) {
         LLIRInsn *d1 = def->src1->def_insn;
         LLIRInsn *d2 = def->src2->def_insn;
@@ -84,13 +104,12 @@ static void compute_materialization(LLIRFunction *fn) {
         }
       }
 
-      // 2. Foldable LEA of variables
-      if (def->kind == LLIR_LEA && def->var) {
+      // 2. Foldable LEA of variables or labels
+      if (def->kind == LLIR_LEA && (def->var || def->label)) {
         bool all_uses_foldable = true;
         for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
           if (insn->src1 == v) {
             if (insn->kind != LLIR_LOAD && insn->kind != LLIR_STORE) {
-              // Could be used in a non-materialized ADD
               if (insn->kind == LLIR_ADD && insn->dst && !current_needs_mat[insn->dst->id]) {
                 // folded
               } else {
@@ -137,7 +156,6 @@ static void compute_materialization(LLIRFunction *fn) {
             } else if (imm32 && (insn->kind == LLIR_ADD || insn->kind == LLIR_MUL ||
                                  insn->kind == LLIR_AND || insn->kind == LLIR_OR ||
                                  insn->kind == LLIR_XOR) && (!insn->ty || !is_flonum(insn->ty))) {
-              // commutative binop with imm: only fold if src2 is NOT an immediate
               if (insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM) {
                 all_uses_folded = false;
                 break;
@@ -180,6 +198,36 @@ static void compute_materialization(LLIRFunction *fn) {
           }
         }
         if (all_uses_folded) {
+          current_needs_mat[v->id] = false;
+          changed = true;
+        }
+      }
+
+      // 4. Foldable CMP / LOGNOT used ONLY in conditional branches
+      if ((def->kind == LLIR_CMP_EQ || def->kind == LLIR_CMP_NE ||
+           def->kind == LLIR_CMP_LT || def->kind == LLIR_CMP_LE ||
+           def->kind == LLIR_CMP_GT || def->kind == LLIR_CMP_GE ||
+           def->kind == LLIR_LOGNOT) && (!def->src1 || !def->src1->ty || !is_flonum(def->src1->ty))) {
+        bool all_uses_br = true;
+        for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
+          if (insn->src1 == v) {
+            if (insn->kind != LLIR_BR_COND) {
+              all_uses_br = false;
+              break;
+            }
+          }
+          if (insn->src2 == v || insn->src3 == v) {
+            all_uses_br = false;
+            break;
+          }
+          for (int a = 0; a < insn->num_args; a++) {
+            if (insn->args[a] == v) {
+              all_uses_br = false;
+              break;
+            }
+          }
+        }
+        if (all_uses_br) {
           current_needs_mat[v->id] = false;
           changed = true;
         }
@@ -2413,6 +2461,9 @@ static void x86_64_emit_cmp_result(const char *cc) {
 static void x86_64_emit_int_cmp(LLIRInsn *insn,
                                 const char *signed_cc,
                                 const char *unsigned_cc) {
+  int sz1 = insn->src1 && insn->src1->ty ? insn->src1->ty->size : 8;
+  int sz2 = insn->src2 && insn->src2->ty ? insn->src2->ty->size : 8;
+  int cmp_sz = MAX(sz1, sz2);
   bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
   bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
   if (s1_imm && s2_imm) {
@@ -2420,7 +2471,7 @@ static void x86_64_emit_int_cmp(LLIRInsn *insn,
     int64_t v2 = insn->src2->def_insn->imm;
     if (v1 == 0)
       println("  xor %%eax, %%eax");
-    else if (v1 > 0 && (uint64_t)v1 <= 0xFFFFFFFFULL)
+    else if (cmp_sz <= 4 || (v1 > 0 && (uint64_t)v1 <= 0xFFFFFFFFULL))
       println("  mov $%u, %%eax", (uint32_t)v1);
     else if ((int64_t)(int32_t)v1 == v1)
       println("  mov $%lld, %%rax", (long long)v1);
@@ -2428,21 +2479,27 @@ static void x86_64_emit_int_cmp(LLIRInsn *insn,
       println("  movabs $%lld, %%rax", (long long)v1);
 
     if (v2 == 0)
-      println("  test %%rax, %%rax");
+      println(cmp_sz <= 4 ? "  test %%eax, %%eax" : "  test %%rax, %%rax");
+    else if (cmp_sz <= 4)
+      println("  cmp $%lld, %%eax", (long long)(int32_t)v2);
     else
       println("  cmp $%lld, %%rax", (long long)v2);
   } else if (s2_imm && (int32_t)insn->src2->def_insn->imm == insn->src2->def_insn->imm) {
     int64_t imm = insn->src2->def_insn->imm;
     load_vreg(insn->src1, "%rax");
     if (imm == 0)
-      println("  test %%rax, %%rax");
+      println(cmp_sz <= 4 ? "  test %%eax, %%eax" : "  test %%rax, %%rax");
+    else if (cmp_sz <= 4)
+      println("  cmp $%lld, %%eax", (long long)(int32_t)imm);
     else
       println("  cmp $%lld, %%rax", (long long)imm);
   } else if (s1_imm && (int32_t)insn->src1->def_insn->imm == insn->src1->def_insn->imm) {
     int64_t imm = insn->src1->def_insn->imm;
     load_vreg(insn->src2, "%rax");
     if (imm == 0)
-      println("  test %%rax, %%rax");
+      println(cmp_sz <= 4 ? "  test %%eax, %%eax" : "  test %%rax, %%rax");
+    else if (cmp_sz <= 4)
+      println("  cmp $%lld, %%eax", (long long)(int32_t)imm);
     else
       println("  cmp $%lld, %%rax", (long long)imm);
 
@@ -2465,7 +2522,10 @@ static void x86_64_emit_int_cmp(LLIRInsn *insn,
   } else {
     load_vreg(insn->src1, "%rax");
     load_vreg(insn->src2, "%rdx");
-    println("  cmp %%rdx, %%rax");
+    if (cmp_sz <= 4)
+      println("  cmp %%edx, %%eax");
+    else
+      println("  cmp %%rdx, %%rax");
   }
 
   bool uns = insn->src1 &&
@@ -2889,6 +2949,9 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
         (def->kind == LLIR_CMP_EQ || def->kind == LLIR_CMP_NE ||
          def->kind == LLIR_CMP_LT || def->kind == LLIR_CMP_LE ||
          def->kind == LLIR_CMP_GT || def->kind == LLIR_CMP_GE)) {
+      int sz1 = def->src1 && def->src1->ty ? def->src1->ty->size : 8;
+      int sz2 = def->src2 && def->src2->ty ? def->src2->ty->size : 8;
+      int cmp_sz = MAX(sz1, sz2);
       bool s1_imm = def->src1 && def->src1->def_insn && def->src1->def_insn->kind == LLIR_IMM;
       bool s2_imm = def->src2 && def->src2->def_insn && def->src2->def_insn->kind == LLIR_IMM;
       const char *cc = "e";
@@ -2899,7 +2962,7 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
         int64_t v2 = def->src2->def_insn->imm;
         if (v1 == 0)
           println("  xor %%eax, %%eax");
-        else if (v1 > 0 && (uint64_t)v1 <= 0xFFFFFFFFULL)
+        else if (cmp_sz <= 4 || (v1 > 0 && (uint64_t)v1 <= 0xFFFFFFFFULL))
           println("  mov $%u, %%eax", (uint32_t)v1);
         else if ((int64_t)(int32_t)v1 == v1)
           println("  mov $%lld, %%rax", (long long)v1);
@@ -2907,7 +2970,9 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
           println("  movabs $%lld, %%rax", (long long)v1);
 
         if (v2 == 0)
-          println("  test %%rax, %%rax");
+          println(cmp_sz <= 4 ? "  test %%eax, %%eax" : "  test %%rax, %%rax");
+        else if (cmp_sz <= 4)
+          println("  cmp $%lld, %%eax", (long long)(int32_t)v2);
         else
           println("  cmp $%lld, %%rax", (long long)v2);
 
@@ -2925,7 +2990,9 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
         int64_t imm = def->src2->def_insn->imm;
         load_vreg(def->src1, "%rax");
         if (imm == 0)
-          println("  test %%rax, %%rax");
+          println(cmp_sz <= 4 ? "  test %%eax, %%eax" : "  test %%rax, %%rax");
+        else if (cmp_sz <= 4)
+          println("  cmp $%lld, %%eax", (long long)(int32_t)imm);
         else
           println("  cmp $%lld, %%rax", (long long)imm);
 
@@ -2943,7 +3010,9 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
         int64_t imm = def->src1->def_insn->imm;
         load_vreg(def->src2, "%rax");
         if (imm == 0)
-          println("  test %%rax, %%rax");
+          println(cmp_sz <= 4 ? "  test %%eax, %%eax" : "  test %%rax, %%rax");
+        else if (cmp_sz <= 4)
+          println("  cmp $%lld, %%eax", (long long)(int32_t)imm);
         else
           println("  cmp $%lld, %%rax", (long long)imm);
 
@@ -2960,7 +3029,10 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
       } else {
         load_vreg(def->src1, "%rax");
         load_vreg(def->src2, "%rdx");
-        println("  cmp %%rdx, %%rax");
+        if (cmp_sz <= 4)
+          println("  cmp %%edx, %%eax");
+        else
+          println("  cmp %%rdx, %%rax");
 
         bool uns = def->src1 && def->src1->ty && def->src1->ty->is_unsigned;
         switch (def->kind) {
@@ -3048,11 +3120,18 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
     break;
 
   case LLIR_MOV:
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
+    if (insn->src1 && insn->dst && (insn->src1 == insn->dst ||
+        (insn->src1->spill_offset && insn->src1->spill_offset == insn->dst->spill_offset)))
+      break;
     load_vreg(insn->src1, "%rax");
     store_vreg("%rax", insn->dst);
     break;
 
   case LLIR_CAST: {
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     Type *from = insn->src1 ? insn->src1->ty : NULL;
     Type *to = insn->ty;
 
@@ -3070,7 +3149,7 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
       break;
     }
 
-    if (is_flonum(from) && is_integer(to)) {
+    if (is_flonum(from) && (is_integer(to) || to->kind == TY_PTR)) {
       println("  movq %%rax, %%xmm0");
 
       if (from->kind == TY_FLOAT)
@@ -3082,7 +3161,7 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
       break;
     }
 
-    if (is_integer(from) && is_flonum(to)) {
+    if ((is_integer(from) || from->kind == TY_PTR) && is_flonum(to)) {
       if (to->kind == TY_FLOAT)
         println("  cvtsi2ss %%rax, %%xmm0");
       else
@@ -3137,6 +3216,8 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
   }
 
   case LLIR_LOAD:
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     x86_64_emit_load(insn);
     break;
 
@@ -3145,6 +3226,8 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
     break;
 
   case LLIR_ADD: {
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     if (!insn->ty || !is_flonum(insn->ty)) {
       bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
       bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
@@ -3170,6 +3253,8 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
   }
 
   case LLIR_SUB: {
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     if (!insn->ty || !is_flonum(insn->ty)) {
       bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
       if (s2_imm && (int32_t)insn->src2->def_insn->imm == insn->src2->def_insn->imm) {
@@ -3187,6 +3272,8 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
   }
 
   case LLIR_MUL: {
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     if (!insn->ty || !is_flonum(insn->ty)) {
       bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
       bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
@@ -3210,6 +3297,8 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
   }
 
   case LLIR_DIV:
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     if (insn->ty && is_flonum(insn->ty)) {
       x86_64_emit_float_binop(insn, "divss", "divsd");
     } else {
@@ -3239,6 +3328,8 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
     break;
 
   case LLIR_MOD:
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     load_vreg(insn->src1, "%rax");
     load_vreg(insn->src2, "%rcx");
 
@@ -3264,6 +3355,8 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
     break;
 
   case LLIR_AND: {
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
     bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
     LLIRVReg *imm_v = NULL;
@@ -3285,6 +3378,8 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
   }
 
   case LLIR_OR: {
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
     bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
     LLIRVReg *imm_v = NULL;
@@ -3306,6 +3401,8 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
   }
 
   case LLIR_XOR: {
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
     bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
     LLIRVReg *imm_v = NULL;
@@ -3327,6 +3424,8 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
   }
 
   case LLIR_SHL: {
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
     if (s2_imm) {
       int64_t imm = insn->src2->def_insn->imm & 63;
@@ -3346,6 +3445,8 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
   }
 
   case LLIR_SHR: {
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
     if (s2_imm) {
       int64_t imm = insn->src2->def_insn->imm & 63;
@@ -3377,14 +3478,20 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
   }
 
   case LLIR_NEG:
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     x86_64_emit_unary(insn, "neg");
     break;
 
   case LLIR_NOT:
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     x86_64_emit_unary(insn, "not");
     break;
 
   case LLIR_LOGNOT:
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     load_vreg(insn->src1, "%rax");
     println("  test %%rax, %%rax");
     x86_64_emit_cmp_result("e");
@@ -3392,26 +3499,38 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
     break;
 
   case LLIR_CMP_EQ:
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     x86_64_emit_cmp(insn, "e", "e", "e");
     break;
 
   case LLIR_CMP_NE:
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     x86_64_emit_cmp(insn, "ne", "ne", "ne");
     break;
 
   case LLIR_CMP_LT:
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     x86_64_emit_cmp(insn, "l", "b", "b");
     break;
 
   case LLIR_CMP_LE:
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     x86_64_emit_cmp(insn, "le", "be", "be");
     break;
 
   case LLIR_CMP_GT:
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     x86_64_emit_cmp(insn, "g", "a", "a");
     break;
 
   case LLIR_CMP_GE:
+    if (insn->dst && current_needs_mat && !current_needs_mat[insn->dst->id])
+      break;
     x86_64_emit_cmp(insn, "ge", "ae", "ae");
     break;
 

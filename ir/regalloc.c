@@ -1,6 +1,5 @@
 ﻿#include "ir/regalloc.h"
 #include <stdlib.h>
-#include <string.h>
 
 static void compute_live_intervals(IRFunction *fn) {
   for (int i = 0; i < fn->num_vregs; i++) {
@@ -34,6 +33,34 @@ static void compute_live_intervals(IRFunction *fn) {
         if (insn->args[i]->def_pos == -1)
           insn->args[i]->def_pos = insn->pos;
         insn->args[i]->last_use_pos = insn->pos;
+      }
+    }
+  }
+
+  // Extend live intervals across backward control flow (loops)
+  bool loop_changed = true;
+  while (loop_changed) {
+    loop_changed = false;
+    for (IRInsn *insn = fn->head; insn; insn = insn->next) {
+      if ((insn->kind == IR_JMP || insn->kind == IR_BR) && insn->label) {
+        int target_pos = -1;
+        for (IRInsn *t = fn->head; t; t = t->next) {
+          if (t->kind == IR_LABEL && t->label && !strcmp(t->label, insn->label)) {
+            target_pos = t->pos;
+            break;
+          }
+        }
+        if (target_pos >= 0 && target_pos < insn->pos) {
+          for (int i = 0; i < fn->num_vregs; i++) {
+            IRVReg *v = fn->vregs[i];
+            if (v->def_pos >= 0 && v->def_pos <= insn->pos && v->last_use_pos >= target_pos) {
+              if (v->last_use_pos < insn->pos) {
+                v->last_use_pos = insn->pos;
+                loop_changed = true;
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -117,7 +144,6 @@ void regalloc_function(IRFunction *fn, const RegAllocPool *pool) {
       v->phys_reg = allocated_reg;
       v->is_spilled = false;
     } else {
-      // Spill to distinct stack slot
       int sz = v->ty ? v->ty->size : 8;
       int align = v->ty ? v->ty->align : 8;
       if (sz < 8) sz = 8;

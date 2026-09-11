@@ -2,7 +2,6 @@
 #define CHIBICC_HLIR_H
 
 #include "chibicc.h"
-#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 

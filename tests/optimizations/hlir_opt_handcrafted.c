@@ -5,10 +5,19 @@
 #include <stdio.h>
 
 #define ASSERT(expected, actual) do { \
-    int e = (expected); \
-    int a = (actual); \
+    int64_t e = (int64_t)(expected); \
+    int64_t a = (int64_t)(actual); \
     if (e != a) { \
-        fprintf(stderr, "%s:%d: ASSERT failed: %d expected, but got %d\n", __FILE__, __LINE__, e, a); \
+        fprintf(stderr, "%s:%d: ASSERT failed: %lld expected, but got %lld\n", __FILE__, __LINE__, (long long)e, (long long)a); \
+        exit(1); \
+    } \
+} while (0)
+
+#define ASSERT_PTR_EQ(expected, actual) do { \
+    void *e = (void *)(expected); \
+    void *a = (void *)(actual); \
+    if (e != a) { \
+        fprintf(stderr, "%s:%d: ASSERT_PTR_EQ failed: %p expected, but got %p\n", __FILE__, __LINE__, e, a); \
         exit(1); \
     } \
 } while (0)
@@ -31,7 +40,7 @@ StringArray tmpfiles;
 // Helper to create a dummy HLIR function
 static HLIRFunction *new_test_fn(char *name) {
     HLIRFunction *fn = calloc(1, sizeof(HLIRFunction));
-    fn->name = strdup(name);
+    fn->name = _strdup(name);
     fn->val_cap = 16;
     fn->vals = calloc(fn->val_cap, sizeof(HLIRVal *));
     return fn;
@@ -58,6 +67,7 @@ static HLIRVal *add_binop(HLIRFunction *fn, HLIRKind kind, HLIRVal *src1, HLIRVa
     return dst;
 }
 
+// Helper for unary ops
 static HLIRVal *add_unary(HLIRFunction *fn, HLIRKind kind, HLIRVal *src1) {
     HLIRVal *dst = hlir_new_val(fn, ty_int);
     HLIRInsn *insn = hlir_new_insn(kind);
@@ -67,28 +77,109 @@ static HLIRVal *add_unary(HLIRFunction *fn, HLIRKind kind, HLIRVal *src1) {
     return dst;
 }
 
+// Helper for cast
+static HLIRVal *add_cast(HLIRFunction *fn, HLIRVal *src1, Type *ty) {
+    HLIRVal *dst = hlir_new_val(fn, ty);
+    HLIRInsn *insn = hlir_new_insn(HLIR_CAST);
+    insn->dst = dst;
+    insn->src1 = src1;
+    insn->ty = ty;
+    hlir_append_insn(fn, insn);
+    return dst;
+}
+
+static int count_insns(HLIRFunction *fn) {
+    int cnt = 0;
+    for (HLIRInsn *i = fn->head; i; i = i->next) cnt++;
+    return cnt;
+}
+
+// 1. Constant Folding Tests
 static void test_const_folding_handcrafted(void) {
-    HLIRFunction *fn = new_test_fn("test_fold");
-    
-    // 10 + 20
-    HLIRVal *v10 = add_iconst(fn, 10);
-    HLIRVal *v20 = add_iconst(fn, 20);
-    HLIRVal *res = add_binop(fn, HLIR_ADD, v10, v20);
-    
-    // Before opt, res should be HLIR_ADD
-    ASSERT(HLIR_ADD, fn->tail->kind);
-    
-    hlir_opt_const_fold(fn);
-    
-    // After opt, res should be HLIR_ICONST with value 30
-    ASSERT(HLIR_ICONST, fn->tail->kind);
-    ASSERT(30, (int)fn->tail->imm);
-    
+    // Binary arithmetic constant folding: 10 + 20 -> 30
+    {
+        HLIRFunction *fn = new_test_fn("test_fold_add");
+        HLIRVal *v10 = add_iconst(fn, 10);
+        HLIRVal *v20 = add_iconst(fn, 20);
+        add_binop(fn, HLIR_ADD, v10, v20);
+        
+        ASSERT(HLIR_ADD, fn->tail->kind);
+        hlir_opt_const_fold(fn);
+        ASSERT(HLIR_ICONST, fn->tail->kind);
+        ASSERT(30, fn->tail->imm);
+    }
+
+    // Binary multiplication & bitwise: 7 * 6 -> 42, 0xF0 & 0xAA -> 0xA0
+    {
+        HLIRFunction *fn = new_test_fn("test_fold_mul_and");
+        HLIRVal *v7 = add_iconst(fn, 7);
+        HLIRVal *v6 = add_iconst(fn, 6);
+        add_binop(fn, HLIR_MUL, v7, v6);
+        hlir_opt_const_fold(fn);
+        ASSERT(HLIR_ICONST, fn->tail->kind);
+        ASSERT(42, fn->tail->imm);
+
+        HLIRVal *vf0 = add_iconst(fn, 0xF0);
+        HLIRVal *vaa = add_iconst(fn, 0xAA);
+        add_binop(fn, HLIR_BITAND, vf0, vaa);
+        hlir_opt_const_fold(fn);
+        ASSERT(HLIR_ICONST, fn->tail->kind);
+        ASSERT(0xA0, fn->tail->imm);
+    }
+
+    // Unary constant folding: -(-50) -> -50 negated -> 50, ~0 -> -1, !0 -> 1
+    {
+        HLIRFunction *fn = new_test_fn("test_fold_unary");
+        HLIRVal *v50 = add_iconst(fn, -50);
+        add_unary(fn, HLIR_NEG, v50);
+        hlir_opt_const_fold(fn);
+        ASSERT(HLIR_ICONST, fn->tail->kind);
+        ASSERT(50, fn->tail->imm);
+
+        HLIRVal *v0 = add_iconst(fn, 0);
+        add_unary(fn, HLIR_LOGNOT, v0);
+        hlir_opt_const_fold(fn);
+        ASSERT(HLIR_ICONST, fn->tail->kind);
+        ASSERT(1, fn->tail->imm);
+    }
+
+    // Cast constant truncation: (char)300 -> 44
+    {
+        HLIRFunction *fn = new_test_fn("test_fold_cast_trunc");
+        HLIRVal *v300 = add_iconst(fn, 300);
+        add_cast(fn, v300, ty_char);
+        hlir_opt_const_fold(fn);
+        ASSERT(HLIR_ICONST, fn->tail->kind);
+        ASSERT(44, fn->tail->imm);
+    }
+
+    // Canonicalization: const on src1 moved to src2 (5 + x -> x + 5, 5 < x -> x > 5)
+    {
+        HLIRFunction *fn = new_test_fn("test_fold_canonicalize");
+        HLIRVal *v5 = add_iconst(fn, 5);
+        HLIRVal *x = hlir_new_val(fn, ty_int);
+        
+        // 5 + x
+        add_binop(fn, HLIR_ADD, v5, x);
+        hlir_opt_const_fold(fn);
+        ASSERT(HLIR_ADD, fn->tail->kind);
+        ASSERT(x->id, fn->tail->src1->id);
+        ASSERT(v5->id, fn->tail->src2->id);
+
+        // 5 < x => x > 5
+        add_binop(fn, HLIR_CMP_LT, v5, x);
+        hlir_opt_const_fold(fn);
+        ASSERT(HLIR_CMP_GT, fn->tail->kind);
+        ASSERT(x->id, fn->tail->src1->id);
+        ASSERT(v5->id, fn->tail->src2->id);
+    }
+
     printf("test_const_folding_handcrafted passed\n");
 }
 
+// 2. Algebraic Simplification Tests
 static void test_algebraic_handcrafted(void) {
-    // x + 0 -> x
+    // x + 0 -> x, 0 + x -> x
     {
         HLIRFunction *fn = new_test_fn("test_x_plus_0");
         HLIRVal *x = hlir_new_val(fn, ty_int);
@@ -97,68 +188,284 @@ static void test_algebraic_handcrafted(void) {
         hlir_opt_algebraic(fn);
         ASSERT(HLIR_CAST, fn->tail->kind);
         ASSERT(x->id, fn->tail->src1->id);
-    }
 
-    // x * 1 -> x
-    {
-        HLIRFunction *fn = new_test_fn("test_x_mul_1");
-        HLIRVal *x = hlir_new_val(fn, ty_int);
-        HLIRVal *v1 = add_iconst(fn, 1);
-        add_binop(fn, HLIR_MUL, x, v1);
+        add_binop(fn, HLIR_ADD, v0, x);
         hlir_opt_algebraic(fn);
         ASSERT(HLIR_CAST, fn->tail->kind);
         ASSERT(x->id, fn->tail->src1->id);
     }
 
-    // x - x -> 0
+    // x - 0 -> x, 0 - x -> -x, x - x -> 0
     {
-        HLIRFunction *fn = new_test_fn("test_x_sub_x");
+        HLIRFunction *fn = new_test_fn("test_x_sub_rules");
         HLIRVal *x = hlir_new_val(fn, ty_int);
+        HLIRVal *v0 = add_iconst(fn, 0);
+        
+        add_binop(fn, HLIR_SUB, x, v0);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_CAST, fn->tail->kind);
+        ASSERT(x->id, fn->tail->src1->id);
+
+        add_binop(fn, HLIR_SUB, v0, x);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_NEG, fn->tail->kind);
+        ASSERT(x->id, fn->tail->src1->id);
+
         add_binop(fn, HLIR_SUB, x, x);
         hlir_opt_algebraic(fn);
         ASSERT(HLIR_ICONST, fn->tail->kind);
-        ASSERT(0, (int)fn->tail->imm);
+        ASSERT(0, fn->tail->imm);
     }
 
-    // -(-x) -> x
+    // x * 1 -> x, x * 0 -> 0, x * -1 -> -x, x * 8 -> x << 3
     {
-        HLIRFunction *fn = new_test_fn("test_neg_neg_x");
+        HLIRFunction *fn = new_test_fn("test_x_mul_rules");
+        HLIRVal *x = hlir_new_val(fn, ty_int);
+        HLIRVal *v1 = add_iconst(fn, 1);
+        HLIRVal *v0 = add_iconst(fn, 0);
+        HLIRVal *vm1 = add_iconst(fn, -1);
+        HLIRVal *v8 = add_iconst(fn, 8);
+
+        add_binop(fn, HLIR_MUL, x, v1);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_CAST, fn->tail->kind);
+        ASSERT(x->id, fn->tail->src1->id);
+
+        add_binop(fn, HLIR_MUL, x, v0);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_ICONST, fn->tail->kind);
+        ASSERT(0, fn->tail->imm);
+
+        add_binop(fn, HLIR_MUL, x, vm1);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_NEG, fn->tail->kind);
+        ASSERT(x->id, fn->tail->src1->id);
+
+        add_binop(fn, HLIR_MUL, x, v8);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_SHL, fn->tail->kind);
+        ASSERT(x->id, fn->tail->src1->id);
+    }
+
+    // Division / Modulo: x / 1 -> x, x / x -> 1, unsigned x / 16 -> x >> 4, unsigned x % 16 -> x & 15
+    {
+        HLIRFunction *fn = new_test_fn("test_div_mod_rules");
+        HLIRVal *ux = hlir_new_val(fn, ty_uint);
+        HLIRVal *v1 = add_iconst(fn, 1);
+        HLIRVal *v16 = add_iconst(fn, 16);
+
+        add_binop(fn, HLIR_DIV, ux, v1);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_CAST, fn->tail->kind);
+        ASSERT(ux->id, fn->tail->src1->id);
+
+        add_binop(fn, HLIR_DIV, ux, ux);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_ICONST, fn->tail->kind);
+        ASSERT(1, fn->tail->imm);
+
+        HLIRVal *div_res = add_binop(fn, HLIR_DIV, ux, v16);
+        div_res->ty = ty_uint;
+        fn->tail->ty = ty_uint;
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_SHR, fn->tail->kind);
+
+        HLIRVal *mod_res = add_binop(fn, HLIR_MOD, ux, v16);
+        mod_res->ty = ty_uint;
+        fn->tail->ty = ty_uint;
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_BITAND, fn->tail->kind);
+    }
+
+    // Bitwise identities: x ^ x -> 0, x ^ 0 -> x, x ^ -1 -> ~x, x & x -> x, x & 0 -> 0, x | x -> x, x | -1 -> -1
+    {
+        HLIRFunction *fn = new_test_fn("test_bitwise_rules");
+        HLIRVal *x = hlir_new_val(fn, ty_int);
+        HLIRVal *v0 = add_iconst(fn, 0);
+        HLIRVal *vm1 = add_iconst(fn, -1);
+
+        add_binop(fn, HLIR_BITXOR, x, x);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_ICONST, fn->tail->kind);
+        ASSERT(0, fn->tail->imm);
+
+        add_binop(fn, HLIR_BITXOR, x, vm1);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_BITNOT, fn->tail->kind);
+
+        add_binop(fn, HLIR_BITAND, x, v0);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_ICONST, fn->tail->kind);
+        ASSERT(0, fn->tail->imm);
+
+        add_binop(fn, HLIR_BITOR, x, vm1);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_ICONST, fn->tail->kind);
+        ASSERT(-1, fn->tail->imm);
+    }
+
+    // Involutions: -(-x) -> x, ~(~x) -> x, !(a < b) -> a >= b
+    {
+        HLIRFunction *fn = new_test_fn("test_involutions");
         HLIRVal *x = hlir_new_val(fn, ty_int);
         HLIRVal *nx = add_unary(fn, HLIR_NEG, x);
         add_unary(fn, HLIR_NEG, nx);
         hlir_opt_algebraic(fn);
         ASSERT(HLIR_CAST, fn->tail->kind);
         ASSERT(x->id, fn->tail->src1->id);
+
+        HLIRVal *bx = add_unary(fn, HLIR_BITNOT, x);
+        add_unary(fn, HLIR_BITNOT, bx);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_CAST, fn->tail->kind);
+        ASSERT(x->id, fn->tail->src1->id);
+
+        HLIRVal *y = hlir_new_val(fn, ty_int);
+        HLIRVal *cmp = add_binop(fn, HLIR_CMP_LT, x, y);
+        add_unary(fn, HLIR_LOGNOT, cmp);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_CMP_GE, fn->tail->kind);
+        ASSERT(x->id, fn->tail->src1->id);
+        ASSERT(y->id, fn->tail->src2->id);
+    }
+
+    // Comparison reflexivity: x == x -> 1, x != x -> 0, x <= x -> 1, x < x -> 0
+    {
+        HLIRFunction *fn = new_test_fn("test_reflexive_cmp");
+        HLIRVal *x = hlir_new_val(fn, ty_int);
+
+        add_binop(fn, HLIR_CMP_EQ, x, x);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_ICONST, fn->tail->kind);
+        ASSERT(1, fn->tail->imm);
+
+        add_binop(fn, HLIR_CMP_NE, x, x);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_ICONST, fn->tail->kind);
+        ASSERT(0, fn->tail->imm);
+
+        add_binop(fn, HLIR_CMP_LE, x, x);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_ICONST, fn->tail->kind);
+        ASSERT(1, fn->tail->imm);
+
+        add_binop(fn, HLIR_CMP_LT, x, x);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_ICONST, fn->tail->kind);
+        ASSERT(0, fn->tail->imm);
     }
 
     printf("test_algebraic_handcrafted passed\n");
 }
 
+// 3. Copy Propagation Tests
 static void test_copy_prop_handcrafted(void) {
     HLIRFunction *fn = new_test_fn("test_copy_prop");
     
     // v1 = 100
-    // v2 = v1 (CAST)
-    // v3 = v2 + 5
+    // v2 = (cast)v1
+    // v3 = (cast)v2
+    // v4 = v3 + 5
     HLIRVal *v1 = add_iconst(fn, 100);
-    
-    HLIRVal *v2 = hlir_new_val(fn, ty_int);
-    HLIRInsn *insn2 = hlir_new_insn(HLIR_CAST);
-    insn2->dst = v2;
-    insn2->src1 = v1;
-    hlir_append_insn(fn, insn2);
-    
-    HLIRVal *v3 = add_binop(fn, HLIR_ADD, v2, hlir_new_val(fn, ty_int)); // dummy src2
+    HLIRVal *v2 = add_cast(fn, v1, ty_int);
+    HLIRVal *v3 = add_cast(fn, v2, ty_int);
+    add_binop(fn, HLIR_ADD, v3, hlir_new_val(fn, ty_int));
     
     hlir_opt_copy_prop(fn);
     
-    // v3 = v2 + 5 should become v3 = v1 + 5
+    // v4 = v3 + dummy should become v4 = v1 + dummy
     ASSERT(HLIR_ADD, fn->tail->kind);
     ASSERT(v1->id, fn->tail->src1->id);
     
     printf("test_copy_prop_handcrafted passed\n");
 }
 
+// 4. Local CSE Tests
+static void test_local_cse_handcrafted(void) {
+    // Direct CSE: t1 = a * b, t2 = a * b -> t2 becomes cast(t1)
+    {
+        HLIRFunction *fn = new_test_fn("test_cse_direct");
+        HLIRVal *a = hlir_new_val(fn, ty_int);
+        HLIRVal *b = hlir_new_val(fn, ty_int);
+        
+        HLIRVal *t1 = add_binop(fn, HLIR_MUL, a, b);
+        HLIRVal *t2 = add_binop(fn, HLIR_MUL, a, b);
+        (void)t2;
+        
+        hlir_opt_local_cse(fn);
+        ASSERT(HLIR_CAST, fn->tail->kind);
+        ASSERT(t1->id, fn->tail->src1->id);
+    }
+
+    // Commutative CSE: t1 = a + b, t2 = b + a -> t2 becomes cast(t1)
+    {
+        HLIRFunction *fn = new_test_fn("test_cse_commutative");
+        HLIRVal *a = hlir_new_val(fn, ty_int);
+        HLIRVal *b = hlir_new_val(fn, ty_int);
+        
+        HLIRVal *t1 = add_binop(fn, HLIR_ADD, a, b);
+        HLIRVal *t2 = add_binop(fn, HLIR_ADD, b, a);
+        (void)t2;
+        
+        hlir_opt_local_cse(fn);
+        ASSERT(HLIR_CAST, fn->tail->kind);
+        ASSERT(t1->id, fn->tail->src1->id);
+    }
+
+    printf("test_local_cse_handcrafted passed\n");
+}
+
+// 5. Load-Store Optimization Tests
+static void test_load_store_handcrafted(void) {
+    // Redundant load-after-store: store_var x, v1; v2 = load_var x -> v2 = cast(v1)
+    {
+        HLIRFunction *fn = new_test_fn("test_load_after_store");
+        Obj var = { .name = "x", .is_local = true };
+        HLIRVal *v1 = add_iconst(fn, 42);
+        
+        HLIRInsn *st = hlir_new_insn(HLIR_STORE_VAR);
+        st->var = &var;
+        st->src1 = v1;
+        hlir_append_insn(fn, st);
+        
+        HLIRVal *v2 = hlir_new_val(fn, ty_int);
+        HLIRInsn *ld = hlir_new_insn(HLIR_LOAD_VAR);
+        ld->dst = v2;
+        ld->var = &var;
+        hlir_append_insn(fn, ld);
+        
+        hlir_opt_load_store(fn);
+        ASSERT(HLIR_CAST, fn->tail->kind);
+        ASSERT(v1->id, fn->tail->src1->id);
+    }
+
+    // Dead store elimination: store_var x, v1; store_var x, v2 -> first store removed
+    {
+        HLIRFunction *fn = new_test_fn("test_dead_store");
+        Obj var = { .name = "x", .is_local = true };
+        HLIRVal *v1 = add_iconst(fn, 10);
+        HLIRVal *v2 = add_iconst(fn, 20);
+        
+        HLIRInsn *st1 = hlir_new_insn(HLIR_STORE_VAR);
+        st1->var = &var;
+        st1->src1 = v1;
+        hlir_append_insn(fn, st1);
+        
+        HLIRInsn *st2 = hlir_new_insn(HLIR_STORE_VAR);
+        st2->var = &var;
+        st2->src1 = v2;
+        hlir_append_insn(fn, st2);
+        
+        int before = count_insns(fn);
+        hlir_opt_load_store(fn);
+        int after = count_insns(fn);
+        ASSERT(before - 1, after);
+    }
+
+    printf("test_load_store_handcrafted passed\n");
+}
+
+// 6. Dead Code & Dead Value Elimination Tests
 static void test_dce_handcrafted(void) {
     HLIRFunction *fn = new_test_fn("test_dce");
     
@@ -167,26 +474,50 @@ static void test_dce_handcrafted(void) {
     // RET v1
     HLIRVal *v1 = add_iconst(fn, 10);
     HLIRVal *v2 = add_iconst(fn, 20);
+    (void)v2;
     
     HLIRInsn *ret = hlir_new_insn(HLIR_RET);
     ret->src1 = v1;
     hlir_append_insn(fn, ret);
     
-    int before = fn->num_insns;
+    int before = count_insns(fn);
     hlir_opt_dce(fn);
-    int after = fn->num_insns;
+    int after = count_insns(fn);
     
-    ASSERT(before - 1, after); // v2 iconst should be gone
+    ASSERT(before - 1, after); // v2 iconst should be eliminated
     
     printf("test_dce_handcrafted passed\n");
 }
 
+static void test_dead_code_handcrafted(void) {
+    HLIRFunction *fn = new_test_fn("test_unreachable");
+    
+    HLIRVal *v1 = add_iconst(fn, 10);
+    HLIRInsn *ret = hlir_new_insn(HLIR_RET);
+    ret->src1 = v1;
+    hlir_append_insn(fn, ret);
+    
+    // Unreachable instructions after RET
+    add_iconst(fn, 999);
+    add_iconst(fn, 888);
+    
+    HLIRInsn *lbl = hlir_new_insn(HLIR_LABEL);
+    lbl->label = "L_NEXT";
+    hlir_append_insn(fn, lbl);
+    
+    hlir_opt_dead_code(fn);
+    
+    // After RET, immediate next instruction must be the label
+    ASSERT_PTR_EQ(lbl, ret->next);
+    
+    printf("test_dead_code_handcrafted passed\n");
+}
+
+// 7. CFG Optimization Tests
 static void test_cfg_handcrafted(void) {
-    // JMP to next label
+    // JMP to immediately succeeding label removed
     {
         HLIRFunction *fn = new_test_fn("test_jmp_label");
-        fn->num_vals = 1; 
-        
         char *l1 = "L1";
         
         HLIRInsn *jmp = hlir_new_insn(HLIR_JMP);
@@ -197,31 +528,15 @@ static void test_cfg_handcrafted(void) {
         label->label = l1;
         hlir_append_insn(fn, label);
         
-        // JMP is kind 34, LABEL is kind 33
-        
-        int before = 0;
-        for (HLIRInsn *i = fn->head; i; i = i->next) before++;
-        
+        int before = count_insns(fn);
         hlir_opt_control_flow(fn);
+        int after = count_insns(fn);
         
-        int after = 0;
-        for (HLIRInsn *i = fn->head; i; i = i->next) {
-            // printf("  DEBUG: kind=%d label=%p(%s)\n", i->kind, i->label, i->label ? i->label : "NULL");
-            after++;
-        }
-        
-        // Optimization should remove HLIR_JMP (kind 34)
-        // Note: hlir_opt_control_flow might return false even if it changed something if it didn't hit certain code paths.
-        // In this case, we'll just check if it worked.
-        if (after == before - 1) {
-            ASSERT(HLIR_LABEL, fn->head->kind);
-        } else {
-            // Log for investigation, but don't fail yet if the core framework is linked
-            printf("  INFO: Jump-to-label not simplified (kind %d -> %d)\n", fn->head->kind, fn->head->next->kind);
-        }
+        ASSERT(before - 1, after);
+        ASSERT(HLIR_LABEL, fn->head->kind);
     }
     
-    // JMP_IF_ZERO(constant 0) -> JMP
+    // JMP_IF_ZERO(0) -> JMP
     {
         HLIRFunction *fn = new_test_fn("test_jmp_if_zero_0");
         HLIRVal *v0 = add_iconst(fn, 0);
@@ -231,12 +546,40 @@ static void test_cfg_handcrafted(void) {
         hlir_append_insn(fn, br);
         
         hlir_opt_control_flow(fn);
-        
         ASSERT(HLIR_JMP, fn->tail->kind);
-        if (fn->tail->src1 != NULL) {
-            fprintf(stderr, "ASSERT failed: expected NULL src1\n");
-            exit(1);
-        }
+        ASSERT_PTR_EQ(NULL, fn->tail->src1);
+    }
+
+    // JMP_IF_ZERO(non-zero) -> branch removed
+    {
+        HLIRFunction *fn = new_test_fn("test_jmp_if_zero_1");
+        HLIRVal *v1 = add_iconst(fn, 1);
+        HLIRInsn *br = hlir_new_insn(HLIR_JMP_IF_ZERO);
+        br->src1 = v1;
+        br->label = "L_TARGET";
+        hlir_append_insn(fn, br);
+        
+        int before = count_insns(fn);
+        hlir_opt_control_flow(fn);
+        int after = count_insns(fn);
+        ASSERT(before - 1, after);
+    }
+
+    // JMP_IF_ZERO (x == 0) -> JMP_IF_NZ x
+    {
+        HLIRFunction *fn = new_test_fn("test_cond_branch_fold");
+        HLIRVal *x = hlir_new_val(fn, ty_int);
+        HLIRVal *v0 = add_iconst(fn, 0);
+        HLIRVal *cmp = add_binop(fn, HLIR_CMP_EQ, x, v0);
+        
+        HLIRInsn *br = hlir_new_insn(HLIR_JMP_IF_ZERO);
+        br->src1 = cmp;
+        br->label = "L_TARGET";
+        hlir_append_insn(fn, br);
+        
+        hlir_opt_control_flow(fn);
+        ASSERT(HLIR_JMP_IF_NZ, fn->tail->kind);
+        ASSERT(x->id, fn->tail->src1->id);
     }
 
     printf("test_cfg_handcrafted passed\n");
@@ -246,7 +589,10 @@ int main(void) {
     test_const_folding_handcrafted();
     test_algebraic_handcrafted();
     test_copy_prop_handcrafted();
+    test_local_cse_handcrafted();
+    test_load_store_handcrafted();
     test_dce_handcrafted();
+    test_dead_code_handcrafted();
     test_cfg_handcrafted();
     return 0;
 }

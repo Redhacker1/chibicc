@@ -60,12 +60,17 @@ foreach ($file in $unit_tests) {
     $exeFile = "tests\$name.exe"
 
     # Compile with chibicc
-    & $Compiler -c $cFile -o $oFile $IncludeFlags -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>$null
+    $ccOutput = & $Compiler -c $cFile -o $oFile $IncludeFlags -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  [FAIL] $name.c (Compilation failed)" -ForegroundColor Red
+        if ($ccOutput) {
+            $ccOutput | ForEach-Object { Write-Host "         $_" -ForegroundColor DarkGray }
+        }
         $Failed++
         $FailedTests += "unit/$name.c (compile)"
         continue
+    } elseif ($ccOutput) {
+        $ccOutput | ForEach-Object { Write-Host "         $_" -ForegroundColor DarkGray }
     }
 
     # Link with GCC
@@ -77,9 +82,12 @@ foreach ($file in $unit_tests) {
         $extraLinkFlags += "-lkernel32"
     }
 
-    gcc $oFile "tests/common.o" -o $exeFile $extraLinkFlags 2>$null
+    $linkOutput = gcc $oFile "tests/common.o" -o $exeFile $extraLinkFlags 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  [FAIL] $name.c (Link failed)" -ForegroundColor Red
+        if ($linkOutput) {
+            $linkOutput | ForEach-Object { Write-Host "         $_" -ForegroundColor DarkGray }
+        }
         $Failed++
         $FailedTests += "unit/$name.c (link)"
         Remove-Item $oFile -ErrorAction SilentlyContinue
@@ -120,17 +128,25 @@ foreach ($file in $abi_tests) {
     $oFile = "tests\$name.o"
     $exeFile = "tests\$name.exe"
 
-    & $Compiler -c $cFile -o $oFile -I"$RootDir\include" -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>$null
+    $ccOutput = & $Compiler -c $cFile -o $oFile -I"$RootDir\include" -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  [FAIL] $name.c (Compilation failed)" -ForegroundColor Red
+        if ($ccOutput) {
+            $ccOutput | ForEach-Object { Write-Host "         $_" -ForegroundColor DarkGray }
+        }
         $Failed++
         $FailedTests += "abi/$name.c (compile)"
         continue
+    } elseif ($ccOutput) {
+        $ccOutput | ForEach-Object { Write-Host "         $_" -ForegroundColor DarkGray }
     }
 
-    gcc -o $exeFile $oFile 2>$null
+    $linkOutput = gcc -o $exeFile $oFile 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  [FAIL] $name.c (Link failed)" -ForegroundColor Red
+        if ($linkOutput) {
+            $linkOutput | ForEach-Object { Write-Host "         $_" -ForegroundColor DarkGray }
+        }
         $Failed++
         $FailedTests += "abi/$name.c (link)"
         Remove-Item $oFile -ErrorAction SilentlyContinue
@@ -172,12 +188,17 @@ if (Test-Path $confDir) {
             $oFile = [System.IO.Path]::ChangeExtension($cFile, ".o")
             $exeFile = [System.IO.Path]::ChangeExtension($cFile, ".exe")
 
-            & $Compiler -c $cFile -o $oFile $IncludeFlags -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>$null
+            $ccOutput = & $Compiler -c $cFile -o $oFile $IncludeFlags -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>&1
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "  [FAIL] $testName (Compilation failed)" -ForegroundColor Red
+                if ($ccOutput) {
+                    $ccOutput | ForEach-Object { Write-Host "         $_" -ForegroundColor DarkGray }
+                }
                 $Failed++
                 $FailedTests += "conformance/$testName (compile)"
                 continue
+            } elseif ($ccOutput) {
+                $ccOutput | ForEach-Object { Write-Host "         $_" -ForegroundColor DarkGray }
             }
 
             $extraLinkFlags = @()
@@ -185,9 +206,12 @@ if (Test-Path $confDir) {
                 $extraLinkFlags += "-lpthread"
             }
 
-            gcc $oFile -o $exeFile $extraLinkFlags 2>$null
+            $linkOutput = gcc $oFile -o $exeFile $extraLinkFlags 2>&1
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "  [FAIL] $testName (Link failed)" -ForegroundColor Red
+                if ($linkOutput) {
+                    $linkOutput | ForEach-Object { Write-Host "         $_" -ForegroundColor DarkGray }
+                }
                 $Failed++
                 $FailedTests += "conformance/$testName (link)"
                 Remove-Item $oFile -ErrorAction SilentlyContinue
@@ -217,12 +241,15 @@ if (Test-Path $confDir) {
         $cFile = $test.FullName
         $oFile = [System.IO.Path]::ChangeExtension($cFile, ".o")
 
-        & $Compiler -c $cFile -o $oFile $IncludeFlags -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>$null
+        $ccOutput = & $Compiler -c $cFile -o $oFile $IncludeFlags -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>&1
         if ($LASTEXITCODE -ne 0) {
             Write-Host "  [PASS] $testName (Correctly rejected)" -ForegroundColor Green
             $Passed++
         } else {
             Write-Host "  [FAIL] $testName (Incorrectly accepted invalid C11 code)" -ForegroundColor Red
+            if ($ccOutput) {
+                $ccOutput | ForEach-Object { Write-Host "         $_" -ForegroundColor DarkGray }
+            }
             $Failed++
             $FailedTests += "conformance/$testName (should fail compile)"
         }
@@ -261,18 +288,26 @@ if (Test-Path $optDir) {
             $testLabel = "optimizations/$name.c ($optFlag)"
 
             # Compile with chibicc at the specified optimization level
-            & $Compiler -c $cFile -o $oFile $IncludeFlags -target x86_64-win64 -D_WIN32 -D__GNUC__ $optFlag 2>$null
+            $ccOutput = & $Compiler -c $cFile -o $oFile $IncludeFlags -target x86_64-win64 -D_WIN32 -D__GNUC__ $optFlag 2>&1
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "  [FAIL] $testLabel (Compilation failed)" -ForegroundColor Red
+                if ($ccOutput) {
+                    $ccOutput | ForEach-Object { Write-Host "         $_" -ForegroundColor DarkGray }
+                }
                 $Failed++
                 $FailedTests += "$testLabel (compile)"
                 continue
+            } elseif ($ccOutput) {
+                $ccOutput | ForEach-Object { Write-Host "         $_" -ForegroundColor DarkGray }
             }
 
             # Link with GCC
-            gcc $oFile "tests/common.o" -o $exeFile 2>$null
+            $linkOutput = gcc $oFile "tests/common.o" -o $exeFile 2>&1
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "  [FAIL] $testLabel (Link failed)" -ForegroundColor Red
+                if ($linkOutput) {
+                    $linkOutput | ForEach-Object { Write-Host "         $_" -ForegroundColor DarkGray }
+                }
                 $Failed++
                 $FailedTests += "$testLabel (link)"
                 Remove-Item $oFile -ErrorAction SilentlyContinue
