@@ -34,6 +34,8 @@ int opt_O;
 bool opt_dump_ir;
 bool opt_fpic;
 bool opt_fcommon;
+bool opt_ffunction_sections;
+bool opt_fdata_sections;
 bool opt_g;
 StringArray tmpfiles;
 
@@ -355,6 +357,86 @@ static void test_algebraic_handcrafted(void) {
         ASSERT(0, fn->tail->imm);
     }
 
+    // Re-association: (x + 10) + 20 -> x + 30
+    {
+        HLIRFunction *fn = new_test_fn("test_reassoc_add");
+        HLIRVal *x = hlir_new_val(fn, ty_int);
+        HLIRVal *v10 = add_iconst(fn, 10);
+        HLIRVal *v20 = add_iconst(fn, 20);
+        HLIRVal *add1 = add_binop(fn, HLIR_ADD, x, v10);
+        add_binop(fn, HLIR_ADD, add1, v20);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_ADD, fn->tail->kind);
+        ASSERT(x->id, fn->tail->src1->id);
+    }
+
+    // Cancellation: (x ^ y) ^ y -> x
+    {
+        HLIRFunction *fn = new_test_fn("test_xor_cancel");
+        HLIRVal *x = hlir_new_val(fn, ty_int);
+        HLIRVal *y = hlir_new_val(fn, ty_int);
+        HLIRVal *xor1 = add_binop(fn, HLIR_BITXOR, x, y);
+        add_binop(fn, HLIR_BITXOR, xor1, y);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_CAST, fn->tail->kind);
+        ASSERT(x->id, fn->tail->src1->id);
+    }
+
+    // Absorption: (x & y) | x -> x
+    {
+        HLIRFunction *fn = new_test_fn("test_and_or_absorb");
+        HLIRVal *x = hlir_new_val(fn, ty_int);
+        HLIRVal *y = hlir_new_val(fn, ty_int);
+        HLIRVal *and1 = add_binop(fn, HLIR_BITAND, x, y);
+        add_binop(fn, HLIR_BITOR, and1, x);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_CAST, fn->tail->kind);
+        ASSERT(x->id, fn->tail->src1->id);
+    }
+
+    // Generalized Absorption (commutative): x | (y & x) -> x
+    {
+        HLIRFunction *fn = new_test_fn("test_and_or_absorb_comm");
+        HLIRVal *x = hlir_new_val(fn, ty_int);
+        HLIRVal *y = hlir_new_val(fn, ty_int);
+        HLIRVal *and1 = add_binop(fn, HLIR_BITAND, y, x);
+        add_binop(fn, HLIR_BITOR, x, and1);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_CAST, fn->tail->kind);
+        ASSERT(x->id, fn->tail->src1->id);
+    }
+
+    // Generalized Cancellation: (x - y) + y -> x and y + (x - y) -> x
+    {
+        HLIRFunction *fn = new_test_fn("test_sub_add_cancel");
+        HLIRVal *x = hlir_new_val(fn, ty_int);
+        HLIRVal *y = hlir_new_val(fn, ty_int);
+        HLIRVal *sub1 = add_binop(fn, HLIR_SUB, x, y);
+        add_binop(fn, HLIR_ADD, sub1, y);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_CAST, fn->tail->kind);
+        ASSERT(x->id, fn->tail->src1->id);
+
+        HLIRVal *sub2 = add_binop(fn, HLIR_SUB, x, y);
+        add_binop(fn, HLIR_ADD, y, sub2);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_CAST, fn->tail->kind);
+        ASSERT(x->id, fn->tail->src1->id);
+    }
+
+    // Generalized Negation: (-x) + y -> y - x
+    {
+        HLIRFunction *fn = new_test_fn("test_neg_add_rules");
+        HLIRVal *x = hlir_new_val(fn, ty_int);
+        HLIRVal *y = hlir_new_val(fn, ty_int);
+        HLIRVal *nx = add_unary(fn, HLIR_NEG, x);
+        add_binop(fn, HLIR_ADD, nx, y);
+        hlir_opt_algebraic(fn);
+        ASSERT(HLIR_SUB, fn->tail->kind);
+        ASSERT(y->id, fn->tail->src1->id);
+        ASSERT(x->id, fn->tail->src2->id);
+    }
+
     printf("test_algebraic_handcrafted passed\n");
 }
 
@@ -412,6 +494,20 @@ static void test_local_cse_handcrafted(void) {
         ASSERT(t1->id, fn->tail->src1->id);
     }
 
+    // Unary CSE: t1 = -a, t2 = -a -> t2 becomes cast(t1)
+    {
+        HLIRFunction *fn = new_test_fn("test_cse_unary");
+        HLIRVal *a = hlir_new_val(fn, ty_int);
+        
+        HLIRVal *t1 = add_unary(fn, HLIR_NEG, a);
+        HLIRVal *t2 = add_unary(fn, HLIR_NEG, a);
+        (void)t2;
+        
+        hlir_opt_local_cse(fn);
+        ASSERT(HLIR_CAST, fn->tail->kind);
+        ASSERT(t1->id, fn->tail->src1->id);
+    }
+
     printf("test_local_cse_handcrafted passed\n");
 }
 
@@ -460,6 +556,28 @@ static void test_load_store_handcrafted(void) {
         hlir_opt_load_store(fn);
         int after = count_insns(fn);
         ASSERT(before - 1, after);
+    }
+
+    // Load-to-Load forwarding: v1 = load_var x; v2 = load_var x -> v2 = cast(v1)
+    {
+        HLIRFunction *fn = new_test_fn("test_load_to_load");
+        Obj var = { .name = "x", .is_local = true };
+        
+        HLIRVal *v1 = hlir_new_val(fn, ty_int);
+        HLIRInsn *ld1 = hlir_new_insn(HLIR_LOAD_VAR);
+        ld1->dst = v1;
+        ld1->var = &var;
+        hlir_append_insn(fn, ld1);
+        
+        HLIRVal *v2 = hlir_new_val(fn, ty_int);
+        HLIRInsn *ld2 = hlir_new_insn(HLIR_LOAD_VAR);
+        ld2->dst = v2;
+        ld2->var = &var;
+        hlir_append_insn(fn, ld2);
+        
+        hlir_opt_load_store(fn);
+        ASSERT(HLIR_CAST, fn->tail->kind);
+        ASSERT(v1->id, fn->tail->src1->id);
     }
 
     printf("test_load_store_handcrafted passed\n");
@@ -580,6 +698,45 @@ static void test_cfg_handcrafted(void) {
         hlir_opt_control_flow(fn);
         ASSERT(HLIR_JMP_IF_NZ, fn->tail->kind);
         ASSERT(x->id, fn->tail->src1->id);
+    }
+
+    // JMP_IF_ZERO (!x) -> JMP_IF_NZ x
+    {
+        HLIRFunction *fn = new_test_fn("test_lognot_branch_fold");
+        HLIRVal *x = hlir_new_val(fn, ty_int);
+        HLIRVal *not_x = add_unary(fn, HLIR_LOGNOT, x);
+        
+        HLIRInsn *br = hlir_new_insn(HLIR_JMP_IF_ZERO);
+        br->src1 = not_x;
+        br->label = "L_TARGET";
+        hlir_append_insn(fn, br);
+        
+        hlir_opt_control_flow(fn);
+        ASSERT(HLIR_JMP_IF_NZ, fn->tail->kind);
+        ASSERT(x->id, fn->tail->src1->id);
+    }
+
+    // Jump threading: JMP L1; ... L1: JMP L2 -> JMP L2
+    {
+        HLIRFunction *fn = new_test_fn("test_jump_threading");
+        HLIRInsn *jmp1 = hlir_new_insn(HLIR_JMP);
+        jmp1->label = "L1";
+        hlir_append_insn(fn, jmp1);
+        
+        HLIRInsn *lbl_other = hlir_new_insn(HLIR_LABEL);
+        lbl_other->label = "L_OTHER";
+        hlir_append_insn(fn, lbl_other);
+        
+        HLIRInsn *lbl1 = hlir_new_insn(HLIR_LABEL);
+        lbl1->label = "L1";
+        hlir_append_insn(fn, lbl1);
+        
+        HLIRInsn *jmp2 = hlir_new_insn(HLIR_JMP);
+        jmp2->label = "L2";
+        hlir_append_insn(fn, jmp2);
+        
+        hlir_opt_control_flow(fn);
+        ASSERT(0, strcmp("L2", jmp1->label));
     }
 
     printf("test_cfg_handcrafted passed\n");

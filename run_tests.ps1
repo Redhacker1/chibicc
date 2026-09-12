@@ -1,20 +1,53 @@
 ﻿# PowerShell Comprehensive Test Runner for chibicc
 param(
-    [string]$Compiler = ".\cmake-build-debug\chibicc-cli.exe",
+    [string]$Compiler = "",
+    [string]$OptLevel = "",
     [string]$MinGWInclude = "C:\Users\donov\Documents\MinGW64\x86_64-w64-mingw32\include"
 )
 
 $ErrorActionPreference = "Continue"
 
+# Normalize optimization level flag
+$OptFlag = ""
+if ($OptLevel) {
+    if ($OptLevel -match "^-?O") {
+        $OptFlag = if ($OptLevel.StartsWith("-")) { $OptLevel } else { "-$OptLevel" }
+    } else {
+        $OptFlag = "-O$OptLevel"
+    }
+}
+
 # Resolve compiler path
-if (-not (Test-Path $Compiler)) {
+if (-not $Compiler) {
+    if (Test-Path "cmake-build-debug\chibicc-cli.exe") {
+        $Compiler = "cmake-build-debug\chibicc-cli.exe"
+    } elseif (Test-Path "chibicc.exe") {
+        $Compiler = "chibicc.exe"
+    } else {
+        $cmakeConfig = "Debug"
+        if ($OptFlag -in @("-O2", "-O3")) {
+            $cmakeConfig = "Release"
+        } elseif ($OptFlag -eq "-Os") {
+            $cmakeConfig = "MinSizeRel"
+        }
+        Write-Host "Building chibicc ($cmakeConfig)..." -ForegroundColor Cyan
+        cmd /c "call ""C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat"" -arch=x64 && cmake --build cmake-build-debug --config $cmakeConfig"
+        $Compiler = "cmake-build-debug\chibicc-cli.exe"
+    }
+} elseif (-not (Test-Path $Compiler)) {
     if (Test-Path "chibicc.exe") {
         $Compiler = "chibicc.exe"
     } elseif (Test-Path "cmake-build-debug\chibicc-cli.exe") {
         $Compiler = "cmake-build-debug\chibicc-cli.exe"
     } else {
-        Write-Host "Building chibicc..." -ForegroundColor Cyan
-        cmd /c "call ""C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat"" -arch=x64 && cmake --build cmake-build-debug"
+        $cmakeConfig = "Debug"
+        if ($OptFlag -in @("-O2", "-O3")) {
+            $cmakeConfig = "Release"
+        } elseif ($OptFlag -eq "-Os") {
+            $cmakeConfig = "MinSizeRel"
+        }
+        Write-Host "Building chibicc ($cmakeConfig)..." -ForegroundColor Cyan
+        cmd /c "call ""C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat"" -arch=x64 && cmake --build cmake-build-debug --config $cmakeConfig"
         $Compiler = "cmake-build-debug\chibicc-cli.exe"
     }
 }
@@ -29,7 +62,10 @@ if (Test-Path $MinGWInclude) {
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "       chibicc Test Suite Runner        " -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "Compiler: $Compiler" -ForegroundColor Cyan
+Write-Host "Compiler : $Compiler" -ForegroundColor Cyan
+if ($OptFlag) {
+    Write-Host "Opt Level: $OptFlag" -ForegroundColor Cyan
+}
 
 $Passed = 0
 $Failed = 0
@@ -60,7 +96,8 @@ foreach ($file in $unit_tests) {
     $exeFile = "tests\$name.exe"
 
     # Compile with chibicc
-    $ccOutput = & $Compiler -c $cFile -o $oFile $IncludeFlags -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>&1
+    $optArgs = if ($OptFlag) { @($OptFlag) } else { @() }
+    $ccOutput = & $Compiler -c $cFile -o $oFile $IncludeFlags $optArgs -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  [FAIL] $name.c (Compilation failed)" -ForegroundColor Red
         if ($ccOutput) {
@@ -128,7 +165,8 @@ foreach ($file in $abi_tests) {
     $oFile = "tests\$name.o"
     $exeFile = "tests\$name.exe"
 
-    $ccOutput = & $Compiler -c $cFile -o $oFile -I"$RootDir\include" -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>&1
+    $optArgs = if ($OptFlag) { @($OptFlag) } else { @() }
+    $ccOutput = & $Compiler -c $cFile -o $oFile -I"$RootDir\include" $optArgs -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  [FAIL] $name.c (Compilation failed)" -ForegroundColor Red
         if ($ccOutput) {
@@ -188,7 +226,8 @@ if (Test-Path $confDir) {
             $oFile = [System.IO.Path]::ChangeExtension($cFile, ".o")
             $exeFile = [System.IO.Path]::ChangeExtension($cFile, ".exe")
 
-            $ccOutput = & $Compiler -c $cFile -o $oFile $IncludeFlags -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>&1
+            $optArgs = if ($OptFlag) { @($OptFlag) } else { @() }
+            $ccOutput = & $Compiler -c $cFile -o $oFile $IncludeFlags $optArgs -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>&1
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "  [FAIL] $testName (Compilation failed)" -ForegroundColor Red
                 if ($ccOutput) {
@@ -241,7 +280,8 @@ if (Test-Path $confDir) {
         $cFile = $test.FullName
         $oFile = [System.IO.Path]::ChangeExtension($cFile, ".o")
 
-        $ccOutput = & $Compiler -c $cFile -o $oFile $IncludeFlags -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>&1
+        $optArgs = if ($OptFlag) { @($OptFlag) } else { @() }
+        $ccOutput = & $Compiler -c $cFile -o $oFile $IncludeFlags $optArgs -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>&1
         if ($LASTEXITCODE -ne 0) {
             Write-Host "  [PASS] $testName (Correctly rejected)" -ForegroundColor Green
             $Passed++
@@ -276,7 +316,7 @@ if (Test-Path $optDir) {
         exit 1
     }
 
-    $optLevels = @("-O1", "-O2", "-O3", "-Os")
+    $optLevels = if ($OptFlag) { @($OptFlag) } else { @("-O1", "-O2", "-O3", "-Os") }
 
     foreach ($file in $integrationTests) {
         $name = $file.BaseName

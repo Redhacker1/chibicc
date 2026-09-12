@@ -4,14 +4,39 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-COMPILER="${1:-../chibicc}"
+COMPILER=""
+OPT_FLAG=""
+
+for arg in "$@"; do
+    case "$arg" in
+        -O*|--opt-level=*)
+            if [[ "$arg" == --opt-level=* ]]; then
+                OPT_FLAG="-O${arg#*=}"
+            else
+                OPT_FLAG="$arg"
+            fi
+            ;;
+        *)
+            if [ -z "$COMPILER" ]; then
+                COMPILER="$arg"
+            fi
+            ;;
+    esac
+done
+
+if [ -z "$COMPILER" ]; then
+    COMPILER="../chibicc"
+fi
 ROOT_DIR="$(cd .. && pwd)"
 INCLUDE_FLAGS="-I$ROOT_DIR -I$ROOT_DIR/include -I$ROOT_DIR/compiler_include"
 
 echo "=========================================="
 echo "       C11 Conformance Test Suite         "
 echo "=========================================="
-echo "Compiler: $COMPILER"
+echo "Compiler : $COMPILER"
+if [ -n "$OPT_FLAG" ]; then
+    echo "Opt Level: $OPT_FLAG"
+fi
 
 PASSED=0
 FAILED=0
@@ -32,7 +57,7 @@ for cat_dir in $(find . -maxdepth 1 -mindepth 1 -type d ! -name "negative" | sor
             EXTRA_LINK_FLAGS="-lpthread"
         fi
 
-        if "$COMPILER" -c "$test_file" -o "$obj_file" $INCLUDE_FLAGS 2>/dev/null; then
+        if "$COMPILER" -c "$test_file" -o "$obj_file" $INCLUDE_FLAGS $OPT_FLAG 2>/dev/null; then
             if gcc "$obj_file" -o "$exe_file" $EXTRA_LINK_FLAGS 2>/dev/null; then
                 if "$exe_file" >/dev/null 2>&1; then
                     echo "  [PASS] $test_name"
@@ -62,7 +87,7 @@ echo "[negative (compile rejection tests)]"
 for test_file in $(find negative -maxdepth 1 -name "*.c" | sort); do
     test_name="negative/$(basename "$test_file")"
     obj_file="${test_file%.c}.o"
-    if "$COMPILER" -c "$test_file" -o "$obj_file" $INCLUDE_FLAGS 2>/dev/null; then
+    if "$COMPILER" -c "$test_file" -o "$obj_file" $INCLUDE_FLAGS $OPT_FLAG 2>/dev/null; then
         echo "  [FAIL] $test_name (Incorrectly accepted invalid C11 code)"
         FAILED=$((FAILED + 1))
         FAILED_LIST+=("$test_name (should fail compile)")

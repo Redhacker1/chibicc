@@ -378,13 +378,18 @@ static void z80_gen_insn(LLIRInsn *insn, FILE *out) {
   case LLIR_LEA:
     if (insn->var) {
       if (insn->var->is_local) {
-        println("  ld hl, %d", insn->var->offset);
+        println("  ld hl, %d", insn->var->offset + (int)insn->imm);
         println("  add hl, ix");
-      } else {
+      } else if (insn->imm == 0) {
         println("  ld hl, _%s", insn->var->name);
+      } else {
+        println("  ld hl, _%s+%d", insn->var->name, (int)insn->imm);
       }
     } else if (insn->label) {
-      println("  ld hl, %s", insn->label);
+      if (insn->imm == 0)
+        println("  ld hl, %s", insn->label);
+      else
+        println("  ld hl, %s+%d", insn->label, (int)insn->imm);
     }
     z80_store_vreg("hl", insn->dst);
     break;

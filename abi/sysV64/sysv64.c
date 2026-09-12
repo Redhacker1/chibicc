@@ -8,18 +8,6 @@
 #define GP_MAX 6
 #define FP_MAX 8
 
-static char *argreg8[] = {
-  "%dil", "%sil", "%dl", "%cl", "%r8b", "%r9b"
-};
-
-static char *argreg16[] = {
-  "%di", "%si", "%dx", "%cx", "%r8w", "%r9w"
-};
-
-static char *argreg32[] = {
-  "%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"
-};
-
 static char *argreg64[] = {
   "%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"
 };
@@ -398,7 +386,7 @@ static void sysv64_assign_lvar_offsets(Obj *fn) {
     return;
 
   int top = 16;
-  int bottom = 0;
+  int bottom = 40;
 
   int gp = 0;
   int fp = 0;
@@ -841,30 +829,15 @@ static void sysv64_copy_ret_buffer(Obj *var, FILE *out) {
       const char *reg = (gp == 0) ? "%rax" : "%rdx";
 
       if (size == 8) {
-        println_abi(out,
-                    "  mov %s, %d(%%rbp)",
-                    reg,
-                    var->offset + offset);
+        println_abi(out, "  mov %s, %d(%%rbp)", reg, var->offset + offset);
       } else if (size == 4) {
-        println_abi(out,
-                    "  mov %s, %d(%%rbp)",
-                    gp == 0 ? "%eax" : "%edx",
-                    var->offset + offset);
+        println_abi(out, "  mov %s, %d(%%rbp)", abi_x86_reg32(reg), var->offset + offset);
       } else if (size == 2) {
-        println_abi(out,
-                    "  mov %s, %d(%%rbp)",
-                    gp == 0 ? "%ax" : "%dx",
-                    var->offset + offset);
+        println_abi(out, "  mov %s, %d(%%rbp)", abi_x86_reg16(reg), var->offset + offset);
       } else if (size == 1) {
-        println_abi(out,
-                    "  mov %s, %d(%%rbp)",
-                    gp == 0 ? "%al" : "%dl",
-                    var->offset + offset);
+        println_abi(out, "  mov %s, %d(%%rbp)", abi_x86_reg8(reg), var->offset + offset);
       } else {
-        println_abi(out,
-                    "  mov %s, %d(%%rbp)",
-                    reg,
-                    var->offset + offset);
+        println_abi(out, "  mov %s, %d(%%rbp)", reg, var->offset + offset);
       }
 
       gp++;
@@ -929,34 +902,19 @@ static void sysv64_copy_struct_reg(Obj *fn, FILE *out) {
       const char *reg = (gp == 0) ? "%rax" : "%rdx";
 
       if (size == 8) {
-        println_abi(out,
-                    "  mov %d(%%r11), %s",
-                    offset,
-                    reg);
+        println_abi(out, "  mov %d(%%r11), %s", offset, reg);
       } else if (size == 4) {
-        println_abi(out,
-                    "  movl %d(%%r11), %s",
-                    offset,
-                    gp == 0 ? "%eax" : "%edx");
+        println_abi(out, "  movl %d(%%r11), %s", offset, abi_x86_reg32(reg));
       } else if (size == 2) {
-        println_abi(out,
-                    "  movzwl %d(%%r11), %s",
-                    offset,
-                    gp == 0 ? "%eax" : "%edx");
+        println_abi(out, "  movzwl %d(%%r11), %s", offset, abi_x86_reg32(reg));
       } else if (size == 1) {
-        println_abi(out,
-                    "  movzbl %d(%%r11), %s",
-                    offset,
-                    gp == 0 ? "%eax" : "%edx");
+        println_abi(out, "  movzbl %d(%%r11), %s", offset, abi_x86_reg32(reg));
       } else {
         println_abi(out, "  xor %s, %s", reg, reg);
         for (int b = size - 1; b >= 0; b--) {
           if (b < size - 1)
             println_abi(out, "  shl $8, %s", reg);
-          println_abi(out,
-                      "  movb %d(%%r11), %s",
-                      offset + b,
-                      gp == 0 ? "%al" : "%dl");
+          println_abi(out, "  movb %d(%%r11), %s", offset + b, abi_x86_reg8(reg));
         }
       }
 
@@ -1104,30 +1062,23 @@ static void store_fp(int r, int offset, int sz, FILE *out) {
 
 static void store_gp(int r, int offset, int sz, FILE *out) {
   assert(r >= 0 && r < GP_MAX);
+  const char *reg64 = argreg64[r];
 
   switch (sz) {
   case 1:
-    println_abi(out,
-                "  mov %s, %d(%%rbp)",
-                argreg8[r], offset);
+    println_abi(out, "  mov %s, %d(%%rbp)", abi_x86_reg8(reg64), offset);
     return;
 
   case 2:
-    println_abi(out,
-                "  mov %s, %d(%%rbp)",
-                argreg16[r], offset);
+    println_abi(out, "  mov %s, %d(%%rbp)", abi_x86_reg16(reg64), offset);
     return;
 
   case 4:
-    println_abi(out,
-                "  mov %s, %d(%%rbp)",
-                argreg32[r], offset);
+    println_abi(out, "  mov %s, %d(%%rbp)", abi_x86_reg32(reg64), offset);
     return;
 
   case 8:
-    println_abi(out,
-                "  mov %s, %d(%%rbp)",
-                argreg64[r], offset);
+    println_abi(out, "  mov %s, %d(%%rbp)", reg64, offset);
     return;
 
   default:
@@ -1135,17 +1086,10 @@ static void store_gp(int r, int offset, int sz, FILE *out) {
      * This path is only relevant to unusual aggregate handling.
      */
     for (int i = 0; i < sz; i++) {
-      println_abi(out,
-                  "  mov %s, %d(%%rbp)",
-                  argreg8[r],
-                  offset + i);
-
+      println_abi(out, "  mov %s, %d(%%rbp)", abi_x86_reg8(reg64), offset + i);
       if (i + 1 < sz)
-        println_abi(out,
-                    "  shr $8, %s",
-                    argreg64[r]);
+        println_abi(out, "  shr $8, %s", reg64);
     }
-
     return;
   }
 }
@@ -1157,8 +1101,15 @@ static void store_gp(int r, int offset, int sz, FILE *out) {
 static void sysv64_emit_prologue(Obj *fn, FILE *out) {
   println_abi(out, "  push %%rbp");
   println_abi(out, "  mov %%rsp, %%rbp");
+
   if (fn->stack_size > 0)
     println_abi(out, "  sub $%d, %%rsp", fn->stack_size);
+
+  static const char *x86_callee_gp[] = { "%rbx", "%r12", "%r13", "%r14", "%r15" };
+  for (int i = 0; i < 5; i++) {
+    if (fn->callee_saved_mask & (1 << i))
+      println_abi(out, "  movq %s, %d(%%rbp)", x86_callee_gp[i], -8 - i * 8);
+  }
 
   if (fn->alloca_bottom) {
     println_abi(out,
@@ -1261,76 +1212,20 @@ static void sysv64_emit_prologue(Obj *fn, FILE *out) {
     /*
      * GP register save area.
      */
-    println_abi(out,
-                "  movq %%rdi, %d(%%rbp)",
-                off + 24);
-
-    println_abi(out,
-                "  movq %%rsi, %d(%%rbp)",
-                off + 32);
-
-    println_abi(out,
-                "  movq %%rdx, %d(%%rbp)",
-                off + 40);
-
-    println_abi(out,
-                "  movq %%rcx, %d(%%rbp)",
-                off + 48);
-
-    println_abi(out,
-                "  movq %%r8, %d(%%rbp)",
-                off + 56);
-
-    println_abi(out,
-                "  movq %%r9, %d(%%rbp)",
-                off + 64);
+    for (int i = 0; i < GP_MAX; i++)
+      println_abi(out, "  movq %s, %d(%%rbp)", argreg64[i], off + 24 + i * 8);
 
     /*
      * %al contains the number of XMM registers used by a variadic call.
-     *
      * We can avoid touching the FP save area entirely when it is zero.
      */
     println_abi(out, "  test %%al, %%al");
+    println_abi(out, "  je .L.va_skip_fp.%s", fn->name);
 
-    println_abi(out,
-                "  je .L.va_skip_fp.%s",
-                fn->name);
+    for (int i = 0; i < FP_MAX; i++)
+      println_abi(out, "  movups %%xmm%d, %d(%%rbp)", i, off + 72 + i * 16);
 
-    println_abi(out,
-                "  movups %%xmm0, %d(%%rbp)",
-                off + 72);
-
-    println_abi(out,
-                "  movups %%xmm1, %d(%%rbp)",
-                off + 88);
-
-    println_abi(out,
-                "  movups %%xmm2, %d(%%rbp)",
-                off + 104);
-
-    println_abi(out,
-                "  movups %%xmm3, %d(%%rbp)",
-                off + 120);
-
-    println_abi(out,
-                "  movups %%xmm4, %d(%%rbp)",
-                off + 136);
-
-    println_abi(out,
-                "  movups %%xmm5, %d(%%rbp)",
-                off + 152);
-
-    println_abi(out,
-                "  movups %%xmm6, %d(%%rbp)",
-                off + 168);
-
-    println_abi(out,
-                "  movups %%xmm7, %d(%%rbp)",
-                off + 184);
-
-    println_abi(out,
-                ".L.va_skip_fp.%s:",
-                fn->name);
+    println_abi(out, ".L.va_skip_fp.%s:", fn->name);
   }
 
   /*
@@ -1346,22 +1241,28 @@ static void sysv64_emit_prologue(Obj *fn, FILE *out) {
     Type *ty = var->ty;
 
     if (sysv64_is_aggregate(ty)) {
+      if (ty->size == 0)
+        continue;
+
       SysVTypeClass cls = classify_sysv64(ty);
 
       for (int i = 0; i < cls.n; i++) {
         int offset = i * 8;
         int size = MIN(8, ty->size - offset);
 
-        assert(size > 0);
+        if (size <= 0)
+          continue;
 
         switch (cls.cls[i]) {
         case SYSV_INTEGER:
-          store_gp(gp++, var->offset + offset, size, out);
+          if (gp < GP_MAX)
+            store_gp(gp++, var->offset + offset, size, out);
           break;
 
         case SYSV_SSE:
         case SYSV_SSEUP:
-          store_fp(fp++, var->offset + offset, size, out);
+          if (fp < FP_MAX)
+            store_fp(fp++, var->offset + offset, size, out);
           break;
 
         default:
@@ -1377,17 +1278,26 @@ static void sysv64_emit_prologue(Obj *fn, FILE *out) {
 
     if (ty->kind == TY_FLOAT ||
         ty->kind == TY_DOUBLE) {
-      store_fp(fp++, var->offset, ty->size, out);
+      if (fp < FP_MAX)
+        store_fp(fp++, var->offset, ty->size, out);
       continue;
     }
 
-    store_gp(gp++, var->offset, ty->size, out);
+    if (gp < GP_MAX)
+      store_gp(gp++, var->offset, ty->size, out);
   }
 }
 
 
 static void sysv64_emit_epilogue(Obj *fn, FILE *out) {
   println_abi(out, ".L.return.%s:", fn->name);
+
+  static const char *x86_callee_gp[] = { "%rbx", "%r12", "%r13", "%r14", "%r15" };
+  for (int i = 0; i < 5; i++) {
+    if (fn->callee_saved_mask & (1 << i))
+      println_abi(out, "  movq %d(%%rbp), %s", -8 - i * 8, x86_callee_gp[i]);
+  }
+
   println_abi(out, "  mov %%rbp, %%rsp");
   println_abi(out, "  pop %%rbp");
   println_abi(out, "  ret");
@@ -1443,68 +1353,15 @@ static void sysv64_pre_call(Node *node, FILE *out) {
 
 static const CallConv sysv64_callconv;
 
-static const char *sysv64_reg32(const char *r64) {
-  if (!strcmp(r64, "%rax")) return "%eax";
-  if (!strcmp(r64, "%rcx")) return "%ecx";
-  if (!strcmp(r64, "%rdx")) return "%edx";
-  if (!strcmp(r64, "%rbx")) return "%ebx";
-  if (!strcmp(r64, "%rsi")) return "%esi";
-  if (!strcmp(r64, "%rdi")) return "%edi";
-  if (!strcmp(r64, "%rbp")) return "%ebp";
-  if (!strcmp(r64, "%rsp")) return "%esp";
-  if (!strcmp(r64, "%r8"))  return "%r8d";
-  if (!strcmp(r64, "%r9"))  return "%r9d";
-  if (!strcmp(r64, "%r10")) return "%r10d";
-  if (!strcmp(r64, "%r11")) return "%r11d";
-  if (!strcmp(r64, "%r12")) return "%r12d";
-  if (!strcmp(r64, "%r13")) return "%r13d";
-  if (!strcmp(r64, "%r14")) return "%r14d";
-  if (!strcmp(r64, "%r15")) return "%r15d";
-  return r64;
-}
-
-static const char *sysv64_reg16(const char *r64) {
-  if (!strcmp(r64, "%rax")) return "%ax";
-  if (!strcmp(r64, "%rcx")) return "%cx";
-  if (!strcmp(r64, "%rdx")) return "%dx";
-  if (!strcmp(r64, "%rbx")) return "%bx";
-  if (!strcmp(r64, "%rsi")) return "%si";
-  if (!strcmp(r64, "%rdi")) return "%di";
-  if (!strcmp(r64, "%rbp")) return "%bp";
-  if (!strcmp(r64, "%rsp")) return "%sp";
-  if (!strcmp(r64, "%r8"))  return "%r8w";
-  if (!strcmp(r64, "%r9"))  return "%r9w";
-  if (!strcmp(r64, "%r10")) return "%r10w";
-  if (!strcmp(r64, "%r11")) return "%r11w";
-  if (!strcmp(r64, "%r12")) return "%r12w";
-  if (!strcmp(r64, "%r13")) return "%r13w";
-  if (!strcmp(r64, "%r14")) return "%r14w";
-  if (!strcmp(r64, "%r15")) return "%r15w";
-  return r64;
-}
-
-static const char *sysv64_reg8(const char *r64) {
-  if (!strcmp(r64, "%rax")) return "%al";
-  if (!strcmp(r64, "%rcx")) return "%cl";
-  if (!strcmp(r64, "%rdx")) return "%dl";
-  if (!strcmp(r64, "%rbx")) return "%bl";
-  if (!strcmp(r64, "%rsi")) return "%sil";
-  if (!strcmp(r64, "%rdi")) return "%dil";
-  if (!strcmp(r64, "%rbp")) return "%bpl";
-  if (!strcmp(r64, "%rsp")) return "%spl";
-  if (!strcmp(r64, "%r8"))  return "%r8b";
-  if (!strcmp(r64, "%r9"))  return "%r9b";
-  if (!strcmp(r64, "%r10")) return "%r10b";
-  if (!strcmp(r64, "%r11")) return "%r11b";
-  if (!strcmp(r64, "%r12")) return "%r12b";
-  if (!strcmp(r64, "%r13")) return "%r13b";
-  if (!strcmp(r64, "%r14")) return "%r14b";
-  if (!strcmp(r64, "%r15")) return "%r15b";
-  return r64;
-}
-
 static void sysv64_load_vreg(LLIRVReg *v, const char *reg, FILE *out) {
   if (!v) return;
+  if (v->phys_reg >= 0 && v->phys_reg < 5 && !v->is_float) {
+    static const char *gp[] = { "%rbx", "%r12", "%r13", "%r14", "%r15" };
+    const char *src = gp[v->phys_reg];
+    if (strcmp(src, reg) != 0)
+      println_abi(out, "  movq %s, %s", src, reg);
+    return;
+  }
   int offset = v->spill_offset ? v->spill_offset : -((v->id + 1) * 8);
   int sz = v->ty ? v->ty->size : 8;
   if (reg[1] == 'x') { // %xmm...
@@ -1521,7 +1378,7 @@ static void sysv64_load_vreg(LLIRVReg *v, const char *reg, FILE *out) {
       println_abi(out, "  movswq %d(%%rbp), %s", offset, reg);
   } else if (sz == 4) {
     if (v->ty && v->ty->is_unsigned)
-      println_abi(out, "  movl %d(%%rbp), %s", offset, sysv64_reg32(reg));
+      println_abi(out, "  movl %d(%%rbp), %s", offset, abi_x86_reg32(reg));
     else
       println_abi(out, "  movslq %d(%%rbp), %s", offset, reg);
   } else {
@@ -1531,6 +1388,13 @@ static void sysv64_load_vreg(LLIRVReg *v, const char *reg, FILE *out) {
 
 static void sysv64_store_vreg(const char *reg, LLIRVReg *v, FILE *out) {
   if (!v) return;
+  if (v->phys_reg >= 0 && v->phys_reg < 5 && !v->is_float) {
+    static const char *gp[] = { "%rbx", "%r12", "%r13", "%r14", "%r15" };
+    const char *dst = gp[v->phys_reg];
+    if (strcmp(reg, dst) != 0)
+      println_abi(out, "  movq %s, %s", reg, dst);
+    return;
+  }
   int offset = v->spill_offset ? v->spill_offset : -((v->id + 1) * 8);
   if (reg[1] == 'x') {
     println_abi(out, "  movq %s, %d(%%rbp)", reg, offset);
@@ -1836,12 +1700,10 @@ static void sysv64_emit_call(LLIRInsn *insn, FILE *out) {
 
     if (ty && (ty->kind == TY_FLOAT || ty->kind == TY_DOUBLE)) {
       if (fp_idx < 8) {
-        sysv64_load_call_arg(arg, "%rax", out);
-        println_abi(out,
-                    "  movq %%rax, %%xmm%d",
-                    fp_idx++);
+        char xmm_buf[16];
+        snprintf(xmm_buf, sizeof(xmm_buf), "%%xmm%d", fp_idx++);
+        sysv64_load_vreg(arg, xmm_buf, out);
       }
-
       continue;
     }
 
@@ -1903,26 +1765,24 @@ static void sysv64_emit_call(LLIRInsn *insn, FILE *out) {
             if (part_size == 8) {
               println_abi(out, "  movq %s, %d(%%rbp)", r, offset + part_offset);
             } else if (part_size == 4) {
-              println_abi(out, "  movl %s, %d(%%rbp)", (gp == 0) ? "%eax" : "%edx", offset + part_offset);
+              println_abi(out, "  movl %s, %d(%%rbp)", abi_x86_reg32(r), offset + part_offset);
             } else if (part_size == 2) {
-              println_abi(out, "  movw %s, %d(%%rbp)", (gp == 0) ? "%ax" : "%dx", offset + part_offset);
+              println_abi(out, "  movw %s, %d(%%rbp)", abi_x86_reg16(r), offset + part_offset);
             } else if (part_size == 1) {
-              println_abi(out, "  movb %s, %d(%%rbp)", (gp == 0) ? "%al" : "%dl", offset + part_offset);
+              println_abi(out, "  movb %s, %d(%%rbp)", abi_x86_reg8(r), offset + part_offset);
             } else {
               println_abi(out, "  movq %s, %d(%%rbp)", r, offset + part_offset);
             }
             gp++;
           } else if (cls.cls[i] == SYSV_SSE || cls.cls[i] == SYSV_SSEUP) {
-            println_abi(out, "  movq %%xmm%d, %%r11", fp++);
-            println_abi(out, "  movq %%r11, %d(%%rbp)", offset + part_offset);
+            println_abi(out, "  movq %%xmm%d, %d(%%rbp)", fp++, offset + part_offset);
           }
         }
       }
     } else if (ty && ty->kind == TY_LDOUBLE) {
       println_abi(out, "  fstpt %d(%%rbp)", offset);
     } else if (ty && (ty->kind == TY_FLOAT || ty->kind == TY_DOUBLE)) {
-      println_abi(out, "  movq %%xmm0, %%rax");
-      sysv64_store_vreg("%rax", insn->dst, out);
+      sysv64_store_vreg("%xmm0", insn->dst, out);
     } else {
       sysv64_store_vreg("%rax", insn->dst, out);
     }
@@ -1940,6 +1800,19 @@ static Node *sysv64_builtin_va_start(Node *ap, Node *last, Token *tok) {
   Node *deref_va = new_unary(ND_DEREF, cast, tok);
   Node *deref_ap = new_unary(ND_DEREF, ap, tok);
   return new_binary(ND_ASSIGN, deref_ap, deref_va, tok);
+}
+
+static Node *va_overflow_advance(Obj *res, Node *of_ptr, int sz, Token *tok) {
+  Node head = {};
+  Node *cur = &head;
+  cur = cur->next = new_unary(ND_EXPR_STMT,
+    new_binary(ND_ASSIGN, new_var_node(res, tok), new_unary(ND_DEREF, of_ptr, tok), tok), tok);
+  cur = cur->next = new_unary(ND_EXPR_STMT,
+    new_binary(ND_ASSIGN, new_unary(ND_DEREF, of_ptr, tok),
+      new_cast(new_add(new_cast(new_var_node(res, tok), pointer_to(ty_char)), new_num(sz, tok), tok), pointer_to(ty_void)), tok), tok);
+  Node *block = new_node(ND_BLOCK, tok);
+  block->body = head.next;
+  return block;
 }
 
 static Node *sysv64_builtin_va_arg(Node *ap, Type *ty, Token *tok) {
@@ -1979,16 +1852,7 @@ static Node *sysv64_builtin_va_arg(Node *ap, Type *ty, Token *tok) {
     if_node->then->body = then_head.next;
 
     // else: res = overflow_arg_area; overflow_arg_area = res + 8;
-    Node else_head = {};
-    Node *else_cur = &else_head;
-    else_cur = else_cur->next = new_unary(ND_EXPR_STMT,
-      new_binary(ND_ASSIGN, new_var_node(res, tok), new_unary(ND_DEREF, of_ptr, tok), tok), tok);
-    else_cur = else_cur->next = new_unary(ND_EXPR_STMT,
-      new_binary(ND_ASSIGN, new_unary(ND_DEREF, of_ptr, tok),
-        new_cast(new_add(new_cast(new_var_node(res, tok), pointer_to(ty_char)), new_num(8, tok), tok), pointer_to(ty_void)), tok), tok);
-    if_node->els = new_node(ND_BLOCK, tok);
-    if_node->els->body = else_head.next;
-
+    if_node->els = va_overflow_advance(res, of_ptr, 8, tok);
     cur = cur->next = if_node;
   } else if (klass == 1) {
     // SSE: fp_offset at offset 4
@@ -2014,16 +1878,7 @@ static Node *sysv64_builtin_va_arg(Node *ap, Type *ty, Token *tok) {
     if_node->then->body = then_head.next;
 
     // else: res = overflow_arg_area; overflow_arg_area = res + 8;
-    Node else_head = {};
-    Node *else_cur = &else_head;
-    else_cur = else_cur->next = new_unary(ND_EXPR_STMT,
-      new_binary(ND_ASSIGN, new_var_node(res, tok), new_unary(ND_DEREF, of_ptr, tok), tok), tok);
-    else_cur = else_cur->next = new_unary(ND_EXPR_STMT,
-      new_binary(ND_ASSIGN, new_unary(ND_DEREF, of_ptr, tok),
-        new_cast(new_add(new_cast(new_var_node(res, tok), pointer_to(ty_char)), new_num(8, tok), tok), pointer_to(ty_void)), tok), tok);
-    if_node->els = new_node(ND_BLOCK, tok);
-    if_node->els->body = else_head.next;
-
+    if_node->els = va_overflow_advance(res, of_ptr, 8, tok);
     cur = cur->next = if_node;
   } else {
     // MEMORY
@@ -2052,12 +1907,6 @@ static Node *sysv64_builtin_va_arg(Node *ap, Type *ty, Token *tok) {
 
 static Node *sysv64_builtin_va_copy(Node *dest, Node *src, Token *tok) {
   return new_binary(ND_ASSIGN, new_unary(ND_DEREF, dest, tok), new_unary(ND_DEREF, src, tok), tok);
-}
-
-static Node *sysv64_builtin_va_end(Node *ap, Token *tok) {
-  Node *node = new_node(ND_NULL_EXPR, tok);
-  node->ty = ty_void;
-  return node;
 }
 
 static void sysv64_define_macros(void) {
@@ -2257,7 +2106,7 @@ ABI abi_sysv64 = {
   .builtin_va_start = sysv64_builtin_va_start,
   .builtin_va_arg = sysv64_builtin_va_arg,
   .builtin_va_copy = sysv64_builtin_va_copy,
-  .builtin_va_end = sysv64_builtin_va_end,
+  .builtin_va_end = abi_va_end_nop,
   .emit_prologue = sysv64_emit_prologue,
   .emit_epilogue = sysv64_emit_epilogue,
   .emit_return = sysv64_emit_return,

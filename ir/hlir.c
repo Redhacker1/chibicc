@@ -254,6 +254,14 @@ static HLIRVal *gen_expr_hlir(HLIRFunction *fn, Node *node) {
   }
   case ND_ADDR:
     return gen_addr_hlir(fn, node->lhs);
+  case ND_LABEL_VAL: {
+    HLIRVal *dst = hlir_new_val(fn, pointer_to(ty_void));
+    HLIRInsn *insn = hlir_new_insn(HLIR_SCONST);
+    insn->dst = dst;
+    insn->label = node->unique_label;
+    hlir_append_insn(fn, insn);
+    return dst;
+  }
   case ND_DEREF: {
     HLIRVal *addr = gen_expr_hlir(fn, node->lhs);
     if (node->ty->kind == TY_ARRAY || node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION || node->ty->kind == TY_FUNC)

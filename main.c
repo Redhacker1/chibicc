@@ -21,6 +21,8 @@ typedef enum
 StringArray include_paths;
 bool opt_fcommon = true;
 bool opt_fpic;
+bool opt_ffunction_sections;
+bool opt_fdata_sections;
 bool opt_g = false;
 int opt_O = 0;
 bool opt_dump_ir = false;
@@ -451,6 +453,26 @@ static void parse_args(const int argc, char **argv) {
 
     if (!strcmp(argv[i], "--max-passes")) {
       ir_opt_set_max_passes(atoi(argv[++i]));
+      continue;
+    }
+
+    if (!strcmp(argv[i], "-ffunction-sections")) {
+      opt_ffunction_sections = true;
+      continue;
+    }
+
+    if (!strcmp(argv[i], "-fno-function-sections")) {
+      opt_ffunction_sections = false;
+      continue;
+    }
+
+    if (!strcmp(argv[i], "-fdata-sections")) {
+      opt_fdata_sections = true;
+      continue;
+    }
+
+    if (!strcmp(argv[i], "-fno-data-sections")) {
+      opt_fdata_sections = false;
       continue;
     }
 

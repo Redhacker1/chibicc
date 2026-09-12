@@ -8,18 +8,6 @@ extern Obj *current_fn;
 #define WIN64_REG_MAX 4
 #define WIN64_SHADOW_SPACE 32
 
-static char *win64_argreg8[] = {
-  "%cl", "%dl", "%r8b", "%r9b"
-};
-
-static char *win64_argreg16[] = {
-  "%cx", "%dx", "%r8w", "%r9w"
-};
-
-static char *win64_argreg32[] = {
-  "%ecx", "%edx", "%r8d", "%r9d"
-};
-
 static char *win64_argreg64[] = {
   "%rcx", "%rdx", "%r8", "%r9"
 };
@@ -83,16 +71,18 @@ static int win64_classify_reg(Type *ty) {
   return 2;
 }
 
-static char *win64_gp_reg(int idx, int size) {
+static const char *win64_gp_reg(const int idx, const int size) {
+  assert(idx >= 0 && idx < WIN64_REG_MAX);
+  const char *r64 = win64_argreg64[idx];
   switch (size) {
   case 1:
-    return win64_argreg8[idx];
+    return abi_x86_reg8(r64);
   case 2:
-    return win64_argreg16[idx];
+    return abi_x86_reg16(r64);
   case 4:
-    return win64_argreg32[idx];
+    return abi_x86_reg32(r64);
   case 8:
-    return win64_argreg64[idx];
+    return r64;
   default:
     unreachable();
   }
@@ -104,7 +94,7 @@ static char *win64_gp_reg(int idx, int size) {
  *
  * Both registers are volatile under Win64.
  */
-static void win64_copy_bytes(int size, FILE *out) {
+static void win64_copy_bytes(const int size, FILE *out) {
   int i = 0;
 
   while (size - i >= 8) {
@@ -187,9 +177,9 @@ static void win64_push_arg_expr(
     Node *all_args,
     FILE *out,
     int *depth,
-    int call_pad,
-    int shadow_pad,
-    int pushed)
+    const int call_pad,
+    const int shadow_pad,
+    const int pushed)
 {
   if (current_codegen && current_codegen->gen_expr)
     ((void (*)(void *, FILE *))current_codegen->gen_expr)(arg, out);
@@ -228,14 +218,14 @@ static void win64_push_arg_expr(
    */
   if ((arg->ty->kind == TY_STRUCT || arg->ty->kind == TY_UNION) &&
       win64_returns_by_reference(arg->ty)) {
-    int temp_off = win64_temp_offset(all_args, arg);
+    const int temp_off = win64_temp_offset(all_args, arg);
 
     /*
      * Current RSP is below the temporary area by:
      *
      *   shadow pad + alignment pad + already pushed arguments
      */
-    int dst_off =
+    const int dst_off =
         shadow_pad * 8 +
         call_pad * 8 +
         pushed * 8 +
@@ -275,8 +265,8 @@ static void win64_push_args_rev(
     Node *all_args,
     FILE *out,
     int *depth,
-    int call_pad,
-    int shadow_pad,
+    const int call_pad,
+    const int shadow_pad,
     int *pushed)
 {
   if (!arg)
@@ -336,7 +326,7 @@ static void win64_assign_lvar_offsets(Obj *fn) {
     return;
 
   int top = 48;
-  int bottom = 16;
+  int bottom = 56;
   int param_idx = 0;
 
   for (Obj *var = fn->params; var; var = var->next) {
@@ -395,7 +385,7 @@ static int win64_get_spill_base(Obj *fn) {
   return fn ? (fn->stack_size + 16) : 16;
 }
 
-static void win64_finalize_stack(Obj *fn, int spill_offset) {
+static void win64_finalize_stack(Obj *fn, const int spill_offset) {
   if (fn)
     fn->stack_size = align_to(spill_offset, 16) - 16;
 }
@@ -414,10 +404,10 @@ static int win64_push_args(Node *node, FILE *out, int *depth) {
    * The hidden structure-return pointer occupies the first physical
    * argument slot.
    */
-  int total_args = arg_count + (ret_mem ? 1 : 0);
+  const int total_args = arg_count + (ret_mem ? 1 : 0);
 
-  int temp_bytes = win64_temp_bytes(node->args);
-  int temp_words = temp_bytes / 8;
+  const int temp_bytes = win64_temp_bytes(node->args);
+  const int temp_words = temp_bytes / 8;
 
   /*
    * Temporary storage is always a multiple of 16, so it does not
@@ -433,10 +423,10 @@ static int win64_push_args(Node *node, FILE *out, int *depth) {
    * call site. If total_args > 4, the 5th and subsequent arguments are
    * passed on the stack immediately above the 32-byte shadow space.
    */
-  int stack_slots = total_args < WIN64_REG_MAX ? WIN64_REG_MAX : total_args;
-  int shadow_pad = total_args < WIN64_REG_MAX ? (WIN64_REG_MAX - total_args) : 0;
+  const int stack_slots = total_args < WIN64_REG_MAX ? WIN64_REG_MAX : total_args;
+  const int shadow_pad = total_args < WIN64_REG_MAX ? (WIN64_REG_MAX - total_args) : 0;
 
-  int call_pad =
+  const int call_pad =
       (*depth + stack_slots) & 1;
 
   if (call_pad) {
@@ -481,7 +471,7 @@ static int win64_push_args(Node *node, FILE *out, int *depth) {
       node->func_ty &&
       node->func_ty->is_variadic;
 
-  int named_args =
+  const int named_args =
       node->func_ty ?
       win64_count_params(node->func_ty) : 0;
 
@@ -493,7 +483,7 @@ static int win64_push_args(Node *node, FILE *out, int *depth) {
        slot < total_args && slot < WIN64_REG_MAX;
        slot++) {
 
-    int off = slot * 8;
+    const int off = slot * 8;
 
     /*
      * Physical slot zero is the hidden return-buffer pointer.
@@ -534,7 +524,7 @@ static int win64_push_args(Node *node, FILE *out, int *depth) {
        * For variadic/unprototyped calls, floating-point values must
        * also be copied into the corresponding GP register.
        */
-      int source_index = slot - (ret_mem ? 1 : 0);
+      const int source_index = slot - (ret_mem ? 1 : 0);
 
       if (is_variadic && source_index >= named_args) {
         if (arg->ty->size == 4) {
@@ -542,7 +532,7 @@ static int win64_push_args(Node *node, FILE *out, int *depth) {
               out,
               "  mov %d(%%rsp), %s",
               off,
-              win64_argreg32[slot]);
+              abi_x86_reg32(win64_argreg64[slot]));
         } else {
           println_abi(
               out,
@@ -727,6 +717,12 @@ static void win64_emit_prologue(Obj *fn, FILE *out) {
         fn->stack_size);
   }
 
+  static const char *x86_callee_gp[] = { "%rbx", "%r12", "%r13", "%r14", "%r15" };
+  for (int i = 0; i < 5; i++) {
+    if (fn->callee_saved_mask & (1 << i))
+      println_abi(out, "  movq %s, %d(%%rbp)", x86_callee_gp[i], -24 - i * 8);
+  }
+
   /*
    * Used by alloca.
    */
@@ -752,94 +748,30 @@ static void win64_emit_prologue(Obj *fn, FILE *out) {
   }
 
   /*
-   * Materialize register parameters in their normal local-object
-   * locations.
+   * Materialize register parameters and large aggregate parameters passed by reference.
    */
   int idx = 0;
+  for (const Obj *var = fn->params; var; var = var->next, idx++) {
+    bool is_by_ref = (var->ty->kind == TY_STRUCT || var->ty->kind == TY_UNION) &&
+                     win64_returns_by_reference(var->ty);
+    if (is_by_ref) {
+      if (idx < WIN64_REG_MAX)
+        println_abi(out, "  mov %s, %%r10", win64_argreg64[idx]);
+      else
+        println_abi(out, "  mov %d(%%rbp), %%r10", 48 + (idx - WIN64_REG_MAX) * 8);
 
-  for (const Obj *var = fn->params;
-       var;
-       var = var->next, idx++) {
-
-    if (idx >= WIN64_REG_MAX)
-      break;
-
-    if ((var->ty->kind == TY_STRUCT ||
-         var->ty->kind == TY_UNION) &&
-        win64_returns_by_reference(var->ty)) {
-
-      println_abi(
-          out,
-          "  mov %s, %%r10",
-          win64_argreg64[idx]);
-
-      println_abi(
-          out,
-          "  lea %d(%%rbp), %%r11",
-          var->offset);
-
+      println_abi(out, "  lea %d(%%rbp), %%r11", var->offset);
       win64_copy_bytes(var->ty->size, out);
-      continue;
-    }
-
-    if (is_flonum(var->ty)) {
-      if (var->ty->size == 4) {
-        println_abi(
-            out,
-            "  movss %%xmm%d, %d(%%rbp)",
-            idx,
-            var->offset);
+    } else if (idx < WIN64_REG_MAX) {
+      if (is_flonum(var->ty)) {
+        if (var->ty->size == 4)
+          println_abi(out, "  movss %%xmm%d, %d(%%rbp)", idx, var->offset);
+        else
+          println_abi(out, "  movsd %%xmm%d, %d(%%rbp)", idx, var->offset);
       } else {
-        println_abi(
-            out,
-            "  movsd %%xmm%d, %d(%%rbp)",
-            idx,
-            var->offset);
+        println_abi(out, "  mov %s, %d(%%rbp)", win64_gp_reg(idx, var->ty->size), var->offset);
       }
-
-      continue;
     }
-
-    println_abi(
-        out,
-        "  mov %s, %d(%%rbp)",
-        win64_gp_reg(idx, var->ty->size),
-        var->offset);
-  }
-
-  /*
-   * Stack-passed large aggregate parameters are pointers to caller
-   * allocated objects. Make local copies for normal C parameter
-   * semantics.
-   */
-  idx = 0;
-
-  for (const Obj *var = fn->params;
-       var;
-       var = var->next, idx++) {
-
-    if (idx < WIN64_REG_MAX)
-      continue;
-
-    if ((var->ty->kind != TY_STRUCT &&
-         var->ty->kind != TY_UNION) ||
-        !win64_returns_by_reference(var->ty))
-      continue;
-
-    int stack_off =
-        48 + (idx - WIN64_REG_MAX) * 8;
-
-    println_abi(
-        out,
-        "  mov %d(%%rbp), %%r10",
-        stack_off);
-
-    println_abi(
-        out,
-        "  lea %d(%%rbp), %%r11",
-        var->offset);
-
-    win64_copy_bytes(var->ty->size, out);
   }
 
   /*
@@ -870,7 +802,7 @@ static void win64_emit_prologue(Obj *fn, FILE *out) {
      * fn->params, which is exactly what we want for the physical
      * argument position.
      */
-    int first_off = 16 + named * 8;
+    const int first_off = 16 + named * 8;
 
     println_abi(
         out,
@@ -891,6 +823,12 @@ static void win64_emit_prologue(Obj *fn, FILE *out) {
 
 static void win64_emit_epilogue(Obj *fn, FILE *out) {
   println_abi(out, ".L.return.%s:", fn->name);
+
+  static const char *x86_callee_gp[] = { "%rbx", "%r12", "%r13", "%r14", "%r15" };
+  for (int i = 0; i < 5; i++) {
+    if (fn->callee_saved_mask & (1 << i))
+      println_abi(out, "  movq %d(%%rbp), %s", -24 - i * 8, x86_callee_gp[i]);
+  }
 
   /*
    * Locals/fixed allocation are discarded without needing the exact
@@ -921,70 +859,17 @@ static void win64_emit_return(Obj *fn, Type *return_ty, FILE *out) {
 
 static const CallConv win64_callconv;
 
-static const char *win64_reg32(const char *r64) {
-  if (!strcmp(r64, "%rax")) return "%eax";
-  if (!strcmp(r64, "%rcx")) return "%ecx";
-  if (!strcmp(r64, "%rdx")) return "%edx";
-  if (!strcmp(r64, "%rbx")) return "%ebx";
-  if (!strcmp(r64, "%rsi")) return "%esi";
-  if (!strcmp(r64, "%rdi")) return "%edi";
-  if (!strcmp(r64, "%rbp")) return "%ebp";
-  if (!strcmp(r64, "%rsp")) return "%esp";
-  if (!strcmp(r64, "%r8"))  return "%r8d";
-  if (!strcmp(r64, "%r9"))  return "%r9d";
-  if (!strcmp(r64, "%r10")) return "%r10d";
-  if (!strcmp(r64, "%r11")) return "%r11d";
-  if (!strcmp(r64, "%r12")) return "%r12d";
-  if (!strcmp(r64, "%r13")) return "%r13d";
-  if (!strcmp(r64, "%r14")) return "%r14d";
-  if (!strcmp(r64, "%r15")) return "%r15d";
-  return r64;
-}
-
-static const char *win64_reg16(const char *r64) {
-  if (!strcmp(r64, "%rax")) return "%ax";
-  if (!strcmp(r64, "%rcx")) return "%cx";
-  if (!strcmp(r64, "%rdx")) return "%dx";
-  if (!strcmp(r64, "%rbx")) return "%bx";
-  if (!strcmp(r64, "%rsi")) return "%si";
-  if (!strcmp(r64, "%rdi")) return "%di";
-  if (!strcmp(r64, "%rbp")) return "%bp";
-  if (!strcmp(r64, "%rsp")) return "%sp";
-  if (!strcmp(r64, "%r8"))  return "%r8w";
-  if (!strcmp(r64, "%r9"))  return "%r9w";
-  if (!strcmp(r64, "%r10")) return "%r10w";
-  if (!strcmp(r64, "%r11")) return "%r11w";
-  if (!strcmp(r64, "%r12")) return "%r12w";
-  if (!strcmp(r64, "%r13")) return "%r13w";
-  if (!strcmp(r64, "%r14")) return "%r14w";
-  if (!strcmp(r64, "%r15")) return "%r15w";
-  return r64;
-}
-
-static const char *win64_reg8(const char *r64) {
-  if (!strcmp(r64, "%rax")) return "%al";
-  if (!strcmp(r64, "%rcx")) return "%cl";
-  if (!strcmp(r64, "%rdx")) return "%dl";
-  if (!strcmp(r64, "%rbx")) return "%bl";
-  if (!strcmp(r64, "%rsi")) return "%sil";
-  if (!strcmp(r64, "%rdi")) return "%dil";
-  if (!strcmp(r64, "%rbp")) return "%bpl";
-  if (!strcmp(r64, "%rsp")) return "%spl";
-  if (!strcmp(r64, "%r8"))  return "%r8b";
-  if (!strcmp(r64, "%r9"))  return "%r9b";
-  if (!strcmp(r64, "%r10")) return "%r10b";
-  if (!strcmp(r64, "%r11")) return "%r11b";
-  if (!strcmp(r64, "%r12")) return "%r12b";
-  if (!strcmp(r64, "%r13")) return "%r13b";
-  if (!strcmp(r64, "%r14")) return "%r14b";
-  if (!strcmp(r64, "%r15")) return "%r15b";
-  return r64;
-}
-
 static void win64_load_vreg(LLIRVReg *v, const char *reg, FILE *out) {
   if (!v) return;
-  int offset = v->spill_offset ? v->spill_offset : -((v->id + 1) * 8);
-  int sz = v->ty ? v->ty->size : 8;
+  if (v->phys_reg >= 0 && v->phys_reg < 5 && !v->is_float) {
+    static const char *gp[] = { "%rbx", "%r12", "%r13", "%r14", "%r15" };
+    const char *src = gp[v->phys_reg];
+    if (strcmp(src, reg) != 0)
+      println_abi(out, "  movq %s, %s", src, reg);
+    return;
+  }
+  const int offset = v->spill_offset ? v->spill_offset : -((v->id + 1) * 8);
+  const int sz = v->ty ? v->ty->size : 8;
   if (reg[1] == 'x') {
     println_abi(out, "  movq %d(%%rbp), %s", offset, reg);
   } else if (sz == 1) {
@@ -999,7 +884,7 @@ static void win64_load_vreg(LLIRVReg *v, const char *reg, FILE *out) {
       println_abi(out, "  movswq %d(%%rbp), %s", offset, reg);
   } else if (sz == 4) {
     if (v->ty && v->ty->is_unsigned)
-      println_abi(out, "  movl %d(%%rbp), %s", offset, win64_reg32(reg));
+      println_abi(out, "  movl %d(%%rbp), %s", offset, abi_x86_reg32(reg));
     else
       println_abi(out, "  movslq %d(%%rbp), %s", offset, reg);
   } else {
@@ -1009,12 +894,15 @@ static void win64_load_vreg(LLIRVReg *v, const char *reg, FILE *out) {
 
 static void win64_store_vreg(const char *reg, LLIRVReg *v, FILE *out) {
   if (!v) return;
-  int offset = v->spill_offset ? v->spill_offset : -((v->id + 1) * 8);
-  if (reg[1] == 'x') {
-    println_abi(out, "  movq %s, %d(%%rbp)", reg, offset);
-  } else {
-    println_abi(out, "  movq %s, %d(%%rbp)", reg, offset);
+  if (v->phys_reg >= 0 && v->phys_reg < 5 && !v->is_float) {
+    static const char *gp[] = { "%rbx", "%r12", "%r13", "%r14", "%r15" };
+    const char *dst = gp[v->phys_reg];
+    if (strcmp(reg, dst) != 0)
+      println_abi(out, "  movq %s, %s", reg, dst);
+    return;
   }
+  const int offset = v->spill_offset ? v->spill_offset : -((v->id + 1) * 8);
+  println_abi(out, "  movq %s, %d(%%rbp)", reg, offset);
 }
 
 static void win64_load_call_arg(LLIRVReg *arg, const char *reg, FILE *out) {
@@ -1037,12 +925,11 @@ static void win64_load_call_arg(LLIRVReg *arg, const char *reg, FILE *out) {
 }
 
 static void win64_emit_call(LLIRInsn *insn, FILE *out) {
-  const CallConv *cc = &win64_callconv;
-  int shadow = cc->shadow_space;
-  int extra_args = insn->var ? 1 : 0;
-  int total_args = insn->num_args + extra_args;
-  int stack_args = (total_args > 4) ? (total_args - 4) : 0;
-  int total_alloc = align_to(shadow + stack_args * 8, 16);
+  const int shadow = WIN64_SHADOW_SPACE;
+  const int extra_args = insn->var ? 1 : 0;
+  const int total_args = insn->num_args + extra_args;
+  const int stack_args = (total_args > WIN64_REG_MAX) ? (total_args - WIN64_REG_MAX) : 0;
+  const int total_alloc = align_to(shadow + stack_args * 8, 16);
   if (total_alloc > 0)
     println_abi(out, "  sub $%d, %%rsp", total_alloc);
 
@@ -1051,21 +938,19 @@ static void win64_emit_call(LLIRInsn *insn, FILE *out) {
   }
 
   for (int a = 0; a < insn->num_args; a++) {
-    int pos = a + extra_args;
+    const int pos = a + extra_args;
     LLIRVReg *arg = insn->args[a];
-    if (pos < 4) {
+    if (pos < WIN64_REG_MAX) {
+      const char *r = win64_argreg64[pos];
       if (arg && arg->ty && is_flonum(arg->ty)) {
-        win64_load_call_arg(arg, "%rax", out);
-        println_abi(out, "  movq %%rax, %%xmm%d", pos);
-        const char *r = (cc && cc->gp_regs64[pos]) ? cc->gp_regs64[pos] : "%rcx";
-        println_abi(out, "  movq %%rax, %s", r);
+        win64_load_call_arg(arg, r, out);
+        println_abi(out, "  movq %s, %%xmm%d", r, pos);
       } else {
-        const char *r = (cc && cc->gp_regs64[pos]) ? cc->gp_regs64[pos] : "%rcx";
         win64_load_call_arg(arg, r, out);
       }
     } else {
       win64_load_call_arg(arg, "%rax", out);
-      println_abi(out, "  movq %%rax, %d(%%rsp)", shadow + (pos - 4) * 8);
+      println_abi(out, "  movq %%rax, %d(%%rsp)", shadow + (pos - WIN64_REG_MAX) * 8);
     }
   }
 
@@ -1080,84 +965,15 @@ static void win64_emit_call(LLIRInsn *insn, FILE *out) {
     println_abi(out, "  add $%d, %%rsp", total_alloc);
 
   if (insn->dst && !insn->var) {
-    if (insn->dst->ty && is_flonum(insn->dst->ty)) {
-      println_abi(out, "  movq %%xmm0, %%rax");
+    if (insn->dst->ty && is_flonum(insn->dst->ty))
+      win64_store_vreg("%xmm0", insn->dst, out);
+    else
       win64_store_vreg("%rax", insn->dst, out);
-    } else {
-      win64_store_vreg("%rax", insn->dst, out);
-    }
-  }
-}
-
-static Node *win64_builtin_va_start(Node *ap, Node *last, Token *tok) {
-  VarScope *sc = find_var(&(Token){.loc = "__va_area__", .len = 11});
-  if (!sc || !sc->var)
-    error_tok(tok, "__builtin_va_start used outside variadic function");
-  Node *va_var = new_var_node(sc->var, tok);
-  add_type(ap);
-  if (ap->ty->kind == TY_PTR && (ap->ty->base->kind != TY_STRUCT && ap->ty->base->kind != TY_UNION)) {
-    // Pointer va_list (e.g. char *va_list)
-    Node *addr = new_unary(ND_ADDR, va_var, tok);
-    Node *val = new_unary(ND_DEREF, new_cast(addr, pointer_to(ap->ty)), tok);
-    return new_binary(ND_ASSIGN, ap, val, tok);
-  } else {
-    // Array of __va_elem, or pointer to __va_elem
-    // In __va_elem, overflow_arg_area is at offset 8
-    Node *va_addr = new_unary(ND_ADDR, va_var, tok);
-    Node *val = new_unary(ND_DEREF, new_cast(va_addr, pointer_to(pointer_to(ty_void))), tok);
-    Node *of_addr = new_add(new_cast(ap, pointer_to(ty_char)), new_num(8, tok), tok);
-    Node *of_ptr = new_cast(of_addr, pointer_to(pointer_to(ty_void)));
-    return new_binary(ND_ASSIGN, new_unary(ND_DEREF, of_ptr, tok), val, tok);
   }
 }
 
 static Node *win64_builtin_va_arg(Node *ap, Type *ty, Token *tok) {
-  add_type(ap);
-  bool is_ptr = (ap->ty->kind == TY_PTR && (ap->ty->base->kind != TY_STRUCT && ap->ty->base->kind != TY_UNION));
-
-  Obj *old_p = new_lvar("", pointer_to(ty_void));
-  Node head = {};
-  Node *cur = &head;
-
-  if (is_ptr) {
-    cur = cur->next = new_unary(ND_EXPR_STMT,
-      new_binary(ND_ASSIGN, new_var_node(old_p, tok), new_cast(ap, pointer_to(ty_void)), tok), tok);
-    cur = cur->next = new_unary(ND_EXPR_STMT,
-      new_binary(ND_ASSIGN, ap, new_cast(new_add(new_cast(ap, pointer_to(ty_char)), new_num(8, tok), tok), ap->ty), tok), tok);
-  } else {
-    Node *of_addr = new_add(new_cast(ap, pointer_to(ty_char)), new_num(8, tok), tok);
-    Node *of_ptr = new_cast(of_addr, pointer_to(pointer_to(ty_void)));
-    Node *load_of = new_unary(ND_DEREF, of_ptr, tok);
-    cur = cur->next = new_unary(ND_EXPR_STMT,
-      new_binary(ND_ASSIGN, new_var_node(old_p, tok), load_of, tok), tok);
-    Node *new_of = new_add(new_cast(new_var_node(old_p, tok), pointer_to(ty_char)), new_num(8, tok), tok);
-    cur = cur->next = new_unary(ND_EXPR_STMT,
-      new_binary(ND_ASSIGN, new_unary(ND_DEREF, of_ptr, tok), new_cast(new_of, pointer_to(ty_void)), tok), tok);
-  }
-
-  cur = cur->next = new_unary(ND_EXPR_STMT,
-    new_unary(ND_DEREF, new_cast(new_var_node(old_p, tok), pointer_to(ty)), tok), tok);
-
-  Node *node = new_node(ND_STMT_EXPR, tok);
-  node->body = head.next;
-  return node;
-}
-
-static Node *win64_builtin_va_copy(Node *dest, Node *src, Token *tok) {
-  add_type(dest);
-  if (dest->ty->kind == TY_PTR && (dest->ty->base->kind != TY_STRUCT && dest->ty->base->kind != TY_UNION)) {
-    return new_binary(ND_ASSIGN, dest, src, tok);
-  } else {
-    Node *deref_dest = new_unary(ND_DEREF, dest, tok);
-    Node *deref_src = new_unary(ND_DEREF, src, tok);
-    return new_binary(ND_ASSIGN, deref_dest, deref_src, tok);
-  }
-}
-
-static Node *win64_builtin_va_end(Node *ap, Token *tok) {
-  Node *node = new_node(ND_NULL_EXPR, tok);
-  node->ty = ty_void;
-  return node;
+  return abi_va_arg_ptr(ap, ty, 8, tok);
 }
 
 static void win64_define_macros(void) {
@@ -1328,10 +1144,10 @@ ABI abi_win64 = {
 
   .builtin_alloca = win64_builtin_alloca,
 
-  .builtin_va_start = win64_builtin_va_start,
+  .builtin_va_start = abi_va_start_ptr,
   .builtin_va_arg = win64_builtin_va_arg,
-  .builtin_va_copy = win64_builtin_va_copy,
-  .builtin_va_end = win64_builtin_va_end,
+  .builtin_va_copy = abi_va_copy_ptr,
+  .builtin_va_end = abi_va_end_nop,
 
   .emit_prologue = win64_emit_prologue,
   .emit_epilogue = win64_emit_epilogue,

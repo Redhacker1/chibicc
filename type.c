@@ -193,22 +193,18 @@ void add_type(Node *node) {
 
   assert(node->tok != NULL);
 
-  add_type(node->lhs);
-  add_type(node->rhs);
-  add_type(node->cond);
-  add_type(node->then);
-  add_type(node->els);
-  add_type(node->init);
-  add_type(node->inc);
-
-  for (Node *n = node->body; n; n = n->next)
-    add_type(n);
-  for (Node *n = node->args; n; n = n->next)
-    add_type(n);
-
   switch (node->kind) {
   case ND_NUM:
     node->ty = ty_int;
+    return;
+  case ND_VAR:
+    node->ty = node->var->ty;
+    return;
+  case ND_VLA_PTR:
+    node->ty = pointer_to(ty_void);
+    return;
+  case ND_LABEL_VAL:
+    node->ty = pointer_to(ty_void);
     return;
   case ND_ADD:
   case ND_SUB:
@@ -218,16 +214,21 @@ void add_type(Node *node) {
   case ND_BITAND:
   case ND_BITOR:
   case ND_BITXOR:
+    add_type(node->lhs);
+    add_type(node->rhs);
     usual_arith_conv(&node->lhs, &node->rhs);
     node->ty = node->lhs->ty;
     return;
   case ND_NEG: {
+    add_type(node->lhs);
     Type *ty = get_common_type(ty_int, node->lhs->ty);
     node->lhs = new_cast(node->lhs, ty);
     node->ty = ty;
     return;
   }
   case ND_ASSIGN:
+    add_type(node->lhs);
+    add_type(node->rhs);
     if (node->lhs->ty->kind == TY_ARRAY)
       error_tok(node->lhs->tok, "not an lvalue");
     if (node->lhs->ty->kind != TY_STRUCT && node->lhs->ty->kind != TY_UNION)
@@ -238,29 +239,37 @@ void add_type(Node *node) {
   case ND_NE:
   case ND_LT:
   case ND_LE:
+    add_type(node->lhs);
+    add_type(node->rhs);
     usual_arith_conv(&node->lhs, &node->rhs);
     node->ty = ty_int;
     return;
   case ND_FUNCALL:
+    add_type(node->lhs);
+    for (Node *n = node->args; n; n = n->next)
+      add_type(n);
     node->ty = node->func_ty->return_ty;
     return;
   case ND_NOT:
   case ND_LOGOR:
   case ND_LOGAND:
+    add_type(node->lhs);
+    if (node->rhs)
+      add_type(node->rhs);
     node->ty = ty_int;
     return;
   case ND_BITNOT:
   case ND_SHL:
   case ND_SHR:
+    add_type(node->lhs);
+    if (node->rhs)
+      add_type(node->rhs);
     node->ty = node->lhs->ty;
     return;
-  case ND_VAR:
-    node->ty = node->var->ty;
-    return;
-  case ND_VLA_PTR:
-    node->ty = pointer_to(ty_void);
-    return;
   case ND_COND:
+    add_type(node->cond);
+    add_type(node->then);
+    add_type(node->els);
     if (node->then->ty->kind == TY_VOID || node->els->ty->kind == TY_VOID) {
       node->ty = ty_void;
     } else {
@@ -269,12 +278,16 @@ void add_type(Node *node) {
     }
     return;
   case ND_COMMA:
+    add_type(node->lhs);
+    add_type(node->rhs);
     node->ty = node->rhs->ty;
     return;
   case ND_MEMBER:
+    add_type(node->lhs);
     node->ty = node->member->ty;
     return;
   case ND_ADDR: {
+    add_type(node->lhs);
     Type *ty = node->lhs->ty;
     if (ty->kind == TY_ARRAY)
       node->ty = pointer_to(ty->base);
@@ -283,6 +296,7 @@ void add_type(Node *node) {
     return;
   }
   case ND_DEREF:
+    add_type(node->lhs);
     if (!node->lhs->ty->base)
       error_tok(node->tok, "invalid pointer dereference");
     if (node->lhs->ty->base->kind == TY_VOID)
@@ -291,6 +305,8 @@ void add_type(Node *node) {
     node->ty = node->lhs->ty->base;
     return;
   case ND_STMT_EXPR:
+    for (Node *n = node->body; n; n = n->next)
+      add_type(n);
     if (node->body) {
       Node *stmt = node->body;
       while (stmt->next)
@@ -302,9 +318,6 @@ void add_type(Node *node) {
     }
     error_tok(node->tok, "statement expression returning void is not supported");
     return;
-  case ND_LABEL_VAL:
-    node->ty = pointer_to(ty_void);
-    return;
   case ND_CAS:
     add_type(node->cas_addr);
     add_type(node->cas_old);
@@ -315,9 +328,43 @@ void add_type(Node *node) {
       error_tok(node->cas_addr->tok, "pointer expected");
     return;
   case ND_EXCH:
+    add_type(node->lhs);
+    add_type(node->rhs);
     if (node->lhs->ty->kind != TY_PTR)
       error_tok(node->cas_addr->tok, "pointer expected");
     node->ty = node->lhs->ty->base;
+    return;
+  case ND_IF:
+    add_type(node->cond);
+    add_type(node->then);
+    add_type(node->els);
+    return;
+  case ND_FOR:
+  case ND_DO:
+    add_type(node->init);
+    add_type(node->cond);
+    add_type(node->inc);
+    add_type(node->then);
+    return;
+  case ND_SWITCH:
+    add_type(node->cond);
+    add_type(node->then);
+    return;
+  case ND_CASE:
+    add_type(node->lhs);
+    return;
+  case ND_BLOCK:
+    for (Node *n = node->body; n; n = n->next)
+      add_type(n);
+    return;
+  case ND_RETURN:
+  case ND_EXPR_STMT:
+  case ND_GOTO_EXPR:
+  case ND_LABEL:
+  case ND_CAST:
+    add_type(node->lhs);
+    return;
+  default:
     return;
   }
 }

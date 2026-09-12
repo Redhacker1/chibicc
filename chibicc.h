@@ -180,6 +180,7 @@ struct Obj {
   // Global variable
   bool is_tentative;
   bool is_tls;
+  bool is_readonly;
   char *init_data;
   Relocation *rel;
 
@@ -191,6 +192,7 @@ struct Obj {
   Obj *va_area;
   Obj *alloca_bottom;
   int stack_size;
+  int callee_saved_mask;
   ABI *abi; // Specific ABI / calling convention override for this function
 
   // Static inline function
@@ -272,60 +274,69 @@ struct Node {
   Node *lhs;     // Left-hand side
   Node *rhs;     // Right-hand side
 
-  // "if" or "for" statement
-  Node *cond;
-  Node *then;
-  Node *els;
-  Node *init;
-  Node *inc;
+  // Compact union payload to minimize AST memory footprint
+  union {
+    // Control flow: "if", "for", "while", "do", "switch", "case", "goto", labels, or "?:" conditional
+    struct {
+      Node *cond;
+      Node *then;
+      Node *els;
+      Node *init;
+      Node *inc;
+      char *brk_label;
+      char *cont_label;
+      Node *case_next;
+      Node *default_case;
+      long begin;
+      long end;
+      char *label;
+      char *unique_label;
+      Node *goto_next;
+    };
 
-  // "break" and "continue" labels
-  char *brk_label;
-  char *cont_label;
+    // Block or statement expression
+    struct {
+      Node *body;
+    };
 
-  // Block or statement expression
-  Node *body;
+    // Struct member access
+    struct {
+      Member *member;
+    };
 
-  // Struct member access
-  Member *member;
+    // Function call
+    struct {
+      Type *func_ty;
+      Node *args;
+      Obj *ret_buffer;
+      bool pass_by_stack;
+    };
 
-  // Function call
-  Type *func_ty;
-  Node *args;
-  bool pass_by_stack;
-  Obj *ret_buffer;
+    // "asm" string literal
+    struct {
+      char *asm_str;
+    };
 
-  // Goto or labeled statement, or labels-as-values
-  char *label;
-  char *unique_label;
-  Node *goto_next;
+    // Atomic compare-and-swap and atomic op= operators
+    struct {
+      Node *cas_addr;
+      Node *cas_old;
+      Node *cas_new;
+      Obj *atomic_addr;
+      Node *atomic_expr;
+    };
 
-  // Switch
-  Node *case_next;
-  Node *default_case;
+    // Variable or VLA designator or memzero
+    struct {
+      Obj *var;
+    };
 
-  // Case
-  long begin;
-  long end;
-
-  // "asm" string literal
-  char *asm_str;
-
-  // Atomic compare-and-swap
-  Node *cas_addr;
-  Node *cas_old;
-  Node *cas_new;
-
-  // Atomic op= operators
-  Obj *atomic_addr;
-  Node *atomic_expr;
-
-  // Variable
-  Obj *var;
-
-  // Numeric literal
-  int64_t val;
-  long double fval;
+    // Numeric literal
+    struct {
+      int64_t val;
+      long double fval;
+    };
+  };
 };
 
 typedef struct VarScope VarScope;
@@ -342,10 +353,36 @@ Node *new_node(NodeKind kind, Token *tok);
 Node *new_binary(NodeKind kind, Node *lhs, Node *rhs, Token *tok);
 Node *new_unary(NodeKind kind, Node *expr, Token *tok);
 Node *new_num(int64_t val, Token *tok);
+Node *new_long(int64_t val, Token *tok);
 Node *new_ulong(long val, Token *tok);
 Node *new_var_node(Obj *var, Token *tok);
+Node *new_vla_ptr(Obj *var, Token *tok);
 Node *new_add(Node *lhs, Node *rhs, Token *tok);
 Node *new_sub(Node *lhs, Node *rhs, Token *tok);
+Node *new_if_node(Node *cond, Node *then, Node *els, Token *tok);
+Node *new_for_node(Node *init, Node *cond, Node *inc, Node *then, Token *tok);
+Node *new_do_node(Node *then, Node *cond, Token *tok);
+Node *new_switch_node(Node *cond, Node *then, Token *tok);
+Node *new_case_node(long begin, long end, Token *tok);
+Node *new_block_node(Node *body, Token *tok);
+Node *new_goto_node(char *label, Token *tok);
+Node *new_goto_expr_node(Node *expr, Token *tok);
+Node *new_label_node(char *label, Token *tok);
+Node *new_return_node(Node *expr, Token *tok);
+Node *new_expr_stmt_node(Node *expr, Token *tok);
+Node *new_stmt_expr_node(Node *body, Token *tok);
+Node *new_member_node(Node *lhs, Member *member, Token *tok);
+Node *new_funcall_node(Token *tok, Type *func_ty, Node *args);
+Node *new_asm_node(char *asm_str, Token *tok);
+Node *new_cas_node(Node *addr, Node *old_val, Node *new_val, Token *tok);
+Node *new_exch_node(Node *addr, Node *val, Token *tok);
+
+const char *node_kind_name(NodeKind kind);
+bool node_is_binary(NodeKind kind);
+bool node_is_unary(NodeKind kind);
+bool node_is_control_flow(NodeKind kind);
+bool node_is_atomic(NodeKind kind);
+
 Obj *new_lvar(char *name, Type *ty);
 VarScope *find_var(Token *tok);
 VarScope *push_scope(char *name);
@@ -535,6 +572,8 @@ bool file_exists(const char *path);
 extern StringArray include_paths;
 extern bool opt_fpic;
 extern bool opt_fcommon;
+extern bool opt_ffunction_sections;
+extern bool opt_fdata_sections;
 extern bool opt_g;
 extern int opt_O;
 extern bool opt_dump_ir;

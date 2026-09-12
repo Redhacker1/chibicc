@@ -4,7 +4,30 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-COMPILER="${1:-./chibicc}"
+COMPILER=""
+OPT_FLAG=""
+
+for arg in "$@"; do
+    case "$arg" in
+        -O*|--opt-level=*)
+            if [[ "$arg" == --opt-level=* ]]; then
+                OPT_FLAG="-O${arg#*=}"
+            else
+                OPT_FLAG="$arg"
+            fi
+            ;;
+        *)
+            if [ -z "$COMPILER" ]; then
+                COMPILER="$arg"
+            fi
+            ;;
+    esac
+done
+
+if [ -z "$COMPILER" ]; then
+    COMPILER="./chibicc"
+fi
+
 if [ ! -f "$COMPILER" ]; then
     if [ -f "./cmake-build-debug/chibicc-cli.exe" ]; then
         COMPILER="./cmake-build-debug/chibicc-cli.exe"
@@ -20,7 +43,10 @@ INCLUDE_FLAGS="-I. -Iinclude -Icompiler_include -Itests"
 echo "========================================"
 echo "       chibicc Test Suite Runner        "
 echo "========================================"
-echo "Compiler: $COMPILER"
+echo "Compiler : $COMPILER"
+if [ -n "$OPT_FLAG" ]; then
+    echo "Opt Level: $OPT_FLAG"
+fi
 
 PASSED=0
 FAILED=0
@@ -51,7 +77,7 @@ for c_file in $(find tests -maxdepth 1 -name "*.c" ! -name "abi_*" | sort); do
         EXTRA_LINK_FLAGS="-lkernel32"
     fi
 
-    if "$COMPILER" -c "$c_file" -o "$obj_file" $INCLUDE_FLAGS -D_WIN32 -D__GNUC__ 2>/dev/null; then
+    if "$COMPILER" -c "$c_file" -o "$obj_file" $INCLUDE_FLAGS $OPT_FLAG -D_WIN32 -D__GNUC__ 2>/dev/null; then
         if gcc "$obj_file" "tests/common.o" -o "$exe_file" $EXTRA_LINK_FLAGS 2>/dev/null; then
             if "./$exe_file" >/dev/null 2>&1; then
                 echo "  [PASS] $test_name.c"
@@ -89,7 +115,7 @@ for c_file in $(find tests -maxdepth 1 -name "abi_test_all.c" | sort); do
     obj_file="tests/$test_name.o"
     exe_file="tests/$test_name.exe"
 
-    if "$COMPILER" -c "$c_file" -o "$obj_file" -Iinclude -D_WIN32 -D__GNUC__ 2>/dev/null; then
+    if "$COMPILER" -c "$c_file" -o "$obj_file" -Iinclude $OPT_FLAG -D_WIN32 -D__GNUC__ 2>/dev/null; then
         if gcc -o "$exe_file" "$obj_file" 2>/dev/null; then
             if "./$exe_file" >/dev/null 2>&1; then
                 echo "  [PASS] $test_name.c"
@@ -137,7 +163,7 @@ if [ -d "$CONF_DIR" ]; then
                 EXTRA_LINK_FLAGS="-lpthread"
             fi
 
-            if "$COMPILER" -c "$test_file" -o "$obj_file" $INCLUDE_FLAGS -D_WIN32 -D__GNUC__ 2>/dev/null; then
+            if "$COMPILER" -c "$test_file" -o "$obj_file" $INCLUDE_FLAGS $OPT_FLAG -D_WIN32 -D__GNUC__ 2>/dev/null; then
                 if gcc "$obj_file" -o "$exe_file" $EXTRA_LINK_FLAGS 2>/dev/null; then
                     if "$exe_file" >/dev/null 2>&1; then
                         echo "  [PASS] $test_name"
@@ -167,7 +193,7 @@ if [ -d "$CONF_DIR" ]; then
     for test_file in $(find "$CONF_DIR/negative" -maxdepth 1 -name "*.c" | sort); do
         test_name="negative/$(basename "$test_file")"
         obj_file="${test_file%.c}.o"
-        if "$COMPILER" -c "$test_file" -o "$obj_file" $INCLUDE_FLAGS -D_WIN32 -D__GNUC__ 2>/dev/null; then
+        if "$COMPILER" -c "$test_file" -o "$obj_file" $INCLUDE_FLAGS $OPT_FLAG -D_WIN32 -D__GNUC__ 2>/dev/null; then
             echo "  [FAIL] $test_name (Incorrectly accepted invalid C11 code)"
             FAILED=$((FAILED + 1))
             FAILED_LIST+=("conformance/$test_name (should fail compile)")
@@ -222,7 +248,11 @@ if [ -d "$OPT_DIR" ]; then
         obj_file="$OPT_DIR/$test_name.o"
         exe_file="$OPT_DIR/$test_name.exe"
         
-        for opt_level in -O1 -O2 -O3 -Os; do
+        opt_levels="-O1 -O2 -O3 -Os"
+        if [ -n "$OPT_FLAG" ]; then
+            opt_levels="$OPT_FLAG"
+        fi
+        for opt_level in $opt_levels; do
             test_label="optimizations/$test_name.c ($opt_level)"
             if "$COMPILER" -c "$c_file" -o "$obj_file" $INCLUDE_FLAGS $opt_level -D_WIN32 -D__GNUC__ 2>/dev/null; then
                 if gcc "$obj_file" "tests/common.o" -o "$exe_file" 2>/dev/null; then

@@ -108,6 +108,17 @@ void init_abis(void);
 void set_abi(const char *name);
 void declare_abi_builtin_types(void);
 
+// Common x86 register mapping helpers
+const char *abi_x86_reg32(const char *r64);
+const char *abi_x86_reg16(const char *r64);
+const char *abi_x86_reg8(const char *r64);
+
+// Common pointer-based va_list builtins (used by Win32, Win64, etc.)
+Node *abi_va_start_ptr(Node *ap, Node *last, Token *tok);
+Node *abi_va_arg_ptr(Node *ap, Type *ty, int slot_size, Token *tok);
+Node *abi_va_copy_ptr(Node *dest, Node *src, Token *tok);
+Node *abi_va_end_nop(Node *ap, Token *tok);
+
 // Standard ABI instances
 extern ABI abi_sysv64;
 extern ABI abi_win64;

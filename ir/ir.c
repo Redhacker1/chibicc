@@ -112,10 +112,24 @@ void ir_replace_insn(IRFunction *fn, IRInsn *old_insn, IRInsn *new_insn) {
 
 void ir_renumber_insns(IRFunction *fn) {
   int pos = 0;
+  int *def_count = (fn->num_vregs > 0) ? calloc(fn->num_vregs, sizeof(int)) : NULL;
+  for (int i = 0; i < fn->num_vregs; i++)
+    fn->vregs[i]->def_insn = NULL;
+
   for (IRInsn *insn = fn->head; insn; insn = insn->next) {
     insn->pos = pos++;
-    if (insn->dst)
+    if (insn->dst) {
+      if (def_count)
+        def_count[insn->dst->id]++;
       insn->dst->def_insn = insn;
+    }
+  }
+  if (def_count) {
+    for (int i = 0; i < fn->num_vregs; i++) {
+      if (def_count[i] != 1)
+        fn->vregs[i]->def_insn = NULL;
+    }
+    free(def_count);
   }
   fn->num_insns = pos;
 }
@@ -383,6 +397,14 @@ static IRVReg *gen_expr_ir(IRFunction *fn, Node *node) {
   }
   case ND_ADDR:
     return gen_addr_ir(fn, node->lhs);
+  case ND_LABEL_VAL: {
+    IRVReg *dst = ir_new_vreg(fn, pointer_to(ty_void));
+    IRInsn *insn = ir_new_insn(IR_ADDR);
+    insn->dst = dst;
+    insn->label = node->unique_label;
+    ir_append_insn(fn, insn);
+    return dst;
+  }
   case ND_ASSIGN: {
     if (node->lhs && node->lhs->kind == ND_MEMBER && node->lhs->member && node->lhs->member->is_bitfield) {
       Member *mem = node->lhs->member;
@@ -1103,7 +1125,10 @@ void ir_dump_function(FILE *out, IRFunction *fn) {
       fprintf(out, "v%d = %f\n", insn->dst ? insn->dst->id : -1, insn->fimm);
       break;
     case IR_ADDR:
-      fprintf(out, "v%d = &%s\n", insn->dst ? insn->dst->id : -1, insn->var ? insn->var->name : "(anon)");
+      if (insn->imm != 0)
+        fprintf(out, "v%d = &%s + %lld\n", insn->dst ? insn->dst->id : -1, insn->var ? insn->var->name : (insn->label ? insn->label : "anon"), (long long)insn->imm);
+      else
+        fprintf(out, "v%d = &%s\n", insn->dst ? insn->dst->id : -1, insn->var ? insn->var->name : (insn->label ? insn->label : "anon"));
       break;
     case IR_LOAD:
       fprintf(out, "v%d = *v%d\n", insn->dst ? insn->dst->id : -1, insn->src1 ? insn->src1->id : -1);

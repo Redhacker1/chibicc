@@ -1,7 +1,18 @@
 ﻿param(
     [string]$Compiler = "..\cmake-build-debug\chibicc-cli.exe",
+    [string]$OptLevel = "",
     [string]$MinGWInclude = "C:\Users\donov\Documents\MinGW64\x86_64-w64-mingw32\include"
 )
+
+# Normalize optimization level flag
+$OptFlag = ""
+if ($OptLevel) {
+    if ($OptLevel -match "^-?O") {
+        $OptFlag = if ($OptLevel.StartsWith("-")) { $OptLevel } else { "-$OptLevel" }
+    } else {
+        $OptFlag = "-O$OptLevel"
+    }
+}
 
 # Resolve compiler path
 if (-not (Test-Path $Compiler)) {
@@ -28,7 +39,10 @@ if (Test-Path $MinGWInclude) {
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "       C11 Conformance Test Suite         " -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host "Compiler: $Compiler" -ForegroundColor Cyan
+Write-Host "Compiler : $Compiler" -ForegroundColor Cyan
+if ($OptFlag) {
+    Write-Host "Opt Level: $OptFlag" -ForegroundColor Cyan
+}
 
 $Passed = 0
 $Failed = 0
@@ -47,7 +61,8 @@ foreach ($cat in $categories) {
         $oFile = [System.IO.Path]::ChangeExtension($cFile, ".o")
         $exeFile = [System.IO.Path]::ChangeExtension($cFile, ".exe")
 
-        & $Compiler -c $cFile -o $oFile $IncludeFlags -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>$null
+        $optArgs = if ($OptFlag) { @($OptFlag) } else { @() }
+        & $Compiler -c $cFile -o $oFile $IncludeFlags $optArgs -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>$null
         if ($LASTEXITCODE -ne 0) {
             Write-Host "  [FAIL] $name (Compilation failed)" -ForegroundColor Red
             $Failed++
@@ -92,7 +107,8 @@ foreach ($test in $negTests) {
     $cFile = $test.FullName
     $oFile = [System.IO.Path]::ChangeExtension($cFile, ".o")
 
-    & $Compiler -c $cFile -o $oFile $IncludeFlags -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>$null
+    $optArgs = if ($OptFlag) { @($OptFlag) } else { @() }
+    & $Compiler -c $cFile -o $oFile $IncludeFlags $optArgs -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>$null
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  [PASS] $name (Correctly rejected)" -ForegroundColor Green
         $Passed++

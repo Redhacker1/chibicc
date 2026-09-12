@@ -36,6 +36,7 @@ typedef struct {
   bool is_extern;
   bool is_inline;
   bool is_tls;
+  bool is_const;
   bool is_packed;
   int align;
   ABI *abi;
@@ -185,9 +186,26 @@ static Type *find_tag(Token *tok) {
   return NULL;
 }
 
+#define NODE_CHUNK_SIZE 1024
+
+typedef struct NodeChunk NodeChunk;
+struct NodeChunk {
+  NodeChunk *next;
+  Node nodes[NODE_CHUNK_SIZE];
+};
+
+static NodeChunk *node_chunks;
+static int node_chunk_idx = NODE_CHUNK_SIZE;
+
 Node *new_node(NodeKind kind, Token *tok) {
   assert(tok != NULL);
-  Node *node = calloc(1, sizeof(Node));
+  if (node_chunk_idx >= NODE_CHUNK_SIZE) {
+    NodeChunk *chunk = calloc(1, sizeof(NodeChunk));
+    chunk->next = node_chunks;
+    node_chunks = chunk;
+    node_chunk_idx = 0;
+  }
+  Node *node = &node_chunks->nodes[node_chunk_idx++];
   node->kind = kind;
   node->tok = tok;
   return node;
@@ -218,7 +236,7 @@ Node *new_num(int64_t val, Token *tok) {
   return node;
 }
 
-static Node *new_long(int64_t val, Token *tok) {
+Node *new_long(int64_t val, Token *tok) {
   assert(tok != NULL);
   Node *node = new_node(ND_NUM, tok);
   node->val = val;
@@ -242,7 +260,7 @@ Node *new_var_node(Obj *var, Token *tok) {
   return node;
 }
 
-static Node *new_vla_ptr(Obj *var, Token *tok) {
+Node *new_vla_ptr(Obj *var, Token *tok) {
   assert(var != NULL);
   assert(tok != NULL);
   Node *node = new_node(ND_VLA_PTR, tok);
@@ -255,12 +273,259 @@ Node *new_cast(Node *expr, Type *ty) {
   assert(ty != NULL);
   add_type(expr);
 
-  Node *node = calloc(1, sizeof(Node));
-  node->kind = ND_CAST;
-  node->tok = expr->tok;
+  Node *node = new_node(ND_CAST, expr->tok);
   node->lhs = expr;
   node->ty = copy_type(ty);
   return node;
+}
+
+Node *new_if_node(Node *cond, Node *then, Node *els, Token *tok) {
+  assert(tok != NULL);
+  Node *node = new_node(ND_IF, tok);
+  node->cond = cond;
+  node->then = then;
+  node->els = els;
+  return node;
+}
+
+Node *new_for_node(Node *init, Node *cond, Node *inc, Node *then, Token *tok) {
+  assert(tok != NULL);
+  Node *node = new_node(ND_FOR, tok);
+  node->init = init;
+  node->cond = cond;
+  node->inc = inc;
+  node->then = then;
+  return node;
+}
+
+Node *new_do_node(Node *then, Node *cond, Token *tok) {
+  assert(tok != NULL);
+  Node *node = new_node(ND_DO, tok);
+  node->then = then;
+  node->cond = cond;
+  return node;
+}
+
+Node *new_switch_node(Node *cond, Node *then, Token *tok) {
+  assert(tok != NULL);
+  Node *node = new_node(ND_SWITCH, tok);
+  node->cond = cond;
+  node->then = then;
+  return node;
+}
+
+Node *new_case_node(long begin, long end, Token *tok) {
+  assert(tok != NULL);
+  Node *node = new_node(ND_CASE, tok);
+  node->begin = begin;
+  node->end = end;
+  return node;
+}
+
+Node *new_block_node(Node *body, Token *tok) {
+  assert(tok != NULL);
+  Node *node = new_node(ND_BLOCK, tok);
+  node->body = body;
+  return node;
+}
+
+Node *new_goto_node(char *label, Token *tok) {
+  assert(tok != NULL);
+  Node *node = new_node(ND_GOTO, tok);
+  node->label = label;
+  return node;
+}
+
+Node *new_goto_expr_node(Node *expr, Token *tok) {
+  assert(tok != NULL);
+  Node *node = new_node(ND_GOTO_EXPR, tok);
+  node->lhs = expr;
+  return node;
+}
+
+Node *new_label_node(char *label, Token *tok) {
+  assert(tok != NULL);
+  Node *node = new_node(ND_LABEL, tok);
+  node->label = label;
+  return node;
+}
+
+Node *new_return_node(Node *expr, Token *tok) {
+  assert(tok != NULL);
+  Node *node = new_node(ND_RETURN, tok);
+  node->lhs = expr;
+  return node;
+}
+
+Node *new_expr_stmt_node(Node *expr, Token *tok) {
+  assert(tok != NULL);
+  Node *node = new_node(ND_EXPR_STMT, tok);
+  node->lhs = expr;
+  return node;
+}
+
+Node *new_stmt_expr_node(Node *body, Token *tok) {
+  assert(tok != NULL);
+  Node *node = new_node(ND_STMT_EXPR, tok);
+  node->body = body;
+  return node;
+}
+
+Node *new_member_node(Node *lhs, Member *member, Token *tok) {
+  assert(tok != NULL);
+  Node *node = new_node(ND_MEMBER, tok);
+  node->lhs = lhs;
+  node->member = member;
+  return node;
+}
+
+Node *new_funcall_node(Token *tok, Type *func_ty, Node *args) {
+  assert(tok != NULL);
+  Node *node = new_node(ND_FUNCALL, tok);
+  node->func_ty = func_ty;
+  node->args = args;
+  return node;
+}
+
+Node *new_asm_node(char *asm_str, Token *tok) {
+  assert(tok != NULL);
+  Node *node = new_node(ND_ASM, tok);
+  node->asm_str = asm_str;
+  return node;
+}
+
+Node *new_cas_node(Node *addr, Node *old_val, Node *new_val, Token *tok) {
+  assert(tok != NULL);
+  Node *node = new_node(ND_CAS, tok);
+  node->cas_addr = addr;
+  node->cas_old = old_val;
+  node->cas_new = new_val;
+  return node;
+}
+
+Node *new_exch_node(Node *addr, Node *val, Token *tok) {
+  assert(tok != NULL);
+  Node *node = new_node(ND_EXCH, tok);
+  node->lhs = addr;
+  node->rhs = val;
+  return node;
+}
+
+const char *node_kind_name(NodeKind kind) {
+  switch (kind) {
+  case ND_NULL_EXPR: return "ND_NULL_EXPR";
+  case ND_ADD: return "ND_ADD";
+  case ND_SUB: return "ND_SUB";
+  case ND_MUL: return "ND_MUL";
+  case ND_DIV: return "ND_DIV";
+  case ND_NEG: return "ND_NEG";
+  case ND_MOD: return "ND_MOD";
+  case ND_BITAND: return "ND_BITAND";
+  case ND_BITOR: return "ND_BITOR";
+  case ND_BITXOR: return "ND_BITXOR";
+  case ND_SHL: return "ND_SHL";
+  case ND_SHR: return "ND_SHR";
+  case ND_EQ: return "ND_EQ";
+  case ND_NE: return "ND_NE";
+  case ND_LT: return "ND_LT";
+  case ND_LE: return "ND_LE";
+  case ND_ASSIGN: return "ND_ASSIGN";
+  case ND_COND: return "ND_COND";
+  case ND_COMMA: return "ND_COMMA";
+  case ND_MEMBER: return "ND_MEMBER";
+  case ND_ADDR: return "ND_ADDR";
+  case ND_DEREF: return "ND_DEREF";
+  case ND_NOT: return "ND_NOT";
+  case ND_BITNOT: return "ND_BITNOT";
+  case ND_LOGAND: return "ND_LOGAND";
+  case ND_LOGOR: return "ND_LOGOR";
+  case ND_RETURN: return "ND_RETURN";
+  case ND_IF: return "ND_IF";
+  case ND_FOR: return "ND_FOR";
+  case ND_DO: return "ND_DO";
+  case ND_SWITCH: return "ND_SWITCH";
+  case ND_CASE: return "ND_CASE";
+  case ND_BLOCK: return "ND_BLOCK";
+  case ND_GOTO: return "ND_GOTO";
+  case ND_GOTO_EXPR: return "ND_GOTO_EXPR";
+  case ND_LABEL: return "ND_LABEL";
+  case ND_LABEL_VAL: return "ND_LABEL_VAL";
+  case ND_FUNCALL: return "ND_FUNCALL";
+  case ND_EXPR_STMT: return "ND_EXPR_STMT";
+  case ND_STMT_EXPR: return "ND_STMT_EXPR";
+  case ND_VAR: return "ND_VAR";
+  case ND_VLA_PTR: return "ND_VLA_PTR";
+  case ND_NUM: return "ND_NUM";
+  case ND_CAST: return "ND_CAST";
+  case ND_MEMZERO: return "ND_MEMZERO";
+  case ND_ASM: return "ND_ASM";
+  case ND_CAS: return "ND_CAS";
+  case ND_EXCH: return "ND_EXCH";
+  default: return "ND_UNKNOWN";
+  }
+}
+
+bool node_is_binary(NodeKind kind) {
+  switch (kind) {
+  case ND_ADD:
+  case ND_SUB:
+  case ND_MUL:
+  case ND_DIV:
+  case ND_MOD:
+  case ND_BITAND:
+  case ND_BITOR:
+  case ND_BITXOR:
+  case ND_SHL:
+  case ND_SHR:
+  case ND_EQ:
+  case ND_NE:
+  case ND_LT:
+  case ND_LE:
+  case ND_ASSIGN:
+  case ND_COMMA:
+  case ND_LOGAND:
+  case ND_LOGOR:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool node_is_unary(NodeKind kind) {
+  switch (kind) {
+  case ND_NEG:
+  case ND_ADDR:
+  case ND_DEREF:
+  case ND_NOT:
+  case ND_BITNOT:
+  case ND_CAST:
+  case ND_EXPR_STMT:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool node_is_control_flow(NodeKind kind) {
+  switch (kind) {
+  case ND_RETURN:
+  case ND_IF:
+  case ND_FOR:
+  case ND_DO:
+  case ND_SWITCH:
+  case ND_CASE:
+  case ND_BLOCK:
+  case ND_GOTO:
+  case ND_GOTO_EXPR:
+  case ND_LABEL:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool node_is_atomic(NodeKind kind) {
+  return kind == ND_CAS || kind == ND_EXCH;
 }
 
 VarScope *push_scope(char *name) {
@@ -354,6 +619,7 @@ static Obj *new_string_literal(char *p, Type *ty) {
   }
   Obj *var = new_anon_gvar(ty);
   var->init_data = p;
+  var->is_readonly = true;
   if (ty && ty->kind == TY_ARRAY && ty->base == ty_char && ty->size > 0 && p) {
     hashmap_put2(&str_pool, p, ty->size, var);
   }
@@ -679,9 +945,15 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
       continue;
     }
 
+    if (equal(tok, "const") || equal(tok, "__const") || equal(tok, "__const__")) {
+      if (attr)
+        attr->is_const = true;
+      tok = tok->next;
+      continue;
+    }
+
     // These keywords are recognized but ignored.
-    if (consume(&tok, tok, "const") || consume(&tok, tok, "__const") || consume(&tok, tok, "__const__") ||
-        consume(&tok, tok, "volatile") || consume(&tok, tok, "__volatile") || consume(&tok, tok, "__volatile__") ||
+    if (consume(&tok, tok, "volatile") || consume(&tok, tok, "__volatile") || consume(&tok, tok, "__volatile__") ||
         consume(&tok, tok, "auto") || consume(&tok, tok, "register") ||
         consume(&tok, tok, "restrict") || consume(&tok, tok, "__restrict") || consume(&tok, tok, "__restrict__") ||
         consume(&tok, tok, "_Noreturn") ||
@@ -1873,7 +2145,7 @@ static char *format_asm_dialect(const char *s) {
 
 // asm-stmt = ("asm" | "__asm__" | "__asm") ("volatile" | "inline")* "(" string-literal ... ")"
 static Node *asm_stmt(Token **rest, Token *tok) {
-  Node *node = new_node(ND_ASM, tok);
+  Token *start = tok;
   tok = tok->next;
 
   while (equal(tok, "volatile") || equal(tok, "inline") ||
@@ -1885,7 +2157,7 @@ static Node *asm_stmt(Token **rest, Token *tok) {
   tok = skip(tok, "(");
   if (tok->kind != TK_STR || tok->ty->base->kind != TY_CHAR)
     error_tok(tok, "expected string literal");
-  node->asm_str = format_asm_dialect(tok->str);
+  char *asm_str = format_asm_dialect(tok->str);
   tok = tok->next;
   while (tok && !equal(tok, ")")) {
     if (equal(tok, "(")) {
@@ -1897,7 +2169,7 @@ static Node *asm_stmt(Token **rest, Token *tok) {
   tok = skip(tok, ")");
   consume(&tok, tok, ";");
   *rest = tok;
-  return node;
+  return new_asm_node(asm_str, start);
 }
 
 // stmt = "return" expr? ";"
@@ -1917,7 +2189,7 @@ static Node *asm_stmt(Token **rest, Token *tok) {
 //      | expr-stmt
 static Node *stmt(Token **rest, Token *tok) {
   if (equal(tok, "return")) {
-    Node *node = new_node(ND_RETURN, tok);
+    Node *node = new_return_node(NULL, tok);
     if (consume(rest, tok->next, ";"))
       return node;
 
@@ -1934,7 +2206,7 @@ static Node *stmt(Token **rest, Token *tok) {
   }
 
   if (equal(tok, "if")) {
-    Node *node = new_node(ND_IF, tok);
+    Node *node = new_if_node(NULL, NULL, NULL, tok);
     tok = skip(tok->next, "(");
     node->cond = expr(&tok, tok);
     tok = skip(tok, ")");
@@ -1946,7 +2218,7 @@ static Node *stmt(Token **rest, Token *tok) {
   }
 
   if (equal(tok, "switch")) {
-    Node *node = new_node(ND_SWITCH, tok);
+    Node *node = new_switch_node(NULL, NULL, tok);
     tok = skip(tok->next, "(");
     node->cond = expr(&tok, tok);
     tok = skip(tok, ")");
@@ -1968,7 +2240,6 @@ static Node *stmt(Token **rest, Token *tok) {
     if (!current_switch)
       error_tok(tok, "stray case");
 
-    Node *node = new_node(ND_CASE, tok);
     int begin = const_expr(&tok, tok->next);
     int end;
 
@@ -1981,11 +2252,10 @@ static Node *stmt(Token **rest, Token *tok) {
       end = begin;
     }
 
+    Node *node = new_case_node(begin, end, tok);
     tok = skip(tok, ":");
     node->label = new_unique_name();
     node->lhs = stmt(rest, tok);
-    node->begin = begin;
-    node->end = end;
     node->case_next = current_switch->case_next;
     current_switch->case_next = node;
     return node;
@@ -1995,7 +2265,7 @@ static Node *stmt(Token **rest, Token *tok) {
     if (!current_switch)
       error_tok(tok, "stray default");
 
-    Node *node = new_node(ND_CASE, tok);
+    Node *node = new_case_node(0, 0, tok);
     tok = skip(tok->next, ":");
     node->label = new_unique_name();
     node->lhs = stmt(rest, tok);
@@ -2004,7 +2274,7 @@ static Node *stmt(Token **rest, Token *tok) {
   }
 
   if (equal(tok, "for")) {
-    Node *node = new_node(ND_FOR, tok);
+    Node *node = new_for_node(NULL, NULL, NULL, NULL, tok);
     tok = skip(tok->next, "(");
 
     enter_scope();
@@ -2038,7 +2308,7 @@ static Node *stmt(Token **rest, Token *tok) {
   }
 
   if (equal(tok, "while")) {
-    Node *node = new_node(ND_FOR, tok);
+    Node *node = new_for_node(NULL, NULL, NULL, NULL, tok);
     tok = skip(tok->next, "(");
     node->cond = expr(&tok, tok);
     tok = skip(tok, ")");
@@ -2056,7 +2326,7 @@ static Node *stmt(Token **rest, Token *tok) {
   }
 
   if (equal(tok, "do")) {
-    Node *node = new_node(ND_DO, tok);
+    Node *node = new_do_node(NULL, NULL, tok);
 
     char *brk = brk_label;
     char *cont = cont_label;
@@ -2082,14 +2352,12 @@ static Node *stmt(Token **rest, Token *tok) {
   if (equal(tok, "goto")) {
     if (equal(tok->next, "*")) {
       // [GNU] `goto *ptr` jumps to the address specified by `ptr`.
-      Node *node = new_node(ND_GOTO_EXPR, tok);
-      node->lhs = expr(&tok, tok->next->next);
+      Node *node = new_goto_expr_node(expr(&tok, tok->next->next), tok);
       *rest = skip(tok, ";");
       return node;
     }
 
-    Node *node = new_node(ND_GOTO, tok);
-    node->label = get_ident(tok->next);
+    Node *node = new_goto_node(get_ident(tok->next), tok);
     node->goto_next = gotos;
     gotos = node;
     *rest = skip(tok->next->next, ";");
@@ -2099,7 +2367,7 @@ static Node *stmt(Token **rest, Token *tok) {
   if (equal(tok, "break")) {
     if (!brk_label)
       error_tok(tok, "stray break");
-    Node *node = new_node(ND_GOTO, tok);
+    Node *node = new_goto_node(NULL, tok);
     node->unique_label = brk_label;
     *rest = skip(tok->next, ";");
     return node;
@@ -2108,15 +2376,14 @@ static Node *stmt(Token **rest, Token *tok) {
   if (equal(tok, "continue")) {
     if (!cont_label)
       error_tok(tok, "stray continue");
-    Node *node = new_node(ND_GOTO, tok);
+    Node *node = new_goto_node(NULL, tok);
     node->unique_label = cont_label;
     *rest = skip(tok->next, ";");
     return node;
   }
 
   if (tok->kind == TK_IDENT && equal(tok->next, ":")) {
-    Node *node = new_node(ND_LABEL, tok);
-    node->label = strndup(tok->loc, tok->len);
+    Node *node = new_label_node(strndup(tok->loc, tok->len), tok);
     node->unique_label = new_unique_name();
     node->lhs = stmt(rest, tok->next->next);
     node->goto_next = labels;
@@ -2132,7 +2399,7 @@ static Node *stmt(Token **rest, Token *tok) {
 
 // compound-stmt = (typedef | declaration | stmt)* "}"
 static Node *compound_stmt(Token **rest, Token *tok) {
-  Node *node = new_node(ND_BLOCK, tok);
+  Node *node = new_block_node(NULL, tok);
   Node head = {};
   Node *cur = &head;
 
@@ -2181,13 +2448,12 @@ static Node *compound_stmt(Token **rest, Token *tok) {
 static Node *expr_stmt(Token **rest, Token *tok) {
   if (equal(tok, ";")) {
     *rest = tok->next;
-    return new_node(ND_BLOCK, tok);
+    return new_block_node(NULL, tok);
   }
 
-  Node *node = new_node(ND_EXPR_STMT, tok);
-  node->lhs = expr(&tok, tok);
+  Node *exp = expr(&tok, tok);
   *rest = skip(tok, ";");
-  return node;
+  return new_expr_stmt_node(exp, tok);
 }
 
 // expr = assign ("," expr)?
@@ -4034,6 +4300,8 @@ static Token *global_variable(Token *tok, Type *basety, VarAttr *attr) {
     var->is_definition = !attr->is_extern;
     var->is_static = attr->is_static;
     var->is_tls = attr->is_tls;
+    if (attr->is_const && !attr->is_tls)
+      var->is_readonly = true;
     if (attr->asm_name)
       var->name = attr->asm_name;
     if (attr->align)

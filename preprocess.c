@@ -70,9 +70,27 @@ static CondIncl *cond_incl;
 static HashMap pragma_once;
 static int include_next_idx;
 
+typedef struct EmbedParams EmbedParams;
+struct EmbedParams {
+  bool has_limit;
+  long limit;
+  bool has_prefix;
+  Token *prefix;
+  bool has_suffix;
+  Token *suffix;
+  bool has_if_empty;
+  Token *if_empty;
+  bool is_valid;
+};
+
 static Token *preprocess2(Token *tok);
 static Macro *find_macro(Token *tok);
 static bool expand_macro(Token **rest, Token *tok);
+static char *search_embed_file(char *filename, bool is_dquote, char *cur_file_name);
+static size_t get_binary_file_size(char *path);
+static char *read_embed_filename(Token **rest, Token *tok, bool *is_dquote, bool is_has_embed);
+static bool parse_embed_params(Token **rest, Token *tok, EmbedParams *params, bool is_has_embed);
+static long eval_const_expr_token_list(Token *expr);
 
 static bool is_ident(Token *tok) {
   return tok && (tok->kind == TK_IDENT || tok->kind == TK_KEYWORD);
@@ -82,15 +100,19 @@ static bool is_hash(Token *tok) {
   return tok->at_bol && equal(tok, "#");
 }
 
+static Token *skip_to_bol(Token *tok) {
+  while (!tok->at_bol && tok->kind != TK_EOF)
+    tok = tok->next;
+  return tok;
+}
+
 // Some preprocessor directives such as #include allow extraneous
 // tokens before newline. This function skips such tokens.
 static Token *skip_line(Token *tok) {
   if (tok->at_bol)
     return tok;
   warn_tok(tok, "extra token");
-  while (tok->at_bol)
-    tok = tok->next;
-  return tok;
+  return skip_to_bol(tok);
 }
 
 static Token *copy_token(Token *tok) {
@@ -113,21 +135,23 @@ static Hideset *new_hideset(char *name) {
   return hs;
 }
 
-static Hideset *hideset_union(Hideset *hs1, Hideset *hs2) {
-  Hideset head = {};
-  Hideset *cur = &head;
-
-  for (; hs1; hs1 = hs1->next)
-    cur = cur->next = new_hideset(hs1->name);
-  cur->next = hs2;
-  return head.next;
-}
-
 static bool hideset_contains(Hideset *hs, char *s, int len) {
   for (; hs; hs = hs->next)
     if (strlen(hs->name) == len && !strncmp(hs->name, s, len))
       return true;
   return false;
+}
+
+static Hideset *hideset_union(Hideset *hs1, Hideset *hs2) {
+  Hideset head = {};
+  Hideset *cur = &head;
+
+  for (; hs1; hs1 = hs1->next) {
+    if (!hideset_contains(hs2, hs1->name, strlen(hs1->name)))
+      cur = cur->next = new_hideset(hs1->name);
+  }
+  cur->next = hs2;
+  return head.next;
 }
 
 static Hideset *hideset_intersection(Hideset *hs1, Hideset *hs2) {
@@ -166,11 +190,18 @@ static Token *append(Token *tok1, Token *tok2) {
   return head.next;
 }
 
+static inline bool is_cond_begin(Token *tok) {
+  return tok && (equal(tok, "if") || equal(tok, "ifdef") || equal(tok, "ifndef"));
+}
+
+static inline bool is_cond_branch(Token *tok) {
+  return tok && (equal(tok, "elif") || equal(tok, "elifdef") || equal(tok, "elifndef") ||
+                 equal(tok, "else") || equal(tok, "endif"));
+}
+
 static Token *skip_cond_incl2(Token *tok) {
   while (tok->kind != TK_EOF) {
-    if (is_hash(tok) &&
-        (equal(tok->next, "if") || equal(tok->next, "ifdef") ||
-         equal(tok->next, "ifndef"))) {
+    if (is_hash(tok) && is_cond_begin(tok->next)) {
       tok = skip_cond_incl2(tok->next->next);
       continue;
     }
@@ -181,20 +212,16 @@ static Token *skip_cond_incl2(Token *tok) {
   return tok;
 }
 
-// Skip until next `#else`, `#elif` or `#endif`.
+// Skip until next `#else`, `#elif`, `#elifdef`, `#elifndef` or `#endif`.
 // Nested `#if` and `#endif` are skipped.
 static Token *skip_cond_incl(Token *tok) {
   while (tok->kind != TK_EOF) {
-    if (is_hash(tok) &&
-        (equal(tok->next, "if") || equal(tok->next, "ifdef") ||
-         equal(tok->next, "ifndef"))) {
+    if (is_hash(tok) && is_cond_begin(tok->next)) {
       tok = skip_cond_incl2(tok->next->next);
       continue;
     }
 
-    if (is_hash(tok) &&
-        (equal(tok->next, "elif") || equal(tok->next, "else") ||
-         equal(tok->next, "endif")))
+    if (is_hash(tok) && is_cond_branch(tok->next))
       break;
     tok = tok->next;
   }
@@ -270,6 +297,66 @@ static Token *preprocess_const_expr(Token *tok) {
         tok = skip(tok, ")");
 
       cur = cur->next = new_num_token(m ? 1 : 0, start);
+      continue;
+    }
+
+    if (equal(tok, "__has_embed")) {
+      Token *start = tok;
+      tok = tok->next;
+      if (!equal(tok, "("))
+        error_tok(tok, "expected '(' after __has_embed");
+      tok = tok->next;
+
+      Token head_arg = {};
+      Token *cur_arg = &head_arg;
+      int depth = 1;
+      while (tok->kind != TK_EOF) {
+        if (equal(tok, "(")) {
+          depth++;
+        } else if (equal(tok, ")")) {
+          depth--;
+          if (depth == 0) {
+            tok = tok->next;
+            break;
+          }
+        }
+        cur_arg = cur_arg->next = copy_token(tok);
+        tok = tok->next;
+      }
+      cur_arg->next = new_eof(start);
+
+      Token *has_embed_toks = head_arg.next;
+      if (has_embed_toks && is_ident(has_embed_toks) && has_embed_toks->kind != TK_STR && !equal(has_embed_toks, "<")) {
+        has_embed_toks = preprocess2(has_embed_toks);
+      }
+
+      int result = 0; // __STDC_EMBED_NOT_FOUND__
+      bool is_dquote = false;
+      Token *after_fn = NULL;
+      char *filename = has_embed_toks ? read_embed_filename(&after_fn, has_embed_toks, &is_dquote, true) : NULL;
+      if (filename) {
+        if (after_fn && after_fn->kind != TK_EOF)
+          after_fn = preprocess2(after_fn);
+
+        EmbedParams params = {};
+        Token *after_p = NULL;
+        if (parse_embed_params(&after_p, after_fn, &params, true) && params.is_valid) {
+          char *path = search_embed_file(filename, is_dquote, start->file ? start->file->name : NULL);
+          if (path && file_exists(path)) {
+            size_t sz = get_binary_file_size(path);
+            if (sz != (size_t)-1) {
+              if (params.has_limit && (size_t)params.limit < sz)
+                sz = params.limit;
+              if (sz == 0)
+                result = 2; // __STDC_EMBED_EMPTY__
+              else
+                result = 1; // __STDC_EMBED_FOUND__
+            }
+          }
+        }
+      }
+
+      cur = cur->next = new_num_token(result, start);
       continue;
     }
 
@@ -791,8 +878,8 @@ static char *detect_include_guard(Token *tok) {
     if (equal(tok->next, "endif") && tok->next->next->kind == TK_EOF)
       return macro;
 
-    if (equal(tok, "if") || equal(tok, "ifdef") || equal(tok, "ifndef"))
-      tok = skip_cond_incl(tok->next);
+    if (is_cond_begin(tok->next))
+      tok = skip_cond_incl(tok->next->next);
     else
       tok = tok->next;
   }
@@ -861,6 +948,584 @@ static void read_line_marker(Token **rest, Token *tok) {
   start->file->display_name = tok->str;
 }
 
+static uint8_t *read_binary_file(char *path, size_t *size_out) {
+  if (!path)
+    return NULL;
+  FILE *fp = fopen(path, "rb");
+  if (!fp)
+    return NULL;
+
+  if (fseek(fp, 0, SEEK_END) != 0) {
+    fclose(fp);
+    return NULL;
+  }
+  long sz = ftell(fp);
+  if (sz < 0) {
+    fclose(fp);
+    return NULL;
+  }
+  if (fseek(fp, 0, SEEK_SET) != 0) {
+    fclose(fp);
+    return NULL;
+  }
+
+  uint8_t *buf = malloc(sz > 0 ? sz : 1);
+  if (!buf) {
+    fclose(fp);
+    return NULL;
+  }
+
+  if (sz > 0) {
+    size_t read_bytes = fread(buf, 1, sz, fp);
+    if (read_bytes != (size_t)sz) {
+      free(buf);
+      fclose(fp);
+      return NULL;
+    }
+  }
+
+  fclose(fp);
+  *size_out = (size_t)sz;
+  return buf;
+}
+
+static size_t get_binary_file_size(char *path) {
+  if (!path)
+    return (size_t)-1;
+  FILE *fp = fopen(path, "rb");
+  if (!fp)
+    return (size_t)-1;
+  if (fseek(fp, 0, SEEK_END) != 0) {
+    fclose(fp);
+    return (size_t)-1;
+  }
+  long sz = ftell(fp);
+  fclose(fp);
+  return sz < 0 ? (size_t)-1 : (size_t)sz;
+}
+
+static char *search_embed_file(char *filename, bool is_dquote, char *cur_file_name) {
+  if (filename[0] == '/')
+    return filename;
+
+  if (is_dquote && cur_file_name) {
+    char *path = format("%s/%s", dirname(strdup(cur_file_name)), filename);
+    if (file_exists(path))
+      return path;
+  }
+
+  char *path = search_include_paths(filename);
+  if (path && file_exists(path))
+    return path;
+
+  if (file_exists(filename))
+    return filename;
+
+  return NULL;
+}
+
+static Token *read_balanced_tokens_safe(Token **rest, Token *tok, bool *ok) {
+  if (!equal(tok, "(")) {
+    *ok = false;
+    return NULL;
+  }
+  tok = tok->next;
+  Token head = {};
+  Token *cur = &head;
+  int depth = 1;
+
+  while (tok->kind != TK_EOF) {
+    if (equal(tok, "(")) {
+      depth++;
+    } else if (equal(tok, ")")) {
+      depth--;
+      if (depth == 0) {
+        *rest = tok->next;
+        cur->next = new_eof(tok);
+        *ok = true;
+        return head.next;
+      }
+    }
+    cur = cur->next = copy_token(tok);
+    tok = tok->next;
+  }
+  *ok = false;
+  return NULL;
+}
+
+static long eval_const_expr_token_list(Token *expr) {
+  expr = preprocess_const_expr(expr);
+
+  for (Token *t = expr; t->kind != TK_EOF; t = t->next) {
+    if (is_ident(t)) {
+      Token *next = t->next;
+      *t = *new_num_token(0, t);
+      t->next = next;
+    }
+  }
+
+  convert_pp_tokens(expr);
+
+  Token *rest2 = NULL;
+  long val = const_expr(&rest2, expr);
+  if (rest2 && rest2->kind != TK_EOF)
+    error_tok(rest2, "extra token in constant expression");
+  return val;
+}
+
+static char *read_embed_filename(Token **rest, Token *tok, bool *is_dquote, bool is_has_embed) {
+  if (!tok || tok->kind == TK_EOF) {
+    if (!is_has_embed)
+      error_tok(tok, "expected a filename");
+    return NULL;
+  }
+
+  if (tok->kind == TK_STR) {
+    *is_dquote = true;
+    *rest = tok->next;
+    return strndup(tok->loc + 1, tok->len - 2);
+  }
+
+  if (equal(tok, "<")) {
+    Token *start = tok;
+    for (; !equal(tok, ">"); tok = tok->next) {
+      if (tok->at_bol || tok->kind == TK_EOF || (is_has_embed && equal(tok, ")"))) {
+        if (!is_has_embed)
+          error_tok(tok, "expected '>'");
+        return NULL;
+      }
+    }
+    *is_dquote = false;
+    *rest = tok->next;
+    return join_tokens(start->next, tok);
+  }
+
+  if (is_ident(tok)) {
+    Token *tok2 = preprocess2(copy_line(rest, tok));
+    return read_embed_filename(&tok2, tok2, is_dquote, is_has_embed);
+  }
+
+  if (!is_has_embed)
+    error_tok(tok, "expected a filename");
+  return NULL;
+}
+
+static bool parse_embed_params(Token **rest, Token *tok, EmbedParams *params, bool is_has_embed) {
+  params->is_valid = true;
+
+  while (tok && tok->kind != TK_EOF && (is_has_embed || !tok->at_bol)) {
+    if (is_has_embed && equal(tok, ")"))
+      break;
+
+    if (equal(tok, "limit") || equal(tok, "__limit__")) {
+      if (params->has_limit) {
+        if (!is_has_embed)
+          error_tok(tok, "duplicate limit parameter");
+        params->is_valid = false;
+        return false;
+      }
+      bool ok = false;
+      Token *arg = read_balanced_tokens_safe(&tok, tok->next, &ok);
+      if (!ok) {
+        if (!is_has_embed)
+          error_tok(tok, "invalid limit parameter");
+        params->is_valid = false;
+        return false;
+      }
+      long val = eval_const_expr_token_list(arg);
+      params->has_limit = true;
+      params->limit = val < 0 ? 0 : val;
+      continue;
+    }
+
+    if (equal(tok, "prefix") || equal(tok, "__prefix__")) {
+      if (params->has_prefix) {
+        if (!is_has_embed)
+          error_tok(tok, "duplicate prefix parameter");
+        params->is_valid = false;
+        return false;
+      }
+      bool ok = false;
+      Token *arg = read_balanced_tokens_safe(&tok, tok->next, &ok);
+      if (!ok) {
+        if (!is_has_embed)
+          error_tok(tok, "invalid prefix parameter");
+        params->is_valid = false;
+        return false;
+      }
+      params->has_prefix = true;
+      params->prefix = arg;
+      continue;
+    }
+
+    if (equal(tok, "suffix") || equal(tok, "__suffix__")) {
+      if (params->has_suffix) {
+        if (!is_has_embed)
+          error_tok(tok, "duplicate suffix parameter");
+        params->is_valid = false;
+        return false;
+      }
+      bool ok = false;
+      Token *arg = read_balanced_tokens_safe(&tok, tok->next, &ok);
+      if (!ok) {
+        if (!is_has_embed)
+          error_tok(tok, "invalid suffix parameter");
+        params->is_valid = false;
+        return false;
+      }
+      params->has_suffix = true;
+      params->suffix = arg;
+      continue;
+    }
+
+    if (equal(tok, "if_empty") || equal(tok, "__if_empty__")) {
+      if (params->has_if_empty) {
+        if (!is_has_embed)
+          error_tok(tok, "duplicate if_empty parameter");
+        params->is_valid = false;
+        return false;
+      }
+      bool ok = false;
+      Token *arg = read_balanced_tokens_safe(&tok, tok->next, &ok);
+      if (!ok) {
+        if (!is_has_embed)
+          error_tok(tok, "invalid if_empty parameter");
+        params->is_valid = false;
+        return false;
+      }
+      params->has_if_empty = true;
+      params->if_empty = arg;
+      continue;
+    }
+
+    // Vendor extension parameter: ident :: ident ( ... ) or ident :: ident
+    if (is_ident(tok) && equal(tok->next, "::")) {
+      tok = tok->next->next;
+      if (!is_ident(tok)) {
+        if (!is_has_embed)
+          error_tok(tok, "expected identifier after '::'");
+        params->is_valid = false;
+        return false;
+      }
+      tok = tok->next;
+      if (equal(tok, "(")) {
+        bool ok = false;
+        read_balanced_tokens_safe(&tok, tok, &ok);
+        if (!ok) {
+          params->is_valid = false;
+          return false;
+        }
+      }
+      if (is_has_embed)
+        params->is_valid = false;
+      continue;
+    }
+
+    // Unknown parameter
+    if (!is_has_embed)
+      error_tok(tok, "unknown embed parameter");
+    params->is_valid = false;
+    return false;
+  }
+
+  if (rest)
+    *rest = tok;
+  return params->is_valid;
+}
+
+static Token *new_num_token_val(int val, Token *tmpl) {
+  static char num_strs[256][4];
+  static bool inited = false;
+  if (!inited) {
+    for (int i = 0; i < 256; i++)
+      snprintf(num_strs[i], sizeof(num_strs[i]), "%d", i);
+    inited = true;
+  }
+
+  Token *t = calloc(1, sizeof(Token));
+  t->kind = TK_PP_NUM;
+  t->loc = (val >= 0 && val <= 255) ? num_strs[val] : format("%d", val);
+  t->len = strlen(t->loc);
+  t->file = tmpl->file;
+  t->filename = tmpl->filename ? tmpl->filename : tmpl->file->display_name;
+  t->line_no = tmpl->line_no;
+  return t;
+}
+
+static Token *new_comma_token(Token *tmpl) {
+  Token *t = calloc(1, sizeof(Token));
+  t->kind = TK_PUNCT;
+  t->loc = ",";
+  t->len = 1;
+  t->file = tmpl->file;
+  t->filename = tmpl->filename ? tmpl->filename : tmpl->file->display_name;
+  t->line_no = tmpl->line_no;
+  return t;
+}
+
+static Token *handle_embed(Token *start, Token *tok) {
+  Token *rest_line = NULL;
+  Token *line_toks = copy_line(&rest_line, tok);
+
+  // If the first token after embed is an identifier (not string or '<'), macro-expand the line
+  if (is_ident(line_toks) && line_toks->kind != TK_STR && !equal(line_toks, "<")) {
+    line_toks = preprocess2(line_toks);
+  }
+
+  bool is_dquote = false;
+  Token *after_filename = NULL;
+  char *filename = read_embed_filename(&after_filename, line_toks, &is_dquote, false);
+  if (!filename)
+    error_tok(tok, "expected a filename");
+
+  // Macro-expand the parameter tokens if any
+  Token *param_toks = after_filename;
+  if (param_toks && param_toks->kind != TK_EOF) {
+    param_toks = preprocess2(param_toks);
+  }
+
+  EmbedParams params = {};
+  Token *end_params = NULL;
+  parse_embed_params(&end_params, param_toks, &params, false);
+
+  char *path = search_embed_file(filename, is_dquote, start->file ? start->file->name : NULL);
+  if (!path)
+    error_tok(start, "cannot find embed file: %s", filename);
+
+  size_t file_len = 0;
+  uint8_t *data = read_binary_file(path, &file_len);
+  if (!data)
+    error_tok(start, "cannot read embed file: %s", path);
+
+  size_t count = file_len;
+  if (params.has_limit && (size_t)params.limit < count)
+    count = params.limit;
+
+  Token head = {};
+  Token *cur = &head;
+
+  if (count == 0) {
+    if (params.if_empty) {
+      for (Token *t = params.if_empty; t && t->kind != TK_EOF; t = t->next)
+        cur = cur->next = copy_token(t);
+    }
+  } else {
+    if (params.prefix && params.prefix->kind != TK_EOF) {
+      for (Token *t = params.prefix; t && t->kind != TK_EOF; t = t->next)
+        cur = cur->next = copy_token(t);
+      cur = cur->next = new_comma_token(start);
+    }
+
+    for (size_t i = 0; i < count; i++) {
+      if (i > 0)
+        cur = cur->next = new_comma_token(start);
+      cur = cur->next = new_num_token_val(data[i], start);
+    }
+
+    if (params.suffix && params.suffix->kind != TK_EOF) {
+      cur = cur->next = new_comma_token(start);
+      for (Token *t = params.suffix; t && t->kind != TK_EOF; t = t->next)
+        cur = cur->next = copy_token(t);
+    }
+  }
+
+  free(data);
+
+  if (head.next) {
+    cur->next = rest_line;
+    return head.next;
+  }
+  return rest_line;
+}
+
+// Preprocessor directive handler dispatch table
+typedef Token *(*DirectiveHandler)(Token *start, Token *tok);
+
+typedef struct {
+  char *name;
+  DirectiveHandler handler;
+} Directive;
+
+static Token *handle_include(Token *start, Token *tok) {
+  bool is_dquote;
+  char *filename = read_include_filename(&tok, tok->next, &is_dquote);
+
+  if (filename[0] != '/' && is_dquote) {
+    char *path = format("%s/%s", dirname(strdup(start->file->name)), filename);
+    if (file_exists(path))
+      return include_file(tok, path, start->next->next);
+  }
+
+  char *path = search_include_paths(filename);
+  return include_file(tok, path ? path : filename, start->next->next);
+}
+
+static Token *handle_include_next(Token *start, Token *tok) {
+  bool ignore;
+  char *filename = read_include_filename(&tok, tok->next, &ignore);
+  char *path = search_include_next(filename);
+  return include_file(tok, path ? path : filename, start->next->next);
+}
+
+static Token *handle_embed_directive(Token *start, Token *tok) {
+  return handle_embed(start, tok->next);
+}
+
+static Token *handle_define(Token *start, Token *tok) {
+  read_macro_definition(&tok, tok->next);
+  return tok;
+}
+
+static Token *handle_undef(Token *start, Token *tok) {
+  tok = tok->next;
+  if (!is_ident(tok))
+    error_tok(tok, "macro name must be an identifier");
+  undef_macro(strndup(tok->loc, tok->len));
+  return skip_line(tok->next);
+}
+
+static Token *handle_if(Token *start, Token *tok) {
+  long val = eval_const_expr(&tok, tok);
+  push_cond_incl(start, val);
+  if (!val)
+    tok = skip_cond_incl(tok);
+  return tok;
+}
+
+static Token *handle_ifdef(Token *start, Token *tok) {
+  bool defined = find_macro(tok->next);
+  push_cond_incl(tok, defined);
+  tok = skip_line(tok->next->next);
+  if (!defined)
+    tok = skip_cond_incl(tok);
+  return tok;
+}
+
+static Token *handle_ifndef(Token *start, Token *tok) {
+  bool defined = find_macro(tok->next);
+  push_cond_incl(tok, !defined);
+  tok = skip_line(tok->next->next);
+  if (defined)
+    tok = skip_cond_incl(tok);
+  return tok;
+}
+
+static Token *handle_elif(Token *start, Token *tok) {
+  if (!cond_incl || cond_incl->ctx == IN_ELSE)
+    error_tok(start, "stray #elif");
+  cond_incl->ctx = IN_ELIF;
+
+  if (!cond_incl->included && eval_const_expr(&tok, tok))
+    cond_incl->included = true;
+  else
+    tok = skip_cond_incl(tok);
+  return tok;
+}
+
+static Token *handle_elifdef(Token *start, Token *tok) {
+  if (!cond_incl || cond_incl->ctx == IN_ELSE)
+    error_tok(start, "stray #elifdef");
+  cond_incl->ctx = IN_ELIF;
+
+  bool defined = find_macro(tok->next);
+  tok = skip_line(tok->next->next);
+  if (!cond_incl->included && defined)
+    cond_incl->included = true;
+  else
+    tok = skip_cond_incl(tok);
+  return tok;
+}
+
+static Token *handle_elifndef(Token *start, Token *tok) {
+  if (!cond_incl || cond_incl->ctx == IN_ELSE)
+    error_tok(start, "stray #elifndef");
+  cond_incl->ctx = IN_ELIF;
+
+  bool defined = find_macro(tok->next);
+  tok = skip_line(tok->next->next);
+  if (!cond_incl->included && !defined)
+    cond_incl->included = true;
+  else
+    tok = skip_cond_incl(tok);
+  return tok;
+}
+
+static Token *handle_else(Token *start, Token *tok) {
+  if (!cond_incl || cond_incl->ctx == IN_ELSE)
+    error_tok(start, "stray #else");
+  cond_incl->ctx = IN_ELSE;
+  tok = skip_line(tok->next);
+
+  if (cond_incl->included)
+    tok = skip_cond_incl(tok);
+  return tok;
+}
+
+static Token *handle_endif(Token *start, Token *tok) {
+  if (!cond_incl)
+    error_tok(start, "stray #endif");
+  cond_incl = cond_incl->next;
+  return skip_line(tok->next);
+}
+
+static Token *handle_line(Token *start, Token *tok) {
+  read_line_marker(&tok, tok->next);
+  return tok;
+}
+
+static Token *handle_pragma(Token *start, Token *tok) {
+  if (equal(tok->next, "once")) {
+    hashmap_put(&pragma_once, clean_path(tok->file->name), (void *)1);
+    return skip_line(tok->next->next);
+  }
+
+  do {
+    tok = tok->next;
+  } while (!tok->at_bol);
+  return tok;
+}
+
+static Token *handle_error(Token *start, Token *tok) {
+  error_tok(tok, "error");
+  return tok;
+}
+
+static Token *handle_warning(Token *start, Token *tok) {
+  warn_tok(tok, "warning directive");
+  return skip_to_bol(tok->next);
+}
+
+static const Directive directives[] = {
+  {"include", handle_include},
+  {"include_next", handle_include_next},
+  {"embed", handle_embed_directive},
+  {"define", handle_define},
+  {"undef", handle_undef},
+  {"if", handle_if},
+  {"ifdef", handle_ifdef},
+  {"ifndef", handle_ifndef},
+  {"elif", handle_elif},
+  {"elifdef", handle_elifdef},
+  {"elifndef", handle_elifndef},
+  {"else", handle_else},
+  {"endif", handle_endif},
+  {"line", handle_line},
+  {"pragma", handle_pragma},
+  {"error", handle_error},
+  {"warning", handle_warning},
+  {NULL, NULL}
+};
+
+static DirectiveHandler find_directive(Token *tok) {
+  if (!is_ident(tok))
+    return NULL;
+  for (const Directive *d = directives; d->name; d++) {
+    if (equal(tok, d->name))
+      return d->handler;
+  }
+  return NULL;
+}
+
 // Visit all tokens in `tok` while evaluating preprocessing
 // macros and directives.
 static Token *preprocess2(Token *tok) {
@@ -884,131 +1549,20 @@ static Token *preprocess2(Token *tok) {
     Token *start = tok;
     tok = tok->next;
 
-    if (equal(tok, "include")) {
-      bool is_dquote;
-      char *filename = read_include_filename(&tok, tok->next, &is_dquote);
-
-      if (filename[0] != '/' && is_dquote) {
-        char *path = format("%s/%s", dirname(strdup(start->file->name)), filename);
-        if (file_exists(path)) {
-          tok = include_file(tok, path, start->next->next);
-          continue;
-        }
-      }
-
-      char *path = search_include_paths(filename);
-      tok = include_file(tok, path ? path : filename, start->next->next);
+    // `#`-only line is legal. It's called a null directive.
+    if (tok->at_bol)
       continue;
-    }
-
-    if (equal(tok, "include_next")) {
-      bool ignore;
-      char *filename = read_include_filename(&tok, tok->next, &ignore);
-      char *path = search_include_next(filename);
-      tok = include_file(tok, path ? path : filename, start->next->next);
-      continue;
-    }
-
-    if (equal(tok, "define")) {
-      read_macro_definition(&tok, tok->next);
-      continue;
-    }
-
-    if (equal(tok, "undef")) {
-      tok = tok->next;
-      if (!is_ident(tok))
-        error_tok(tok, "macro name must be an identifier");
-      undef_macro(strndup(tok->loc, tok->len));
-      tok = skip_line(tok->next);
-      continue;
-    }
-
-    if (equal(tok, "if")) {
-      long val = eval_const_expr(&tok, tok);
-      push_cond_incl(start, val);
-      if (!val)
-        tok = skip_cond_incl(tok);
-      continue;
-    }
-
-    if (equal(tok, "ifdef")) {
-      bool defined = find_macro(tok->next);
-      push_cond_incl(tok, defined);
-      tok = skip_line(tok->next->next);
-      if (!defined)
-        tok = skip_cond_incl(tok);
-      continue;
-    }
-
-    if (equal(tok, "ifndef")) {
-      bool defined = find_macro(tok->next);
-      push_cond_incl(tok, !defined);
-      tok = skip_line(tok->next->next);
-      if (defined)
-        tok = skip_cond_incl(tok);
-      continue;
-    }
-
-    if (equal(tok, "elif")) {
-      if (!cond_incl || cond_incl->ctx == IN_ELSE)
-        error_tok(start, "stray #elif");
-      cond_incl->ctx = IN_ELIF;
-
-      if (!cond_incl->included && eval_const_expr(&tok, tok))
-        cond_incl->included = true;
-      else
-        tok = skip_cond_incl(tok);
-      continue;
-    }
-
-    if (equal(tok, "else")) {
-      if (!cond_incl || cond_incl->ctx == IN_ELSE)
-        error_tok(start, "stray #else");
-      cond_incl->ctx = IN_ELSE;
-      tok = skip_line(tok->next);
-
-      if (cond_incl->included)
-        tok = skip_cond_incl(tok);
-      continue;
-    }
-
-    if (equal(tok, "endif")) {
-      if (!cond_incl)
-        error_tok(start, "stray #endif");
-      cond_incl = cond_incl->next;
-      tok = skip_line(tok->next);
-      continue;
-    }
-
-    if (equal(tok, "line")) {
-      read_line_marker(&tok, tok->next);
-      continue;
-    }
 
     if (tok->kind == TK_PP_NUM) {
       read_line_marker(&tok, tok);
       continue;
     }
 
-    if (equal(tok, "pragma") && equal(tok->next, "once")) {
-      hashmap_put(&pragma_once, clean_path(tok->file->name), (void *)1);
-      tok = skip_line(tok->next->next);
+    DirectiveHandler handler = find_directive(tok);
+    if (handler) {
+      tok = handler(start, tok);
       continue;
     }
-
-    if (equal(tok, "pragma")) {
-      do {
-        tok = tok->next;
-      } while (!tok->at_bol);
-      continue;
-    }
-
-    if (equal(tok, "error"))
-      error_tok(tok, "error");
-
-    // `#`-only line is legal. It's called a null directive.
-    if (tok->at_bol)
-      continue;
 
     error_tok(tok, "invalid preprocessor directive");
   }
@@ -1111,6 +1665,9 @@ void init_macros(void) {
   define_macro("__STDC_UTF_32__", "1");
   define_macro("__STDC_VERSION__", "201112L");
   define_macro("__STDC__", "1");
+  define_macro("__STDC_EMBED_NOT_FOUND__", "0");
+  define_macro("__STDC_EMBED_FOUND__", "1");
+  define_macro("__STDC_EMBED_EMPTY__", "2");
   define_macro("__USER_LABEL_PREFIX__", "");
   define_macro("__alignof__", "_Alignof");
   define_macro("__amd64", "1");

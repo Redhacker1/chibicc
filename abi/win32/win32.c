@@ -419,76 +419,9 @@ static void win32_emit_return(Obj *fn, Type *return_ty, FILE *out) {
   }
 }
 
-static Node *win32_builtin_va_start(Node *ap, Node *last, Token *tok) {
-  VarScope *sc = find_var(&(Token){.loc = "__va_area__", .len = 11});
-  if (!sc || !sc->var)
-    error_tok(tok, "__builtin_va_start used outside variadic function");
-  Node *va_var = new_var_node(sc->var, tok);
-  add_type(ap);
-  if (ap->ty->kind == TY_PTR && (ap->ty->base->kind != TY_STRUCT && ap->ty->base->kind != TY_UNION)) {
-    // Pointer va_list (e.g. char *va_list)
-    Node *addr = new_unary(ND_ADDR, va_var, tok);
-    Node *val = new_unary(ND_DEREF, new_cast(addr, pointer_to(ap->ty)), tok);
-    return new_binary(ND_ASSIGN, ap, val, tok);
-  } else {
-    // Array of __va_elem, or pointer to __va_elem
-    // In __va_elem, overflow_arg_area is at offset 8
-    Node *va_addr = new_unary(ND_ADDR, va_var, tok);
-    Node *val = new_unary(ND_DEREF, new_cast(va_addr, pointer_to(pointer_to(ty_void))), tok);
-    Node *of_addr = new_add(new_cast(ap, pointer_to(ty_char)), new_num(8, tok), tok);
-    Node *of_ptr = new_cast(of_addr, pointer_to(pointer_to(ty_void)));
-    return new_binary(ND_ASSIGN, new_unary(ND_DEREF, of_ptr, tok), val, tok);
-  }
-}
-
 static Node *win32_builtin_va_arg(Node *ap, Type *ty, Token *tok) {
-  add_type(ap);
-  bool is_ptr = (ap->ty->kind == TY_PTR && (ap->ty->base->kind != TY_STRUCT && ap->ty->base->kind != TY_UNION));
   int sz = align_to(MAX(4, ty->size), 4);
-
-  Obj *old_p = new_lvar("", pointer_to(ty_void));
-  Node head = {};
-  Node *cur = &head;
-
-  if (is_ptr) {
-    cur = cur->next = new_unary(ND_EXPR_STMT,
-      new_binary(ND_ASSIGN, new_var_node(old_p, tok), new_cast(ap, pointer_to(ty_void)), tok), tok);
-    cur = cur->next = new_unary(ND_EXPR_STMT,
-      new_binary(ND_ASSIGN, ap, new_cast(new_add(new_cast(ap, pointer_to(ty_char)), new_num(sz, tok), tok), ap->ty), tok), tok);
-  } else {
-    Node *of_addr = new_add(new_cast(ap, pointer_to(ty_char)), new_num(8, tok), tok);
-    Node *of_ptr = new_cast(of_addr, pointer_to(pointer_to(ty_void)));
-    Node *load_of = new_unary(ND_DEREF, of_ptr, tok);
-    cur = cur->next = new_unary(ND_EXPR_STMT,
-      new_binary(ND_ASSIGN, new_var_node(old_p, tok), load_of, tok), tok);
-    Node *new_of = new_add(new_cast(new_var_node(old_p, tok), pointer_to(ty_char)), new_num(sz, tok), tok);
-    cur = cur->next = new_unary(ND_EXPR_STMT,
-      new_binary(ND_ASSIGN, new_unary(ND_DEREF, of_ptr, tok), new_cast(new_of, pointer_to(ty_void)), tok), tok);
-  }
-
-  cur = cur->next = new_unary(ND_EXPR_STMT,
-    new_unary(ND_DEREF, new_cast(new_var_node(old_p, tok), pointer_to(ty)), tok), tok);
-
-  Node *node = new_node(ND_STMT_EXPR, tok);
-  node->body = head.next;
-  return node;
-}
-
-static Node *win32_builtin_va_copy(Node *dest, Node *src, Token *tok) {
-  add_type(dest);
-  if (dest->ty->kind == TY_PTR && (dest->ty->base->kind != TY_STRUCT && dest->ty->base->kind != TY_UNION)) {
-    return new_binary(ND_ASSIGN, dest, src, tok);
-  } else {
-    Node *deref_dest = new_unary(ND_DEREF, dest, tok);
-    Node *deref_src = new_unary(ND_DEREF, src, tok);
-    return new_binary(ND_ASSIGN, deref_dest, deref_src, tok);
-  }
-}
-
-static Node *win32_builtin_va_end(Node *ap, Token *tok) {
-  Node *node = new_node(ND_NULL_EXPR, tok);
-  node->ty = ty_void;
-  return node;
+  return abi_va_arg_ptr(ap, ty, sz, tok);
 }
 
 static void win32_define_macros(void) {
@@ -620,10 +553,10 @@ ABI abi_win32 = {
 
   .builtin_alloca = win32_builtin_alloca,
 
-  .builtin_va_start = win32_builtin_va_start,
+  .builtin_va_start = abi_va_start_ptr,
   .builtin_va_arg = win32_builtin_va_arg,
-  .builtin_va_copy = win32_builtin_va_copy,
-  .builtin_va_end = win32_builtin_va_end,
+  .builtin_va_copy = abi_va_copy_ptr,
+  .builtin_va_end = abi_va_end_nop,
 
   .emit_prologue = win32_emit_prologue,
   .emit_epilogue = win32_emit_epilogue,

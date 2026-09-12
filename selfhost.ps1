@@ -1,6 +1,7 @@
 ﻿param(
     [string]$Compiler = "cmake-build-debug\chibicc-cli.exe",
     [string]$Output = "chibicc-stage2.exe",
+    [string]$OptLevel = "",
     [string]$MinGWPath = "C:\Users\donov\Documents\MinGW64\x86_64-w64-mingw32\include",
     [switch]$RunTests,
     [switch]$Stage3
@@ -8,9 +9,22 @@
 
 $ErrorActionPreference = "Stop"
 
+# Normalize optimization level flag
+$OptFlag = ""
+if ($OptLevel) {
+    if ($OptLevel -match "^-?O") {
+        $OptFlag = if ($OptLevel.StartsWith("-")) { $OptLevel } else { "-$OptLevel" }
+    } else {
+        $OptFlag = "-O$OptLevel"
+    }
+}
+
 Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host "   chibicc Self-Hosting Bootstrap Tool   " -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
+if ($OptFlag) {
+    Write-Host "Optimization Level: $OptFlag" -ForegroundColor Cyan
+}
 
 # 1. Locate stage1 bootstrap compiler
 if (-not (Test-Path $Compiler)) {
@@ -91,7 +105,8 @@ function Build-Stage([string]$StageCompiler, [string]$BuildDir, [string]$TargetE
         $objFiles += $objFile
 
         Write-Host "  [CC] $s -> $safeName"
-        $ccOutput = & $StageCompiler -c $s -o $objFile $IncludeFlags -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>&1
+        $optArgs = if ($OptFlag) { @($OptFlag) } else { @() }
+        $ccOutput = & $StageCompiler -c $s -o $objFile $IncludeFlags $optArgs -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>&1
         if ($ccOutput) {
             $ccOutput | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
         }
@@ -147,7 +162,11 @@ if ($RunTests) {
     Write-Host "=========================================" -ForegroundColor Cyan
     
     $TestCompiler = if ($Stage3) { $Stage3Exe } else { $Stage2Exe }
-    & .\run_tests.ps1 -Compiler $TestCompiler
+    $testParams = @{ Compiler = $TestCompiler }
+    if ($OptFlag) {
+        $testParams["OptLevel"] = $OptFlag
+    }
+    & .\run_tests.ps1 @testParams
 }
 
 Write-Host "`nSelf-hosting compilation completed successfully!" -ForegroundColor Green

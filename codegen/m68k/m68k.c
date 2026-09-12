@@ -513,11 +513,16 @@ static void m68k_gen_insn(LLIRInsn *insn, FILE *out) {
   case LLIR_LEA:
     if (insn->var) {
       if (insn->var->is_local)
-        println("  lea %d(%%fp), %%a0", insn->var->offset);
-      else
+        println("  lea %d(%%fp), %%a0", insn->var->offset + (int)insn->imm);
+      else if (insn->imm == 0)
         println("  lea %s, %%a0", insn->var->name);
+      else
+        println("  lea %s+%d, %%a0", insn->var->name, (int)insn->imm);
     } else if (insn->label) {
-      println("  lea %s, %%a0", insn->label);
+      if (insn->imm == 0)
+        println("  lea %s, %%a0", insn->label);
+      else
+        println("  lea %s+%d, %%a0", insn->label, (int)insn->imm);
     }
     println("  move.l %%a0, %%d0");
     m68k_store_vreg("%d0", insn->dst);
