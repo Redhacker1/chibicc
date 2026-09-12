@@ -292,13 +292,17 @@ static void compute_live_intervals(IRFunction *fn) {
   int num_back_edges = 0;
 
   for (IRInsn *insn = fn->head; insn; insn = insn->next) {
-    if ((insn->kind != IR_JMP && insn->kind != IR_BR) || !insn->label)
+    if (insn->kind != IR_JMP && insn->kind != IR_BR && insn->kind != LLIR_BR_COND)
       continue;
 
-    int target_pos = find_label_pos(labels, num_labels, insn->label);
-
-    if (target_pos >= 0 && target_pos < insn->pos)
-      num_back_edges++;
+    const char *target_labels[3] = { insn->label, insn->label_true, insn->label_false };
+    for (int l = 0; l < 3; l++) {
+      if (!target_labels[l])
+        continue;
+      int target_pos = find_label_pos(labels, num_labels, target_labels[l]);
+      if (target_pos >= 0 && target_pos < insn->pos)
+        num_back_edges++;
+    }
   }
 
   if (num_back_edges == 0) {
@@ -316,15 +320,19 @@ static void compute_live_intervals(IRFunction *fn) {
   int edge_count = 0;
 
   for (IRInsn *insn = fn->head; insn; insn = insn->next) {
-    if ((insn->kind != IR_JMP && insn->kind != IR_BR) || !insn->label)
+    if (insn->kind != IR_JMP && insn->kind != IR_BR && insn->kind != LLIR_BR_COND)
       continue;
 
-    int target_pos = find_label_pos(labels, num_labels, insn->label);
-
-    if (target_pos >= 0 && target_pos < insn->pos) {
-      edges[edge_count].branch_pos = insn->pos;
-      edges[edge_count].target_pos = target_pos;
-      edge_count++;
+    const char *target_labels[3] = { insn->label, insn->label_true, insn->label_false };
+    for (int l = 0; l < 3; l++) {
+      if (!target_labels[l])
+        continue;
+      int target_pos = find_label_pos(labels, num_labels, target_labels[l]);
+      if (target_pos >= 0 && target_pos < insn->pos) {
+        edges[edge_count].branch_pos = insn->pos;
+        edges[edge_count].target_pos = target_pos;
+        edge_count++;
+      }
     }
   }
 
@@ -898,11 +906,11 @@ void regalloc_function(IRFunction *fn, const RegAllocPool *pool) {
      * not in this generic allocator.
      */
     bool is_aggregate = vreg_is_aggregate(v);
+    bool can_use_scratch = !interval_spans_call(fn, v->def_pos, v->last_use_pos);
 
     if (!is_aggregate && v->def_insn != NULL) {
       int pool_index = -1;
       int reg = -1;
-      bool can_use_scratch = !interval_spans_call(fn, v->def_pos, v->last_use_pos);
 
       if (v->is_float) {
         reg = find_free_fp_reg(pool, fp_used, &pool_index);
@@ -948,6 +956,9 @@ void regalloc_function(IRFunction *fn, const RegAllocPool *pool) {
           continue;
 
         if (candidate->is_float != v->is_float)
+          continue;
+
+        if (!v->is_float && !can_use_scratch && active[a].pool_index >= pool->num_gp_regs)
           continue;
 
         if (candidate->last_use_pos > victim_end) {

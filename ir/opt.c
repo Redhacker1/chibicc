@@ -491,6 +491,14 @@ bool ir_opt_copy_prop(IRFunction *fn) {
       }
     }
 
+    if (insn->dst) {
+      aliases[insn->dst->id] = NULL;
+      for (int i = 0; i < fn->num_vregs; i++) {
+        if (aliases[i] == insn->dst)
+          aliases[i] = NULL;
+      }
+    }
+
     if (insn->kind == IR_MOV && insn->dst && insn->src1 && !insn->dst->is_float && !insn->src1->is_float) {
       if (ir_vregs_same_size_and_float(insn->dst, insn->src1)) {
         IRVReg *root = insn->src1;

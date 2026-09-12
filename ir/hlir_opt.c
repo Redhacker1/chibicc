@@ -884,6 +884,14 @@ bool hlir_opt_copy_prop(HLIRFunction *fn) {
     if (insn->src1 != s1 || insn->src2 != s2 || insn->src3 != s3)
       changed = true;
 
+    if (insn->dst && insn->dst->id < fn->num_vals) {
+      aliases[insn->dst->id] = NULL;
+      for (int i = 0; i < fn->num_vals; i++) {
+        if (aliases[i] == insn->dst)
+          aliases[i] = NULL;
+      }
+    }
+
     if (insn->kind == HLIR_CAST && insn->dst && insn->src1) {
       Type *t1 = insn->dst->ty;
       Type *t2 = insn->src1->ty;

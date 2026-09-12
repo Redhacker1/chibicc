@@ -94,30 +94,57 @@ static const char *win64_gp_reg(const int idx, const int size) {
  *
  * Both registers are volatile under Win64.
  */
-static void win64_copy_bytes(const int size, FILE *out) {
+static void win64_copy_bytes_to_rsp(const int dst_off, const int size, FILE *out) {
   int i = 0;
 
   while (size - i >= 8) {
     println_abi(out, "  mov %d(%%r10), %%rax", i);
-    println_abi(out, "  mov %%rax, %d(%%r11)", i);
+    println_abi(out, "  mov %%rax, %d(%%rsp)", dst_off + i);
     i += 8;
   }
 
   if (size - i >= 4) {
     println_abi(out, "  mov %d(%%r10), %%eax", i);
-    println_abi(out, "  mov %%eax, %d(%%r11)", i);
+    println_abi(out, "  mov %%eax, %d(%%rsp)", dst_off + i);
     i += 4;
   }
 
   if (size - i >= 2) {
     println_abi(out, "  mov %d(%%r10), %%ax", i);
-    println_abi(out, "  mov %%ax, %d(%%r11)", i);
+    println_abi(out, "  mov %%ax, %d(%%rsp)", dst_off + i);
     i += 2;
   }
 
   if (i < size) {
     println_abi(out, "  mov %d(%%r10), %%al", i);
-    println_abi(out, "  mov %%al, %d(%%r11)", i);
+    println_abi(out, "  mov %%al, %d(%%rsp)", dst_off + i);
+  }
+}
+
+static void win64_copy_bytes_to_rbp(const int dst_off, const int size, FILE *out) {
+  int i = 0;
+
+  while (size - i >= 8) {
+    println_abi(out, "  mov %d(%%r10), %%rax", i);
+    println_abi(out, "  mov %%rax, %d(%%rbp)", dst_off + i);
+    i += 8;
+  }
+
+  if (size - i >= 4) {
+    println_abi(out, "  mov %d(%%r10), %%eax", i);
+    println_abi(out, "  mov %%eax, %d(%%rbp)", dst_off + i);
+    i += 4;
+  }
+
+  if (size - i >= 2) {
+    println_abi(out, "  mov %d(%%r10), %%ax", i);
+    println_abi(out, "  mov %%ax, %d(%%rbp)", dst_off + i);
+    i += 2;
+  }
+
+  if (i < size) {
+    println_abi(out, "  mov %d(%%r10), %%al", i);
+    println_abi(out, "  mov %%al, %d(%%rbp)", dst_off + i);
   }
 }
 
@@ -232,10 +259,10 @@ static void win64_push_arg_expr(
         temp_off;
 
     println_abi(out, "  mov %%rax, %%r10");
-    println_abi(out, "  lea %d(%%rsp), %%r11", dst_off);
-    win64_copy_bytes(arg->ty->size, out);
+    win64_copy_bytes_to_rsp(dst_off, arg->ty->size, out);
 
-    println_abi(out, "  push %%r11");
+    println_abi(out, "  lea %d(%%rsp), %%rax", dst_off);
+    println_abi(out, "  push %%rax");
     (*depth)++;
     return;
   }
@@ -627,18 +654,35 @@ static void win64_copy_struct_mem(Obj *fn, FILE *out) {
 
   println_abi(
       out,
-      "  mov %d(%%rbp), %%r11",
+      "  mov %d(%%rbp), %%r10",
       var->offset);
 
-  println_abi(out, "  mov %%rax, %%r10");
-
-  win64_copy_bytes(ty->size, out);
+  int i = 0;
+  while (ty->size - i >= 8) {
+    println_abi(out, "  mov %d(%%rax), %%rdx", i);
+    println_abi(out, "  mov %%rdx, %d(%%r10)", i);
+    i += 8;
+  }
+  if (ty->size - i >= 4) {
+    println_abi(out, "  mov %d(%%rax), %%edx", i);
+    println_abi(out, "  mov %%edx, %d(%%r10)", i);
+    i += 4;
+  }
+  if (ty->size - i >= 2) {
+    println_abi(out, "  mov %d(%%rax), %%dx", i);
+    println_abi(out, "  mov %%dx, %d(%%r10)", i);
+    i += 2;
+  }
+  if (i < ty->size) {
+    println_abi(out, "  mov %d(%%rax), %%dl", i);
+    println_abi(out, "  mov %%dl, %d(%%r10)", i);
+  }
 
   /*
    * Win64 indirect-return functions return the destination pointer
    * in RAX.
    */
-  println_abi(out, "  mov %%r11, %%rax");
+  println_abi(out, "  mov %%r10, %%rax");
 }
 
 /*
@@ -760,8 +804,7 @@ static void win64_emit_prologue(Obj *fn, FILE *out) {
       else
         println_abi(out, "  mov %d(%%rbp), %%r10", 48 + (idx - WIN64_REG_MAX) * 8);
 
-      println_abi(out, "  lea %d(%%rbp), %%r11", var->offset);
-      win64_copy_bytes(var->ty->size, out);
+      win64_copy_bytes_to_rbp(var->offset, var->ty->size, out);
     } else if (idx < WIN64_REG_MAX) {
       if (is_flonum(var->ty)) {
         if (var->ty->size == 4)
@@ -861,8 +904,8 @@ static const CallConv win64_callconv;
 
 static void win64_load_vreg(LLIRVReg *v, const char *reg, FILE *out) {
   if (!v) return;
-  if (v->phys_reg >= 0 && v->phys_reg < 5 && !v->is_float) {
-    static const char *gp[] = { "%rbx", "%r12", "%r13", "%r14", "%r15" };
+  if (v->phys_reg >= 0 && v->phys_reg < 6 && !v->is_float) {
+    static const char *gp[] = { "%rbx", "%r12", "%r13", "%r14", "%r15", "%r11" };
     const char *src = gp[v->phys_reg];
     if (strcmp(src, reg) != 0)
       println_abi(out, "  movq %s, %s", src, reg);
@@ -894,8 +937,8 @@ static void win64_load_vreg(LLIRVReg *v, const char *reg, FILE *out) {
 
 static void win64_store_vreg(const char *reg, LLIRVReg *v, FILE *out) {
   if (!v) return;
-  if (v->phys_reg >= 0 && v->phys_reg < 5 && !v->is_float) {
-    static const char *gp[] = { "%rbx", "%r12", "%r13", "%r14", "%r15" };
+  if (v->phys_reg >= 0 && v->phys_reg < 6 && !v->is_float) {
+    static const char *gp[] = { "%rbx", "%r12", "%r13", "%r14", "%r15", "%r11" };
     const char *dst = gp[v->phys_reg];
     if (strcmp(reg, dst) != 0)
       println_abi(out, "  movq %s, %s", reg, dst);
@@ -955,8 +998,8 @@ static void win64_emit_call(LLIRInsn *insn, FILE *out) {
   }
 
   if (insn->src1) {
-    win64_load_vreg(insn->src1, "%r11", out);
-    println_abi(out, "  call *%%r11");
+    win64_load_vreg(insn->src1, "%r10", out);
+    println_abi(out, "  call *%%r10");
   } else if (insn->label) {
     println_abi(out, "  call %s", insn->label);
   }

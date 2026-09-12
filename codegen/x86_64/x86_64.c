@@ -54,6 +54,17 @@ static void compute_materialization(LLIRFunction *fn) {
 
   int *use_count = calloc(fn->num_vregs, sizeof(int));
   for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
+    if (insn->kind == LLIR_BR_COND && insn->src1 && insn->src1->def_insn) {
+      LLIRInsn *def = insn->src1->def_insn;
+      if ((!def->src1 || !def->src1->ty || !is_flonum(def->src1->ty)) &&
+          (def->kind == LLIR_CMP_EQ || def->kind == LLIR_CMP_NE ||
+           def->kind == LLIR_CMP_LT || def->kind == LLIR_CMP_LE ||
+           def->kind == LLIR_CMP_GT || def->kind == LLIR_CMP_GE ||
+           def->kind == LLIR_LOGNOT)) {
+        // Condition is folded directly into jump instruction without materializing boolean
+        continue;
+      }
+    }
     if (insn->src1) use_count[insn->src1->id]++;
     if (insn->src2) use_count[insn->src2->id]++;
     if (insn->src3) use_count[insn->src3->id]++;
@@ -75,11 +86,23 @@ static void compute_materialization(LLIRFunction *fn) {
       LLIRInsn *def = v->def_insn;
 
       // Unused pure result
-      if (use_count[v->id] == 0) {
-        if (def->kind == LLIR_IMM || def->kind == LLIR_LEA || def->kind == LLIR_MOV ||
-            def->kind == LLIR_ADD || def->kind == LLIR_SUB || def->kind == LLIR_CAST) {
+      if (use_count[v->id] <= 0) {
+        if (def->kind == LLIR_IMM || def->kind == LLIR_FIMM || def->kind == LLIR_LEA || def->kind == LLIR_MOV ||
+            def->kind == LLIR_ADD || def->kind == LLIR_SUB || def->kind == LLIR_CAST ||
+            def->kind == LLIR_CMP_EQ || def->kind == LLIR_CMP_NE ||
+            def->kind == LLIR_CMP_LT || def->kind == LLIR_CMP_LE ||
+            def->kind == LLIR_CMP_GT || def->kind == LLIR_CMP_GE ||
+            def->kind == LLIR_LOGNOT || def->kind == LLIR_NOT || def->kind == LLIR_NEG ||
+            def->kind == LLIR_SHL || def->kind == LLIR_SHR ||
+            def->kind == LLIR_AND || def->kind == LLIR_OR || def->kind == LLIR_XOR) {
           current_needs_mat[v->id] = false;
           changed = true;
+          bool is_cmp = (def->kind >= LLIR_CMP_EQ && def->kind <= LLIR_CMP_GE) || def->kind == LLIR_LOGNOT;
+          if (!is_cmp) {
+            if (def->src1) use_count[def->src1->id]--;
+            if (def->src2) use_count[def->src2->id]--;
+            if (def->src3) use_count[def->src3->id]--;
+          }
           continue;
         }
       }
@@ -480,8 +503,8 @@ static void emit_data(Obj *prog, FILE *out) {
 // Virtual Register Spill/Load Caching
 // ============================================================================
 static LLIRVReg *cached_rax_vreg = NULL;
-static const char *x86_64_gp_regs[] = { "%rbx", "%r12", "%r13", "%r14", "%r15" };
-#define NUM_X86_64_GP_REGS 5
+static const char *x86_64_gp_regs[] = { "%rbx", "%r12", "%r13", "%r14", "%r15", "%r11" };
+#define NUM_X86_64_GP_REGS 6
 
 static void invalidate_cached_regs(void) {
   cached_rax_vreg = NULL;
@@ -519,6 +542,10 @@ static void load_vreg(LLIRVReg *v, const char *reg) {
     if (reg[1] == 'x') { // %xmm...
       println("  movq %d(%%rbp), %s", offset, reg);
       cached_rax_vreg = NULL;
+    } else if (cached_rax_vreg == v && !strcmp(reg, "%rax")) {
+      return;
+    } else if (cached_rax_vreg == v && strcmp(reg, "%rax") != 0) {
+      println("  movq %%rax, %s", reg);
     } else if (sz == 1) {
       if (v->ty && v->ty->is_unsigned)
         println("  movzbl %d(%%rbp), %s", offset, x86_reg32(reg));
@@ -538,13 +565,9 @@ static void load_vreg(LLIRVReg *v, const char *reg) {
         println("  movslq %d(%%rbp), %s", offset, reg);
       cached_rax_vreg = (!strcmp(reg, "%rax")) ? v : NULL;
     } else {
-      if (cached_rax_vreg == v && strcmp(reg, "%rax") != 0) {
-        println("  movq %%rax, %s", reg);
-      } else {
-        println("  movq %d(%%rbp), %s", offset, reg);
-        if (!strcmp(reg, "%rax"))
-          cached_rax_vreg = v;
-      }
+      println("  movq %d(%%rbp), %s", offset, reg);
+      if (!strcmp(reg, "%rax"))
+        cached_rax_vreg = v;
     }
   }
 }
@@ -734,6 +757,19 @@ static void x86_get_addr(LLIRVReg *addr_vreg, X86Addr *addr) {
 
 // Emits loading an integer constant with optimal instruction encoding
 static void x86_emit_load_imm(LLIRInsn *insn) {
+  if (insn->dst && !insn->dst->is_float && insn->dst->phys_reg >= 0 && insn->dst->phys_reg < NUM_X86_64_GP_REGS) {
+    const char *dst = x86_64_gp_regs[insn->dst->phys_reg];
+    if (insn->imm == 0)
+      println("  xor %s, %s", x86_reg32(dst), x86_reg32(dst));
+    else if (insn->imm > 0 && (uint64_t)insn->imm <= 0xFFFFFFFFULL)
+      println("  mov $%u, %s", (uint32_t)insn->imm, x86_reg32(dst));
+    else if ((int64_t)(int32_t)insn->imm == insn->imm)
+      println("  mov $%lld, %s", (long long)insn->imm, dst);
+    else
+      println("  movabs $%lld, %s", (long long)insn->imm, dst);
+    return;
+  }
+
   if (insn->imm == 0)
     println("  xor %%eax, %%eax");
   else if (insn->imm > 0 && (uint64_t)insn->imm <= 0xFFFFFFFFULL)
@@ -1053,30 +1089,6 @@ static void x86_emit_int_compare(LLIRInsn *insn, const char **out_cc, const char
     case LLIR_CMP_LE: cc = uns ? "be" : "le"; inv_cc = uns ? "a" : "g";   break;
     case LLIR_CMP_GT: cc = uns ? "a" : "g";   inv_cc = uns ? "be" : "le"; break;
     case LLIR_CMP_GE: cc = uns ? "ae" : "ge"; inv_cc = uns ? "b" : "l";   break;
-    default: break;
-    }
-  } else if (s1_imm && (int32_t)insn->src1->def_insn->imm == insn->src1->def_insn->imm) {
-    int64_t imm = insn->src1->def_insn->imm;
-    const char *r2 = "%rax";
-    if (insn->src2 && insn->src2->phys_reg >= 0 && insn->src2->phys_reg < NUM_X86_64_GP_REGS && !insn->src2->is_float)
-      r2 = x86_64_gp_regs[insn->src2->phys_reg];
-    else
-      load_vreg(insn->src2, "%rax");
-
-    const char *r2_sz = (cmp_sz <= 4) ? x86_reg32(r2) : r2;
-    if (imm == 0)
-      println("  test %s, %s", r2_sz, r2_sz);
-    else
-      println("  cmp $%lld, %s", (long long)imm, r2_sz);
-
-    // Swapped comparison condition because immediate is in src1
-    switch (insn->kind) {
-    case LLIR_CMP_EQ: cc = "e";  inv_cc = "ne"; break;
-    case LLIR_CMP_NE: cc = "ne"; inv_cc = "e";  break;
-    case LLIR_CMP_LT: cc = uns ? "a" : "g";   inv_cc = uns ? "be" : "le"; break;
-    case LLIR_CMP_LE: cc = uns ? "ae" : "ge"; inv_cc = uns ? "b" : "l";   break;
-    case LLIR_CMP_GT: cc = uns ? "b" : "l";   inv_cc = uns ? "ae" : "ge"; break;
-    case LLIR_CMP_GE: cc = uns ? "be" : "le"; inv_cc = uns ? "a" : "g";   break;
     default: break;
     }
   } else {
@@ -1651,14 +1663,30 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
     }
 
     if (def && def->kind == LLIR_LOGNOT) {
-      load_vreg(def->src1, "%rax");
-      println("  test %%rax, %%rax");
+      if (def->src1 && def->src1->phys_reg >= 0 && def->src1->phys_reg < NUM_X86_64_GP_REGS && !def->src1->is_float) {
+        const char *r = x86_64_gp_regs[def->src1->phys_reg];
+        int sz = def->src1->ty ? def->src1->ty->size : 8;
+        println(sz <= 4 ? "  test %s, %s" : "  test %s, %s", (sz <= 4) ? x86_reg32(r) : r, (sz <= 4) ? x86_reg32(r) : r);
+      } else {
+        load_vreg(def->src1, "%rax");
+        int sz = def->src1 && def->src1->ty ? def->src1->ty->size : 8;
+        println(sz <= 4 ? "  test %%eax, %%eax" : "  test %%rax, %%rax");
+      }
       emit_branch(insn, "e", "ne");
       break;
     }
 
+    if (insn->src1 && insn->src1->phys_reg >= 0 && insn->src1->phys_reg < NUM_X86_64_GP_REGS && !insn->src1->is_float) {
+      const char *r = x86_64_gp_regs[insn->src1->phys_reg];
+      int sz = insn->src1->ty ? insn->src1->ty->size : 8;
+      println(sz <= 4 ? "  test %s, %s" : "  test %s, %s", (sz <= 4) ? x86_reg32(r) : r, (sz <= 4) ? x86_reg32(r) : r);
+      emit_branch(insn, "ne", "e");
+      break;
+    }
+
     load_vreg(insn->src1, "%rax");
-    println("  test %%rax, %%rax");
+    int sz = insn->src1 && insn->src1->ty ? insn->src1->ty->size : 8;
+    println(sz <= 4 ? "  test %%eax, %%eax" : "  test %%rax, %%rax");
     emit_branch(insn, "ne", "e");
     break;
   }
@@ -1672,6 +1700,26 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
     break;
 
   case LLIR_LEA:
+    if (insn->dst && !insn->dst->is_float && insn->dst->phys_reg >= 0 && insn->dst->phys_reg < NUM_X86_64_GP_REGS) {
+      const char *dst = x86_64_gp_regs[insn->dst->phys_reg];
+      if (insn->var) {
+        if (insn->var->is_local) {
+          int total_off = insn->var->offset + (int)insn->imm;
+          println("  lea %d(%%rbp), %s", total_off, dst);
+        } else {
+          if (insn->imm == 0)
+            println("  lea %s(%%rip), %s", insn->var->name, dst);
+          else
+            println("  lea %s%+d(%%rip), %s", insn->var->name, (int)insn->imm, dst);
+        }
+      } else if (insn->label) {
+        if (insn->imm == 0)
+          println("  lea %s(%%rip), %s", insn->label, dst);
+        else
+          println("  lea %s%+d(%%rip), %s", insn->label, (int)insn->imm, dst);
+      }
+      break;
+    }
     if (insn->var) {
       if (insn->var->is_local) {
         int total_off = insn->var->offset + (int)insn->imm;
@@ -1693,8 +1741,16 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
 
   case LLIR_MOV:
     if (insn->src1 && insn->dst && (insn->src1 == insn->dst ||
+        (insn->src1->phys_reg >= 0 && insn->src1->phys_reg == insn->dst->phys_reg) ||
         (insn->src1->spill_offset && insn->src1->spill_offset == insn->dst->spill_offset)))
       break;
+    if (insn->src1 && insn->dst &&
+        insn->src1->phys_reg >= 0 && insn->src1->phys_reg < NUM_X86_64_GP_REGS &&
+        insn->dst->phys_reg >= 0 && insn->dst->phys_reg < NUM_X86_64_GP_REGS &&
+        !insn->src1->is_float && !insn->dst->is_float) {
+      println("  movq %s, %s", x86_64_gp_regs[insn->src1->phys_reg], x86_64_gp_regs[insn->dst->phys_reg]);
+      break;
+    }
     if (insn->dst && insn->dst->is_float) {
       load_vreg(insn->src1, "%xmm0");
       store_vreg("%xmm0", insn->dst);
@@ -1935,11 +1991,12 @@ static void x86_64_init(FILE *out) {
 }
 
 static const int x86_64_callee_saved_gp_ids[] = { 0, 1, 2, 3, 4 };
+static const int x86_64_scratch_gp_ids[] = { 5 };
 static const RegAllocPool x86_64_reg_pool = {
   .num_gp_regs = 5,
   .gp_regs = x86_64_callee_saved_gp_ids,
-  .num_scratch_gp_regs = 0,
-  .scratch_gp_regs = NULL,
+  .num_scratch_gp_regs = 1,
+  .scratch_gp_regs = x86_64_scratch_gp_ids,
   .num_fp_regs = 0,
   .fp_regs = NULL,
   .spill_base_offset = 0,
