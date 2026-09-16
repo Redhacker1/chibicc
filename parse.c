@@ -149,7 +149,7 @@ static Node *funcall(Token **rest, Token *tok, Node *node);
 static Node *unary(Token **rest, Token *tok);
 static Node *primary(Token **rest, Token *tok);
 static Token *parse_typedef(Token *tok, Type *basety);
-static bool is_function(Token *tok);
+static bool is_function(Token *tok, Type *basety);
 static Token *function(Token *tok, Type *basety, VarAttr *attr);
 static Token *global_variable(Token *tok, Type *basety, VarAttr *attr);
 
@@ -2143,33 +2143,189 @@ static char *format_asm_dialect(const char *s) {
   return buf;
 }
 
-// asm-stmt = ("asm" | "__asm__" | "__asm") ("volatile" | "inline")* "(" string-literal ... ")"
+typedef struct AsmGotoRef AsmGotoRef;
+struct AsmGotoRef {
+  AsmGotoRef *next;
+  AsmOperand *op;
+};
+static AsmGotoRef *asm_gotos = NULL;
+
+static AsmOperand *parse_asm_operands(Token **rest, Token *tok, int is_output) {
+  AsmOperand head = {};
+  AsmOperand *cur = &head;
+
+  while (tok && !equal(tok, ":") && !equal(tok, ")")) {
+    AsmOperand *op = calloc(1, sizeof(AsmOperand));
+    op->is_output = is_output;
+    op->tok = tok;
+
+    if (equal(tok, "[")) {
+      tok = tok->next;
+      if (tok->kind != TK_IDENT)
+        error_tok(tok, "expected identifier in asm operand name");
+      op->name = get_ident(tok);
+      tok = skip(tok->next, "]");
+    }
+
+    if (tok->kind != TK_STR || tok->ty->base->kind != TY_CHAR)
+      error_tok(tok, "expected string literal in asm operand constraint");
+    op->constraint = tok->str;
+    tok = tok->next;
+    while (tok->kind == TK_STR && tok->ty->base->kind == TY_CHAR) {
+      op->constraint = format("%s%s", op->constraint, tok->str);
+      tok = tok->next;
+    }
+
+    tok = skip(tok, "(");
+    op->expr = expr(&tok, tok);
+    add_type(op->expr);
+    tok = skip(tok, ")");
+
+    cur = cur->next = op;
+
+    if (!consume(&tok, tok, ","))
+      break;
+  }
+
+  *rest = tok;
+  return head.next;
+}
+
+static AsmClobber *parse_asm_clobbers(Token **rest, Token *tok) {
+  AsmClobber head = {};
+  AsmClobber *cur = &head;
+
+  while (tok && !equal(tok, ":") && !equal(tok, ")")) {
+    if (tok->kind != TK_STR || tok->ty->base->kind != TY_CHAR)
+      error_tok(tok, "expected string literal in asm clobber list");
+    AsmClobber *clob = calloc(1, sizeof(AsmClobber));
+    clob->clobber = tok->str;
+    tok = tok->next;
+    while (tok->kind == TK_STR && tok->ty->base->kind == TY_CHAR) {
+      clob->clobber = format("%s%s", clob->clobber, tok->str);
+      tok = tok->next;
+    }
+    cur = cur->next = clob;
+
+    if (!consume(&tok, tok, ","))
+      break;
+  }
+
+  *rest = tok;
+  return head.next;
+}
+
+static AsmOperand *parse_asm_labels(Token **rest, Token *tok) {
+  AsmOperand head = {};
+  AsmOperand *cur = &head;
+
+  while (tok && !equal(tok, ")")) {
+    AsmOperand *op = calloc(1, sizeof(AsmOperand));
+    op->is_output = 2; // label
+    op->tok = tok;
+
+    if (equal(tok, "[")) {
+      tok = tok->next;
+      if (tok->kind != TK_IDENT)
+        error_tok(tok, "expected identifier in asm label name");
+      op->name = get_ident(tok);
+      tok = skip(tok->next, "]");
+    }
+
+    if (tok->kind != TK_IDENT)
+      error_tok(tok, "expected label name");
+    op->label_name = get_ident(tok);
+    if (!op->name)
+      op->name = op->label_name;
+    tok = tok->next;
+
+    cur = cur->next = op;
+
+    if (!consume(&tok, tok, ","))
+      break;
+  }
+
+  *rest = tok;
+  return head.next;
+}
+
+// asm-stmt = ("asm" | "__asm__" | "__asm") ("volatile" | "inline" | "goto")* "(" string-literal ... ")"
 static Node *asm_stmt(Token **rest, Token *tok) {
   Token *start = tok;
   tok = tok->next;
 
-  while (equal(tok, "volatile") || equal(tok, "inline") ||
-         equal(tok, "__volatile__") || equal(tok, "__volatile") ||
-         equal(tok, "__inline__") || equal(tok, "__inline") ||
-         equal(tok, "goto"))
-    tok = tok->next;
+  bool is_volatile = false;
+  bool is_inline = false;
+  bool is_goto = false;
+
+  while (true) {
+    if (equal(tok, "volatile") || equal(tok, "__volatile__") || equal(tok, "__volatile")) {
+      is_volatile = true;
+      tok = tok->next;
+    } else if (equal(tok, "inline") || equal(tok, "__inline__") || equal(tok, "__inline")) {
+      is_inline = true;
+      tok = tok->next;
+    } else if (equal(tok, "goto")) {
+      is_goto = true;
+      tok = tok->next;
+    } else {
+      break;
+    }
+  }
 
   tok = skip(tok, "(");
   if (tok->kind != TK_STR || tok->ty->base->kind != TY_CHAR)
     error_tok(tok, "expected string literal");
-  char *asm_str = format_asm_dialect(tok->str);
+
+  char *asm_str = tok->str;
   tok = tok->next;
-  while (tok && !equal(tok, ")")) {
-    if (equal(tok, "(")) {
-      tok = skip_parentheses(tok->next);
-      continue;
-    }
+  while (tok->kind == TK_STR && tok->ty->base->kind == TY_CHAR) {
+    asm_str = format("%s%s", asm_str, tok->str);
     tok = tok->next;
   }
+  asm_str = format_asm_dialect(asm_str);
+
+  AsmOperand *outputs = NULL;
+  AsmOperand *inputs = NULL;
+  AsmClobber *clobbers = NULL;
+  AsmOperand *labels = NULL;
+
+  if (consume(&tok, tok, ":")) {
+    outputs = parse_asm_operands(&tok, tok, 1);
+    if (consume(&tok, tok, ":")) {
+      inputs = parse_asm_operands(&tok, tok, 0);
+      if (consume(&tok, tok, ":")) {
+        clobbers = parse_asm_clobbers(&tok, tok);
+        if (consume(&tok, tok, ":")) {
+          labels = parse_asm_labels(&tok, tok);
+        }
+      }
+    }
+  }
+
   tok = skip(tok, ")");
   consume(&tok, tok, ";");
   *rest = tok;
-  return new_asm_node(asm_str, start);
+
+  Node *node = new_asm_node(asm_str, start);
+  node->asm_outputs = outputs;
+  node->asm_inputs = inputs;
+  node->asm_clobbers = clobbers;
+  node->asm_labels = labels;
+  node->asm_is_volatile = is_volatile;
+  node->asm_is_inline = is_inline;
+  node->asm_is_goto = is_goto;
+
+  if (labels) {
+    for (AsmOperand *op = labels; op; op = op->next) {
+      AsmGotoRef *ref = calloc(1, sizeof(AsmGotoRef));
+      ref->op = op;
+      ref->next = asm_gotos;
+      asm_gotos = ref;
+    }
+  }
+
+  return node;
 }
 
 // stmt = "return" expr? ";"
@@ -2420,7 +2576,7 @@ static Node *compound_stmt(Token **rest, Token *tok) {
         continue;
       }
 
-      if (is_function(tok)) {
+      if (is_function(tok, basety)) {
         tok = function(tok, basety, &attr);
         continue;
       }
@@ -3917,6 +4073,32 @@ static Node *primary(Token **rest, Token *tok) {
     return node;
   }
 
+  if (equal(tok, "__builtin_nan") || equal(tok, "__builtin_nanf") || equal(tok, "__builtin_nanl") ||
+      equal(tok, "__builtin_nans") || equal(tok, "__builtin_nansf") || equal(tok, "__builtin_nansl")) {
+    bool is_float = equal(tok, "__builtin_nanf") || equal(tok, "__builtin_nansf");
+    bool is_ldouble = equal(tok, "__builtin_nanl") || equal(tok, "__builtin_nansl");
+    tok = skip(tok->next, "(");
+    if (!equal(tok, ")"))
+      (void)assign(&tok, tok);
+    *rest = skip(tok, ")");
+    Node *node = new_node(ND_NUM, start);
+    node->fval = (long double)NAN;
+    node->ty = is_float ? ty_float : (is_ldouble ? ty_ldouble : ty_double);
+    return node;
+  }
+
+  if (equal(tok, "__builtin_inf") || equal(tok, "__builtin_inff") || equal(tok, "__builtin_infl") ||
+      equal(tok, "__builtin_huge_val") || equal(tok, "__builtin_huge_valf") || equal(tok, "__builtin_huge_vall")) {
+    bool is_float = equal(tok, "__builtin_inff") || equal(tok, "__builtin_huge_valf");
+    bool is_ldouble = equal(tok, "__builtin_infl") || equal(tok, "__builtin_huge_vall");
+    tok = skip(tok->next, "(");
+    *rest = skip(tok, ")");
+    Node *node = new_node(ND_NUM, start);
+    node->fval = (long double)INFINITY;
+    node->ty = is_float ? ty_float : (is_ldouble ? ty_ldouble : ty_double);
+    return node;
+  }
+
   if (equal(tok, "__builtin_prefetch")) {
     tok = skip(tok->next, "(");
     (void)assign(&tok, tok);
@@ -4132,7 +4314,19 @@ static void resolve_goto_labels(void) {
       error_tok(x->tok->next, "use of undeclared label");
   }
 
+  for (AsmGotoRef *ref = asm_gotos; ref; ref = ref->next) {
+    for (Node *y = labels; y; y = y->goto_next) {
+      if (!strcmp(ref->op->label_name, y->label)) {
+        ref->op->unique_label = y->unique_label;
+        break;
+      }
+    }
+    if (ref->op->unique_label == NULL)
+      error_tok(ref->op->tok, "use of undeclared label '%s'", ref->op->label_name);
+  }
+
   gotos = labels = NULL;
+  asm_gotos = NULL;
 }
 
 static Obj *find_func(char *name) {
@@ -4317,12 +4511,12 @@ static Token *global_variable(Token *tok, Type *basety, VarAttr *attr) {
 
 // Lookahead tokens and returns true if a given token is a start
 // of a function definition or declaration.
-static bool is_function(Token *tok) {
+static bool is_function(Token *tok, Type *basety) {
   if (equal(tok, ";"))
     return false;
 
   Type dummy = {};
-  Type *ty = declarator(&tok, tok, &dummy);
+  Type *ty = declarator(&tok, tok, basety ? basety : &dummy);
   tok = consume_attributes(tok, NULL);
   return ty->kind == TY_FUNC;
 }
@@ -4394,7 +4588,12 @@ Obj *parse(Token *tok) {
     }
 
     if (equal(tok, "asm") || equal(tok, "__asm__") || equal(tok, "__asm")) {
-      asm_stmt(&tok, tok);
+      Node *node = asm_stmt(&tok, tok);
+      Obj *var = new_gvar(new_unique_name(), ty_void);
+      var->is_definition = true;
+      var->is_live = true;
+      var->is_asm = true;
+      var->asm_str = node->asm_str;
       continue;
     }
 
@@ -4413,7 +4612,7 @@ Obj *parse(Token *tok) {
     }
 
     // Function
-    if (is_function(tok)) {
+    if (is_function(tok, basety)) {
       tok = function(tok, basety, &attr);
       continue;
     }

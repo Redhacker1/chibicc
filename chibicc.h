@@ -10,6 +10,20 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <math.h>
+
+#ifndef UINT64_C
+# define UINT64_C(x) (x##ULL)
+#endif
+#ifndef INT64_C
+# define INT64_C(x) (x##LL)
+#endif
+#ifndef UINT32_C
+# define UINT32_C(x) (x##U)
+#endif
+#ifndef INT32_C
+# define INT32_C(x) (x)
+#endif
 #include <stdlib.h>
 #include <stdnoreturn.h>
 #include <string.h>
@@ -30,32 +44,15 @@ void chibicc_assert_fail(const char *expr, const char *file, int line, const cha
     ((expr) ? (void)0 : chibicc_assert_fail(#expr, __FILE__, __LINE__, __func__))
 #endif
 
+#ifndef MAX
 #define MAX(x, y) ((x) < (y) ? (y) : (x))
+#endif
+#ifndef MIN
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
+#endif
 
 #ifndef __GNUC__
 # define __attribute__(x)
-#endif
-
-#ifdef _WIN32
-static char *chibicc_strndup(const char *s, size_t n)
-{
-    size_t len = strlen(s);
-
-    if (len > n)
-        len = n;
-
-    char *p = malloc(len + 1);
-    if (!p)
-        return NULL;
-
-    memcpy(p, s, len);
-    p[len] = '\0';
-
-    return p;
-}
-
-#define strndup chibicc_strndup
 #endif
 
 typedef struct Type Type;
@@ -94,7 +91,8 @@ typedef enum {
   TK_EOF,     // End-of-file markers
 } TokenKind;
 
-typedef struct {
+typedef struct File File;
+struct File {
   char *name;
   int file_no;
   char *contents;
@@ -102,7 +100,7 @@ typedef struct {
   // For #line directive
   char *display_name;
   int line_delta;
-} File;
+};
 
 // Token type
 typedef struct Token Token;
@@ -147,11 +145,7 @@ Token *tokenize_file(char *filename);
 // preprocess.c
 //
 
-char *search_include_paths(char *filename);
-void init_macros(void);
-void define_macro(char *name, char *buf);
-void undef_macro(char *name);
-Token *preprocess(Token *tok);
+#include "preprocess.h"
 
 //
 // parse.c
@@ -199,6 +193,10 @@ struct Obj {
   bool is_live;
   bool is_root;
   StringArray refs;
+
+  // Top-level asm
+  bool is_asm;
+  char *asm_str;
 };
 
 // Global variable can be initialized either by a constant expression
@@ -264,6 +262,32 @@ typedef enum {
   ND_EXCH,      // Atomic exchange
 } NodeKind;
 
+typedef struct AsmOperand AsmOperand;
+typedef struct LLIRVReg LLIRVReg;
+typedef struct LLIRVReg IRVReg;
+
+struct AsmOperand {
+  AsmOperand *next;
+  char *name;         // "[name]" or NULL
+  char *constraint;   // e.g. "=r", "+m", "i", "0", etc.
+  Node *expr;         // C expression (AST node)
+  int is_output;      // 1: output, 0: input, 2: goto label
+  char *label_name;   // For asm goto
+  char *unique_label; // Resolved unique label for asm goto
+  Token *tok;         // Token for error reporting
+  IRVReg *vreg;       // Allocated vreg in IR
+  IRVReg *addr_vreg;  // Address vreg in IR (for indirect memory operands)
+  Obj *var;           // Direct variable (if local or global variable)
+  int64_t imm_val;    // Immediate value (if constant)
+  bool is_imm_val;    // True if imm_val is valid
+};
+
+typedef struct AsmClobber AsmClobber;
+struct AsmClobber {
+  AsmClobber *next;
+  char *clobber;      // e.g. "memory", "cc", "rax"
+};
+
 // AST node type
 struct Node {
   NodeKind kind; // Node kind
@@ -312,9 +336,16 @@ struct Node {
       bool pass_by_stack;
     };
 
-    // "asm" string literal
+    // "asm" inline assembly
     struct {
       char *asm_str;
+      AsmOperand *asm_outputs;
+      AsmOperand *asm_inputs;
+      AsmClobber *asm_clobbers;
+      AsmOperand *asm_labels;
+      bool asm_is_volatile;
+      bool asm_is_inline;
+      bool asm_is_goto;
     };
 
     // Atomic compare-and-swap and atomic op= operators
@@ -549,11 +580,12 @@ typedef struct {
   void *val;
 } HashEntry;
 
-typedef struct {
+typedef struct HashMap HashMap;
+struct HashMap {
   HashEntry *buckets;
   int capacity;
   int used;
-} HashMap;
+};
 
 void *hashmap_get(HashMap *map, char *key);
 void *hashmap_get2(HashMap *map, char *key, int keylen);

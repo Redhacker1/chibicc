@@ -42,7 +42,7 @@ StringArray tmpfiles;
 // Helper to create a dummy HLIR function
 static HLIRFunction *new_test_fn(char *name) {
     HLIRFunction *fn = calloc(1, sizeof(HLIRFunction));
-    fn->name = _strdup(name);
+    fn->name = strdup(name);
     fn->val_cap = 16;
     fn->vals = calloc(fn->val_cap, sizeof(HLIRVal *));
     return fn;

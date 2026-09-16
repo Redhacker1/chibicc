@@ -342,10 +342,13 @@ static void compute_live_intervals(IRFunction *fn) {
    * This is conservative, but importantly it is now operating on a compact
    * edge list instead of repeatedly searching all instructions for labels.
    */
+  int max_loop_iters = 3;
+  int loop_iter = 0;
   bool changed;
 
   do {
     changed = false;
+    loop_iter++;
 
     for (int e = 0; e < edge_count; e++) {
       int branch_pos = edges[e].branch_pos;
@@ -358,10 +361,10 @@ static void compute_live_intervals(IRFunction *fn) {
           continue;
 
         /*
-         * If the value exists before the backedge and has a use somewhere
+         * If the value exists before the loop target and has a use somewhere
          * in/after the loop target, it must survive the backedge.
          */
-        if (v->def_pos <= branch_pos &&
+        if (v->def_pos < target_pos &&
             v->last_use_pos >= target_pos &&
             v->last_use_pos < branch_pos) {
           v->last_use_pos = branch_pos;
@@ -369,7 +372,7 @@ static void compute_live_intervals(IRFunction *fn) {
         }
       }
     }
-  } while (changed);
+  } while (changed && loop_iter < max_loop_iters);
 
   free(edges);
   free(labels);
@@ -496,7 +499,7 @@ static bool interval_spans_call(IRFunction *fn, int def_pos, int last_use_pos) {
 
   for (IRInsn *insn = fn->head; insn; insn = insn->next) {
     if (insn->kind == LLIR_CALL) {
-      if (insn->pos >= def_pos && insn->pos <= last_use_pos)
+      if (insn->pos > def_pos && insn->pos < last_use_pos)
         return true;
     }
   }

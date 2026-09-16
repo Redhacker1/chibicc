@@ -38,7 +38,19 @@ if [ ! -f "$COMPILER" ]; then
     fi
 fi
 
-INCLUDE_FLAGS="-I. -Iinclude -Icompiler_include -Itests"
+INCLUDE_FLAGS="-Iwin_includes -I. -Isdk/include -Ilibc/libc/include -Iinclude -Icompiler_include -Itests"
+
+# Setup Custom libc flags
+LIBC_FLAGS=""
+if [ -f "sdk/lib/libc.dll.a" ]; then
+    LIBC_FLAGS="sdk/lib/libc.dll.a -Wl,--allow-multiple-definition"
+    cp -f "sdk/lib/libc.dll" "./libc.dll" 2>/dev/null || true
+    cp -f "sdk/lib/libc.dll" "tests/libc.dll" 2>/dev/null || true
+    cp -f "sdk/lib/libc.dll" "tests/optimizations/libc.dll" 2>/dev/null || true
+elif [ -f "libc.dll" ]; then
+    LIBC_FLAGS="libc.dll -Wl,--allow-multiple-definition"
+fi
+export PATH="$(pwd):$(pwd)/sdk/bin:$(pwd)/sdk/lib:$PATH"
 
 echo "========================================"
 echo "       chibicc Test Suite Runner        "
@@ -57,7 +69,7 @@ FAILED_LIST=()
 # ==============================================================================
 echo ""
 echo "[Setup] Compiling tests/common helper..."
-gcc -x c -c "tests/common" -o "tests/common.o"
+gcc -x c -c "tests/common" -Iwin_includes -Isdk/include -Ilibc/libc/include -Iinclude -o "tests/common.o"
 
 echo ""
 echo "========================================"
@@ -78,7 +90,7 @@ for c_file in $(find tests -maxdepth 1 -name "*.c" ! -name "abi_*" | sort); do
     fi
 
     if "$COMPILER" -c "$c_file" -o "$obj_file" $INCLUDE_FLAGS $OPT_FLAG -D_WIN32 -D__GNUC__ 2>/dev/null; then
-        if gcc "$obj_file" "tests/common.o" -o "$exe_file" $EXTRA_LINK_FLAGS 2>/dev/null; then
+        if gcc "$obj_file" "tests/common.o" -o "$exe_file" $EXTRA_LINK_FLAGS $LIBC_FLAGS 2>/dev/null; then
             if "./$exe_file" >/dev/null 2>&1; then
                 echo "  [PASS] $test_name.c"
                 PASSED=$((PASSED + 1))
@@ -115,8 +127,8 @@ for c_file in $(find tests -maxdepth 1 -name "abi_test_all.c" | sort); do
     obj_file="tests/$test_name.o"
     exe_file="tests/$test_name.exe"
 
-    if "$COMPILER" -c "$c_file" -o "$obj_file" -Iinclude $OPT_FLAG -D_WIN32 -D__GNUC__ 2>/dev/null; then
-        if gcc -o "$exe_file" "$obj_file" 2>/dev/null; then
+    if "$COMPILER" -c "$c_file" -o "$obj_file" $INCLUDE_FLAGS $OPT_FLAG -D_WIN32 -D__GNUC__ 2>/dev/null; then
+        if gcc -o "$exe_file" "$obj_file" $LIBC_FLAGS 2>/dev/null; then
             if "./$exe_file" >/dev/null 2>&1; then
                 echo "  [PASS] $test_name.c"
                 PASSED=$((PASSED + 1))
@@ -164,7 +176,7 @@ if [ -d "$CONF_DIR" ]; then
             fi
 
             if "$COMPILER" -c "$test_file" -o "$obj_file" $INCLUDE_FLAGS $OPT_FLAG -D_WIN32 -D__GNUC__ 2>/dev/null; then
-                if gcc "$obj_file" -o "$exe_file" $EXTRA_LINK_FLAGS 2>/dev/null; then
+                if gcc "$obj_file" -o "$exe_file" $EXTRA_LINK_FLAGS $LIBC_FLAGS 2>/dev/null; then
                     if "$exe_file" >/dev/null 2>&1; then
                         echo "  [PASS] $test_name"
                         PASSED=$((PASSED + 1))
@@ -241,7 +253,7 @@ if [ -d "$OPT_DIR" ]; then
     echo "[Integration Optimization Tests]"
     
     # Setup common helper
-    gcc -x c -c "tests/common" -o "tests/common.o"
+    gcc -x c -c "tests/common" -Iwin_includes -Isdk/include -Ilibc/libc/include -Iinclude -o "tests/common.o"
     
     for c_file in $(find "$OPT_DIR" -maxdepth 1 -name "*.c" ! -name "hlir_opt_handcrafted.c" | sort); do
         test_name=$(basename "$c_file" .c)
@@ -255,7 +267,7 @@ if [ -d "$OPT_DIR" ]; then
         for opt_level in $opt_levels; do
             test_label="optimizations/$test_name.c ($opt_level)"
             if "$COMPILER" -c "$c_file" -o "$obj_file" $INCLUDE_FLAGS $opt_level -D_WIN32 -D__GNUC__ 2>/dev/null; then
-                if gcc "$obj_file" "tests/common.o" -o "$exe_file" 2>/dev/null; then
+                if gcc "$obj_file" "tests/common.o" -o "$exe_file" $LIBC_FLAGS 2>/dev/null; then
                     if "./$exe_file" >/dev/null 2>&1; then
                         echo "  [PASS] $test_label"
                         PASSED=$((PASSED + 1))

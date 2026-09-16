@@ -15,7 +15,18 @@
 #define WIFEXITED(status)   ((status) != STILL_ACTIVE)
 #define WEXITSTATUS(status) ((status) & 0xff)
 
+#include <sys/types.h>
+
+#ifndef _PID_T_DECLARED
+#ifndef _PID_T_
+typedef int pid_t;
+#define _PID_T_
+#define _PID_T_DECLARED
+#endif
+#endif
+
 int waitpid(int pid, int *status, int options);
+pid_t wait(int *status);
 
 #endif /* _WIN32 */
 

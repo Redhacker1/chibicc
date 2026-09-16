@@ -1,14 +1,13 @@
+#ifndef TESTS_TEST_H
+#define TESTS_TEST_H
+
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #define ASSERT(x, y) assert(x, y, #y)
 
 void assert(int expected, int actual, char *code);
-int strcmp(char *p, char *q);
-int strncmp(char *p, char *q, long n);
-char *strstr(char *p, char *q);
-int memcmp(char *p, char *q, long n);
-void exit(int n);
-long strlen(char *s);
-void *memcpy(void *dest, void *src, long n);
-void *memset(void *s, int c, long n);
+
+#endif

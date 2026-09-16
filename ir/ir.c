@@ -197,6 +197,7 @@ IRFunction *ir_new_function(Obj *fn_obj) {
 
 static IRVReg *gen_expr_ir(IRFunction *fn, Node *node);
 static void gen_stmt_ir(IRFunction *fn, Node *node);
+static void gen_asm_ir(IRFunction *fn, Node *node);
 
 static IRVReg *gen_addr_ir(IRFunction *fn, Node *node) {
   switch (node->kind) {
@@ -864,15 +865,139 @@ static IRVReg *gen_expr_ir(IRFunction *fn, Node *node) {
     return NULL;
   }
   case ND_ASM: {
-    IRInsn *insn = ir_new_insn(IR_ASM);
-    insn->asm_str = node->asm_str;
-    ir_append_insn(fn, insn);
+    gen_asm_ir(fn, node);
     return NULL;
   }
   default:
     error_tok(node->tok, "invalid expression node in IR generator");
   }
   return NULL;
+}
+
+static void gen_asm_ir(IRFunction *fn, Node *node) {
+  IRInsn *insn = ir_new_insn(IR_ASM);
+  insn->asm_str = node->asm_str;
+  insn->asm_is_volatile = node->asm_is_volatile;
+  insn->asm_is_goto = node->asm_is_goto;
+  insn->asm_clobbers = node->asm_clobbers;
+  insn->asm_labels = node->asm_labels;
+
+  AsmOperand *out_head = NULL, *out_tail = NULL;
+  for (AsmOperand *src_op = node->asm_outputs; src_op; src_op = src_op->next) {
+    AsmOperand *op = calloc(1, sizeof(AsmOperand));
+    *op = *src_op;
+    op->next = NULL;
+
+    bool is_rw = (strchr(op->constraint, '+') != NULL);
+    bool is_mem = (strchr(op->constraint, 'm') != NULL || strchr(op->constraint, 'o') != NULL || strchr(op->constraint, 'v') != NULL) &&
+                  (strchr(op->constraint, 'r') == NULL && strchr(op->constraint, 'g') == NULL &&
+                   strchr(op->constraint, 'a') == NULL && strchr(op->constraint, 'b') == NULL &&
+                   strchr(op->constraint, 'c') == NULL && strchr(op->constraint, 'd') == NULL &&
+                   strchr(op->constraint, 'S') == NULL && strchr(op->constraint, 'D') == NULL &&
+                   strchr(op->constraint, 'q') == NULL && strchr(op->constraint, 'Q') == NULL);
+
+    if (op->expr->kind == ND_VAR) {
+      op->var = op->expr->var;
+    } else {
+      op->addr_vreg = gen_addr_ir(fn, op->expr);
+    }
+
+    if (!is_mem) {
+      if (is_rw) {
+        op->vreg = gen_expr_ir(fn, op->expr);
+      } else {
+        op->vreg = ir_new_vreg(fn, op->expr->ty);
+      }
+    }
+
+    if (!out_head) out_head = out_tail = op;
+    else out_tail = out_tail->next = op;
+  }
+  insn->asm_outputs = out_head;
+
+  AsmOperand *in_head = NULL, *in_tail = NULL;
+  for (AsmOperand *src_op = node->asm_inputs; src_op; src_op = src_op->next) {
+    AsmOperand *op = calloc(1, sizeof(AsmOperand));
+    *op = *src_op;
+    op->next = NULL;
+
+    bool is_mem = (strchr(op->constraint, 'm') != NULL || strchr(op->constraint, 'o') != NULL || strchr(op->constraint, 'v') != NULL) &&
+                  (strchr(op->constraint, 'r') == NULL && strchr(op->constraint, 'g') == NULL &&
+                   strchr(op->constraint, 'a') == NULL && strchr(op->constraint, 'b') == NULL &&
+                   strchr(op->constraint, 'c') == NULL && strchr(op->constraint, 'd') == NULL &&
+                   strchr(op->constraint, 'S') == NULL && strchr(op->constraint, 'D') == NULL &&
+                   strchr(op->constraint, 'q') == NULL && strchr(op->constraint, 'Q') == NULL);
+    bool is_imm = (strchr(op->constraint, 'i') != NULL || strchr(op->constraint, 'n') != NULL);
+
+    if (is_imm && op->expr->kind == ND_NUM) {
+      op->is_imm_val = true;
+      op->imm_val = op->expr->val;
+    } else if (is_mem) {
+      if (op->expr->kind == ND_VAR)
+        op->var = op->expr->var;
+      else
+        op->addr_vreg = gen_addr_ir(fn, op->expr);
+    } else {
+      if (op->expr->kind == ND_NUM) {
+        op->is_imm_val = true;
+        op->imm_val = op->expr->val;
+      }
+      op->vreg = gen_expr_ir(fn, op->expr);
+    }
+
+    if (!in_head) in_head = in_tail = op;
+    else in_tail = in_tail->next = op;
+  }
+  insn->asm_inputs = in_head;
+
+  int vreg_count = 0;
+  for (AsmOperand *op = insn->asm_outputs; op; op = op->next) {
+    if (op->vreg) vreg_count++;
+    if (op->addr_vreg) vreg_count++;
+  }
+  for (AsmOperand *op = insn->asm_inputs; op; op = op->next) {
+    if (op->vreg) vreg_count++;
+    if (op->addr_vreg) vreg_count++;
+  }
+
+  if (vreg_count > 0) {
+    insn->args = calloc(vreg_count, sizeof(IRVReg *));
+    insn->num_args = 0;
+    for (AsmOperand *op = insn->asm_outputs; op; op = op->next) {
+      if (op->vreg) insn->args[insn->num_args++] = op->vreg;
+      if (op->addr_vreg) insn->args[insn->num_args++] = op->addr_vreg;
+    }
+    for (AsmOperand *op = insn->asm_inputs; op; op = op->next) {
+      if (op->vreg) insn->args[insn->num_args++] = op->vreg;
+      if (op->addr_vreg) insn->args[insn->num_args++] = op->addr_vreg;
+    }
+  }
+
+  ir_append_insn(fn, insn);
+
+  for (AsmOperand *op = insn->asm_outputs; op; op = op->next) {
+    if (!op->vreg)
+      continue;
+    if (op->var) {
+      IRVReg *addr = ir_new_vreg(fn, pointer_to(op->var->ty));
+      IRInsn *addr_insn = ir_new_insn(IR_ADDR);
+      addr_insn->dst = addr;
+      addr_insn->var = op->var;
+      ir_append_insn(fn, addr_insn);
+
+      IRInsn *store = ir_new_insn(IR_STORE);
+      store->src1 = addr;
+      store->src2 = op->vreg;
+      store->ty = op->var->ty;
+      ir_append_insn(fn, store);
+    } else if (op->addr_vreg) {
+      IRInsn *store = ir_new_insn(IR_STORE);
+      store->src1 = op->addr_vreg;
+      store->src2 = op->vreg;
+      store->ty = op->expr->ty;
+      ir_append_insn(fn, store);
+    }
+  }
 }
 
 static void gen_stmt_ir(IRFunction *fn, Node *node) {
@@ -1068,9 +1193,7 @@ static void gen_stmt_ir(IRFunction *fn, Node *node) {
     gen_expr_ir(fn, node->lhs);
     return;
   case ND_ASM: {
-    IRInsn *insn = ir_new_insn(IR_ASM);
-    insn->asm_str = node->asm_str;
-    ir_append_insn(fn, insn);
+    gen_asm_ir(fn, node);
     return;
   }
   default:
@@ -1244,8 +1367,412 @@ void llir_dump(FILE *out, LLIRProg *prog) {
   ir_dump(out, prog);
 }
 
+static LLIRFunction *lower_hlir_function_to_llir(HLIRFunction *hfn) {
+  if (!hfn) return NULL;
+  LLIRFunction *fn = ir_new_function(hfn->fn_obj);
+  fn->name = hfn->name;
+  fn->func_ty = hfn->func_ty;
+  fn->abi = hfn->abi ? hfn->abi : (hfn->fn_obj ? get_fn_abi(hfn->fn_obj) : NULL);
+  fn->locals = hfn->locals;
+  fn->params = hfn->params;
+  fn->stack_size = hfn->stack_size;
+
+  LLIRVReg **val_map = calloc(hfn->num_vals + 1, sizeof(LLIRVReg *));
+  for (int i = 0; i < hfn->num_vals; i++) {
+    if (hfn->vals[i]) {
+      val_map[i] = ir_new_vreg(fn, hfn->vals[i]->ty);
+      val_map[i]->is_struct_val = hfn->vals[i]->is_struct_val;
+      val_map[i]->struct_size = hfn->vals[i]->struct_size;
+      val_map[i]->struct_ty = hfn->vals[i]->struct_ty;
+    }
+  }
+
+#define MAP_VAL(v) ((v) ? val_map[(v)->id] : NULL)
+
+  for (HLIRInsn *hinsn = hfn->head; hinsn; hinsn = hinsn->next) {
+    switch (hinsn->kind) {
+    case HLIR_NOP:
+      break;
+    case HLIR_ICONST: {
+      LLIRInsn *insn = ir_new_insn(LLIR_IMM);
+      insn->dst = MAP_VAL(hinsn->dst);
+      insn->imm = hinsn->imm;
+      insn->ty = hinsn->ty ? hinsn->ty : (hinsn->dst ? hinsn->dst->ty : ty_int);
+      ir_append_insn(fn, insn);
+      break;
+    }
+    case HLIR_FCONST: {
+      LLIRInsn *insn = ir_new_insn(LLIR_FIMM);
+      insn->dst = MAP_VAL(hinsn->dst);
+      insn->fimm = hinsn->fimm;
+      insn->ty = hinsn->ty ? hinsn->ty : (hinsn->dst ? hinsn->dst->ty : ty_double);
+      ir_append_insn(fn, insn);
+      break;
+    }
+    case HLIR_SCONST: {
+      LLIRInsn *insn = ir_new_insn(LLIR_LEA);
+      insn->dst = MAP_VAL(hinsn->dst);
+      insn->label = hinsn->label;
+      insn->ty = hinsn->dst ? hinsn->dst->ty : pointer_to(ty_char);
+      ir_append_insn(fn, insn);
+      break;
+    }
+    case HLIR_ADDR_VAR: {
+      LLIRInsn *insn = ir_new_insn(LLIR_LEA);
+      insn->dst = MAP_VAL(hinsn->dst);
+      insn->var = hinsn->var;
+      insn->imm = hinsn->imm;
+      insn->ty = hinsn->dst ? hinsn->dst->ty : pointer_to(hinsn->var ? hinsn->var->ty : ty_void);
+      ir_append_insn(fn, insn);
+      break;
+    }
+    case HLIR_LOAD_VAR: {
+      // dst = load var
+      LLIRVReg *addr_vreg = ir_new_vreg(fn, pointer_to(hinsn->var ? hinsn->var->ty : ty_void));
+      LLIRInsn *addr_insn = ir_new_insn(LLIR_LEA);
+      addr_insn->dst = addr_vreg;
+      addr_insn->var = hinsn->var;
+      addr_insn->imm = hinsn->imm;
+      addr_insn->ty = addr_vreg->ty;
+      ir_append_insn(fn, addr_insn);
+
+      LLIRInsn *load_insn = ir_new_insn(LLIR_LOAD);
+      load_insn->dst = MAP_VAL(hinsn->dst);
+      load_insn->src1 = addr_vreg;
+      load_insn->ty = hinsn->ty ? hinsn->ty : (hinsn->dst ? hinsn->dst->ty : (hinsn->var ? hinsn->var->ty : ty_int));
+      ir_append_insn(fn, load_insn);
+      break;
+    }
+    case HLIR_STORE_VAR: {
+      // var = src1
+      LLIRVReg *addr_vreg = ir_new_vreg(fn, pointer_to(hinsn->var ? hinsn->var->ty : ty_void));
+      LLIRInsn *addr_insn = ir_new_insn(LLIR_LEA);
+      addr_insn->dst = addr_vreg;
+      addr_insn->var = hinsn->var;
+      addr_insn->imm = hinsn->imm;
+      addr_insn->ty = addr_vreg->ty;
+      ir_append_insn(fn, addr_insn);
+
+      LLIRInsn *store_insn = ir_new_insn(LLIR_STORE);
+      store_insn->src1 = addr_vreg;
+      store_insn->src2 = MAP_VAL(hinsn->src1);
+      store_insn->ty = hinsn->ty ? hinsn->ty : (hinsn->src1 && hinsn->src1->ty ? hinsn->src1->ty : (hinsn->var ? hinsn->var->ty : ty_int));
+      ir_append_insn(fn, store_insn);
+      break;
+    }
+    case HLIR_LOAD_MEMBER: {
+      // dst = src1.member_offset
+      LLIRVReg *offset_vreg = ir_new_vreg(fn, ty_long);
+      LLIRInsn *imm_insn = ir_new_insn(LLIR_IMM);
+      imm_insn->dst = offset_vreg;
+      imm_insn->imm = hinsn->imm;
+      imm_insn->ty = ty_long;
+      ir_append_insn(fn, imm_insn);
+
+      LLIRVReg *member_addr = ir_new_vreg(fn, pointer_to(hinsn->ty ? hinsn->ty : ty_void));
+      LLIRInsn *add_insn = ir_new_insn(LLIR_ADD);
+      add_insn->dst = member_addr;
+      add_insn->src1 = MAP_VAL(hinsn->src1);
+      add_insn->src2 = offset_vreg;
+      add_insn->ty = member_addr->ty;
+      ir_append_insn(fn, add_insn);
+
+      LLIRInsn *load_insn = ir_new_insn(LLIR_LOAD);
+      load_insn->dst = MAP_VAL(hinsn->dst);
+      load_insn->src1 = member_addr;
+      load_insn->ty = hinsn->ty ? hinsn->ty : (hinsn->dst ? hinsn->dst->ty : ty_int);
+      ir_append_insn(fn, load_insn);
+      break;
+    }
+    case HLIR_STORE_MEMBER: {
+      // src1.member_offset = src2
+      LLIRVReg *offset_vreg = ir_new_vreg(fn, ty_long);
+      LLIRInsn *imm_insn = ir_new_insn(LLIR_IMM);
+      imm_insn->dst = offset_vreg;
+      imm_insn->imm = hinsn->imm;
+      imm_insn->ty = ty_long;
+      ir_append_insn(fn, imm_insn);
+
+      LLIRVReg *member_addr = ir_new_vreg(fn, pointer_to(hinsn->ty ? hinsn->ty : ty_void));
+      LLIRInsn *add_insn = ir_new_insn(LLIR_ADD);
+      add_insn->dst = member_addr;
+      add_insn->src1 = MAP_VAL(hinsn->src1);
+      add_insn->src2 = offset_vreg;
+      add_insn->ty = member_addr->ty;
+      ir_append_insn(fn, add_insn);
+
+      LLIRInsn *store_insn = ir_new_insn(LLIR_STORE);
+      store_insn->src1 = member_addr;
+      store_insn->src2 = MAP_VAL(hinsn->src2);
+      store_insn->ty = hinsn->ty ? hinsn->ty : (hinsn->src2 && hinsn->src2->ty ? hinsn->src2->ty : ty_int);
+      ir_append_insn(fn, store_insn);
+      break;
+    }
+    case HLIR_LOAD_PTR: {
+      LLIRInsn *insn = ir_new_insn(LLIR_LOAD);
+      insn->dst = MAP_VAL(hinsn->dst);
+      insn->src1 = MAP_VAL(hinsn->src1);
+      insn->ty = hinsn->ty ? hinsn->ty : (hinsn->dst ? hinsn->dst->ty : ty_int);
+      ir_append_insn(fn, insn);
+      break;
+    }
+    case HLIR_STORE_PTR: {
+      LLIRInsn *insn = ir_new_insn(LLIR_STORE);
+      insn->src1 = MAP_VAL(hinsn->src1);
+      insn->src2 = MAP_VAL(hinsn->src2);
+      insn->ty = hinsn->ty ? hinsn->ty : (hinsn->src2 && hinsn->src2->ty ? hinsn->src2->ty : ty_int);
+      ir_append_insn(fn, insn);
+      break;
+    }
+    case HLIR_MEMCPY: {
+      LLIRInsn *insn = ir_new_insn(LLIR_MEMCPY);
+      insn->src1 = MAP_VAL(hinsn->src1);
+      insn->src2 = MAP_VAL(hinsn->src2);
+      insn->imm = hinsn->imm;
+      ir_append_insn(fn, insn);
+      break;
+    }
+    case HLIR_MEMZERO: {
+      LLIRInsn *insn = ir_new_insn(LLIR_MEMZERO);
+      insn->src1 = MAP_VAL(hinsn->src1);
+      insn->imm = hinsn->imm;
+      ir_append_insn(fn, insn);
+      break;
+    }
+    case HLIR_CAST: {
+      LLIRInsn *insn = ir_new_insn(LLIR_CAST);
+      insn->dst = MAP_VAL(hinsn->dst);
+      insn->src1 = MAP_VAL(hinsn->src1);
+      insn->ty = hinsn->ty ? hinsn->ty : (hinsn->dst ? hinsn->dst->ty : ty_int);
+      ir_append_insn(fn, insn);
+      break;
+    }
+    case HLIR_ADD:
+    case HLIR_SUB:
+    case HLIR_MUL:
+    case HLIR_DIV:
+    case HLIR_MOD:
+    case HLIR_BITAND:
+    case HLIR_BITOR:
+    case HLIR_BITXOR:
+    case HLIR_SHL:
+    case HLIR_SHR:
+    case HLIR_CMP_EQ:
+    case HLIR_CMP_NE:
+    case HLIR_CMP_LT:
+    case HLIR_CMP_LE:
+    case HLIR_CMP_GT:
+    case HLIR_CMP_GE: {
+      LLIRKind k = LLIR_NOP;
+      switch (hinsn->kind) {
+      case HLIR_ADD: k = LLIR_ADD; break;
+      case HLIR_SUB: k = LLIR_SUB; break;
+      case HLIR_MUL: k = LLIR_MUL; break;
+      case HLIR_DIV: k = LLIR_DIV; break;
+      case HLIR_MOD: k = LLIR_MOD; break;
+      case HLIR_BITAND: k = LLIR_AND; break;
+      case HLIR_BITOR: k = LLIR_OR; break;
+      case HLIR_BITXOR: k = LLIR_XOR; break;
+      case HLIR_SHL: k = LLIR_SHL; break;
+      case HLIR_SHR: k = LLIR_SHR; break;
+      case HLIR_CMP_EQ: k = LLIR_CMP_EQ; break;
+      case HLIR_CMP_NE: k = LLIR_CMP_NE; break;
+      case HLIR_CMP_LT: k = LLIR_CMP_LT; break;
+      case HLIR_CMP_LE: k = LLIR_CMP_LE; break;
+      case HLIR_CMP_GT: k = LLIR_CMP_GT; break;
+      case HLIR_CMP_GE: k = LLIR_CMP_GE; break;
+      default: break;
+      }
+      LLIRInsn *insn = ir_new_insn(k);
+      insn->dst = MAP_VAL(hinsn->dst);
+      insn->src1 = MAP_VAL(hinsn->src1);
+      insn->src2 = MAP_VAL(hinsn->src2);
+      insn->ty = hinsn->ty ? hinsn->ty : (hinsn->dst ? hinsn->dst->ty : (hinsn->src1 ? hinsn->src1->ty : ty_int));
+      ir_append_insn(fn, insn);
+      break;
+    }
+    case HLIR_NEG:
+    case HLIR_BITNOT:
+    case HLIR_LOGNOT: {
+      LLIRKind k = (hinsn->kind == HLIR_NEG) ? LLIR_NEG : ((hinsn->kind == HLIR_BITNOT) ? LLIR_NOT : LLIR_LOGNOT);
+      LLIRInsn *insn = ir_new_insn(k);
+      insn->dst = MAP_VAL(hinsn->dst);
+      insn->src1 = MAP_VAL(hinsn->src1);
+      insn->ty = hinsn->ty ? hinsn->ty : (hinsn->dst ? hinsn->dst->ty : (hinsn->src1 ? hinsn->src1->ty : ty_int));
+      ir_append_insn(fn, insn);
+      break;
+    }
+    case HLIR_LABEL: {
+      LLIRInsn *insn = ir_new_insn(LLIR_LABEL);
+      insn->label = hinsn->label;
+      ir_append_insn(fn, insn);
+      break;
+    }
+    case HLIR_JMP: {
+      LLIRInsn *insn = ir_new_insn(LLIR_JMP);
+      insn->label = hinsn->label;
+      insn->src1 = MAP_VAL(hinsn->src1);
+      ir_append_insn(fn, insn);
+      break;
+    }
+    case HLIR_JMP_IF_ZERO: {
+      LLIRInsn *insn = ir_new_insn(LLIR_BR_COND);
+      insn->src1 = MAP_VAL(hinsn->src1);
+      insn->label_true = NULL;
+      insn->label_false = hinsn->label;
+      insn->ty = hinsn->src1 ? hinsn->src1->ty : ty_int;
+      ir_append_insn(fn, insn);
+      break;
+    }
+    case HLIR_JMP_IF_NZ: {
+      LLIRInsn *insn = ir_new_insn(LLIR_BR_COND);
+      insn->src1 = MAP_VAL(hinsn->src1);
+      insn->label_true = hinsn->label;
+      insn->label_false = NULL;
+      insn->ty = hinsn->src1 ? hinsn->src1->ty : ty_int;
+      ir_append_insn(fn, insn);
+      break;
+    }
+    case HLIR_RET: {
+      LLIRInsn *insn = ir_new_insn(LLIR_RET);
+      insn->src1 = MAP_VAL(hinsn->src1);
+      insn->ty = hinsn->ty ? hinsn->ty : (hinsn->src1 ? hinsn->src1->ty : ty_void);
+      ir_append_insn(fn, insn);
+      break;
+    }
+    case HLIR_CALL: {
+      LLIRInsn *call_insn = ir_new_insn(LLIR_CALL);
+      call_insn->dst = MAP_VAL(hinsn->dst);
+      call_insn->src1 = MAP_VAL(hinsn->src1);
+      call_insn->label = hinsn->label;
+      call_insn->num_args = hinsn->num_args;
+      call_insn->call_abi = hinsn->call_abi;
+      call_insn->var = hinsn->var;
+      if (hinsn->num_args > 0 && hinsn->args) {
+        call_insn->args = calloc(hinsn->num_args + 1, sizeof(LLIRVReg *));
+        for (int a = 0; a < hinsn->num_args; a++)
+          call_insn->args[a] = MAP_VAL(hinsn->args[a]);
+      }
+      call_insn->ty = hinsn->ty ? hinsn->ty : (hinsn->dst ? hinsn->dst->ty : ty_int);
+      ir_append_insn(fn, call_insn);
+      break;
+    }
+    case HLIR_PARAM: {
+      LLIRInsn *insn = ir_new_insn(LLIR_PARAM);
+      insn->dst = MAP_VAL(hinsn->dst);
+      insn->imm = hinsn->imm;
+      insn->ty = hinsn->ty ? hinsn->ty : (hinsn->dst ? hinsn->dst->ty : ty_int);
+      ir_append_insn(fn, insn);
+      break;
+    }
+    case HLIR_ALLOCA: {
+      LLIRInsn *insn = ir_new_insn(LLIR_ALLOCA);
+      insn->dst = MAP_VAL(hinsn->dst);
+      insn->src1 = MAP_VAL(hinsn->src1);
+      insn->imm = hinsn->imm;
+      insn->ty = hinsn->dst ? hinsn->dst->ty : pointer_to(ty_void);
+      ir_append_insn(fn, insn);
+      break;
+    }
+    case HLIR_ASM: {
+      LLIRInsn *insn = ir_new_insn(LLIR_ASM);
+      insn->asm_str = hinsn->asm_str;
+      insn->asm_is_volatile = hinsn->asm_is_volatile;
+      insn->asm_is_goto = hinsn->asm_is_goto;
+      insn->asm_clobbers = hinsn->asm_clobbers;
+      insn->asm_labels = hinsn->asm_labels;
+
+      AsmOperand *out_head = NULL, *out_tail = NULL;
+      for (AsmOperand *src_op = hinsn->asm_outputs; src_op; src_op = src_op->next) {
+        AsmOperand *op = calloc(1, sizeof(AsmOperand));
+        *op = *src_op;
+        op->next = NULL;
+        op->vreg = MAP_VAL((HLIRVal *)src_op->vreg);
+        op->addr_vreg = MAP_VAL((HLIRVal *)src_op->addr_vreg);
+        if (!out_head) out_head = out_tail = op;
+        else out_tail = out_tail->next = op;
+      }
+      insn->asm_outputs = out_head;
+
+      AsmOperand *in_head = NULL, *in_tail = NULL;
+      for (AsmOperand *src_op = hinsn->asm_inputs; src_op; src_op = src_op->next) {
+        AsmOperand *op = calloc(1, sizeof(AsmOperand));
+        *op = *src_op;
+        op->next = NULL;
+        op->vreg = MAP_VAL((HLIRVal *)src_op->vreg);
+        op->addr_vreg = MAP_VAL((HLIRVal *)src_op->addr_vreg);
+        if (!in_head) in_head = in_tail = op;
+        else in_tail = in_tail->next = op;
+      }
+      insn->asm_inputs = in_head;
+
+      int vreg_count = 0;
+      for (AsmOperand *op = insn->asm_outputs; op; op = op->next) {
+        if (op->vreg) vreg_count++;
+        if (op->addr_vreg) vreg_count++;
+      }
+      for (AsmOperand *op = insn->asm_inputs; op; op = op->next) {
+        if (op->vreg) vreg_count++;
+        if (op->addr_vreg) vreg_count++;
+      }
+
+      if (vreg_count > 0) {
+        insn->args = calloc(vreg_count, sizeof(LLIRVReg *));
+        insn->num_args = 0;
+        for (AsmOperand *op = insn->asm_outputs; op; op = op->next) {
+          if (op->vreg) insn->args[insn->num_args++] = op->vreg;
+          if (op->addr_vreg) insn->args[insn->num_args++] = op->addr_vreg;
+        }
+        for (AsmOperand *op = insn->asm_inputs; op; op = op->next) {
+          if (op->vreg) insn->args[insn->num_args++] = op->vreg;
+          if (op->addr_vreg) insn->args[insn->num_args++] = op->addr_vreg;
+        }
+      }
+
+      ir_append_insn(fn, insn);
+      break;
+    }
+    case HLIR_CAS: {
+      LLIRInsn *insn = ir_new_insn(LLIR_CAS);
+      insn->dst = MAP_VAL(hinsn->dst);
+      insn->src1 = MAP_VAL(hinsn->src1);
+      insn->src2 = MAP_VAL(hinsn->src2);
+      insn->src3 = MAP_VAL(hinsn->src3);
+      insn->ty = hinsn->ty;
+      ir_append_insn(fn, insn);
+      break;
+    }
+    case HLIR_EXCH: {
+      LLIRInsn *insn = ir_new_insn(LLIR_EXCH);
+      insn->dst = MAP_VAL(hinsn->dst);
+      insn->src1 = MAP_VAL(hinsn->src1);
+      insn->src2 = MAP_VAL(hinsn->src2);
+      insn->ty = hinsn->ty;
+      ir_append_insn(fn, insn);
+      break;
+    }
+    default:
+      break;
+    }
+  }
+
+#undef MAP_VAL
+  free(val_map);
+  return fn;
+}
+
 LLIRProg *hlir_to_llir(HLIRProg *hlir) {
   if (!hlir)
     return NULL;
-  return ast_to_ir(hlir->globals);
+
+  LLIRProg *prog = calloc(1, sizeof(LLIRProg));
+  prog->globals = hlir->globals;
+  prog->num_fns = hlir->num_fns;
+  prog->fns = calloc(hlir->num_fns + 1, sizeof(LLIRFunction *));
+
+  for (int i = 0; i < hlir->num_fns; i++) {
+    prog->fns[i] = lower_hlir_function_to_llir(hlir->fns[i]);
+  }
+
+  return prog;
 }

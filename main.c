@@ -1,18 +1,6 @@
 #include "chibicc.h"
 #include "ir/opt.h"
 
-#ifdef _WIN32
-#include <windows.h>
-
-static LONG WINAPI crash_handler(EXCEPTION_POINTERS *ExceptionInfo) {
-  fprintf(stderr, "Fatal error: chibicc crashed with exception code 0x%08lX at address %p\n",
-          (unsigned long)ExceptionInfo->ExceptionRecord->ExceptionCode,
-          ExceptionInfo->ExceptionRecord->ExceptionAddress);
-  fflush(stderr);
-  return EXCEPTION_CONTINUE_SEARCH;
-}
-#endif
-
 typedef enum
 {
   FILE_NONE, FILE_C, FILE_ASM, FILE_OBJ, FILE_AR, FILE_DSO,
@@ -53,6 +41,12 @@ static char *cc1_output_file;
 static StringArray input_paths;
 StringArray tmpfiles;
 
+struct CmdArg
+{
+  char* arg;
+  char* value;
+};
+
 void chibicc_assert_fail(const char *expr, const char *file, int line, const char *func) {
   fprintf(stderr, "\n[CHIBICC INTERNAL ASSERTION FAILURE]\n");
   fprintf(stderr, "  Assertion : %s\n", expr);
@@ -62,10 +56,6 @@ void chibicc_assert_fail(const char *expr, const char *file, int line, const cha
   fprintf(stderr, "\n");
   fflush(stderr);
   exit(1);
-}
-
-void _assert(const char *expr, const char *file, int line, const char *func) {
-  chibicc_assert_fail(expr, file, line, func);
 }
 
 static void usage(const int status) {
@@ -90,6 +80,7 @@ static void add_default_include_paths(const char *argv0) {
   // We expect that chibicc-specific include files are installed
   // to ./include relative to argv[0].
   strarray_push(&include_paths, format("%s/include", dirname(strdup(argv0))));
+  strarray_push(&include_paths, format("%s/sdk/include", dirname(strdup(argv0))));
 
   // Add standard include paths.
   strarray_push(&include_paths, "/usr/local/include");
@@ -103,19 +94,11 @@ static void add_default_include_paths(const char *argv0) {
 
 static void define(char *str) 
 {
-#ifndef _WIN32
   char *eq = strchr(str, '=');
   if (eq)
     define_macro(strndup(str, eq - str), eq + 1);
   else
     define_macro(str, "1");
-#else
-  char *eq = strchr(str, '=');
-  if (eq)
-    define_macro(chibicc_strndup(str, eq - str), eq + 1);
-  else
-    define_macro(str, "1");
-#endif
 }
 
 static FileType parse_opt_x(char *s) {
@@ -169,11 +152,11 @@ static void parse_args(const int argc, char **argv) {
 
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "-target") || !strcmp(argv[i], "--target")) {
-      char *t = argv[++i];
-      char *dash = strchr(t, '-');
+      const char *t = argv[++i];
+      const char *dash = strchr(t, '-');
       if (dash) {
-        char *arch = strndup(t, dash - t);
-        char *abi = dash + 1;
+        const char *arch = strndup(t, dash - t);
+        const char *abi = dash + 1;
         init_target(arch, abi);
       } else {
         init_target(t, NULL);
@@ -182,11 +165,11 @@ static void parse_args(const int argc, char **argv) {
     }
 
     if (!strncmp(argv[i], "--target=", 9)) {
-      char *t = argv[i] + 9;
-      char *dash = strchr(t, '-');
+      const char *t = argv[i] + 9;
+      const char *dash = strchr(t, '-');
       if (dash) {
-        char *arch = strndup(t, dash - t);
-        char *abi = dash + 1;
+        const char *arch = strndup(t, dash - t);
+        const char *abi = dash + 1;
         init_target(arch, abi);
       } else {
         init_target(t, NULL);
@@ -416,12 +399,20 @@ static void parse_args(const int argc, char **argv) {
       if (argv[i][2] == '\0') {
         opt_O = 1;
         ir_opt_set_level(1);
+        opt_ffunction_sections = true;
+        opt_fdata_sections = true;
       } else if (argv[i][2] == 's' || argv[i][2] == 'z') {
         opt_O = 2;
         ir_opt_set_level(2);
+        opt_ffunction_sections = true;
+        opt_fdata_sections = true;
       } else if (argv[i][2] >= '0' && argv[i][2] <= '9') {
         opt_O = argv[i][2] - '0';
         ir_opt_set_level(opt_O);
+        if (opt_O > 0) {
+          opt_ffunction_sections = true;
+          opt_fdata_sections = true;
+        }
       }
       continue;
     }
@@ -545,21 +536,46 @@ static char *replace_extn(const char *tmpl, char *extn) {
 }
 
 static void cleanup(void) {
-  for (int i = 0; i < tmpfiles.len; i++)
-    remove(tmpfiles.data[i]);
+  for (int i = 0; i < tmpfiles.len; i++) {
+    if (tmpfiles.data[i]) {
+      remove(tmpfiles.data[i]);
+      tmpfiles.data[i] = NULL;
+    }
+  }
 }
 
-#ifdef _WIN32
-
-char *create_tmpfile(void);
-
-#else
-
-static char *create_tmpfile(void)
+char *create_tmpfile(void)
 {
-  char *path = strdup("/tmp/chibicc-XXXXXX");
+  char *path = NULL;
+  int fd = -1;
 
-  int fd = mkstemp(path);
+  char *tmpdir = getenv("TMPDIR");
+  if (!tmpdir)
+    tmpdir = getenv("TMP");
+  if (!tmpdir)
+    tmpdir = getenv("TEMP");
+
+  if (tmpdir && tmpdir[0]) {
+    char *td = strdup(tmpdir);
+    for (int i = 0; td[i]; i++) {
+      if (td[i] == '\\') td[i] = '/';
+    }
+    path = format("%s/chibicc-XXXXXX", td);
+    free(td);
+    fd = mkstemp(path);
+  }
+
+  if (fd == -1) {
+    if (path) free(path);
+    path = strdup("/tmp/chibicc-XXXXXX");
+    fd = mkstemp(path);
+  }
+
+  if (fd == -1) {
+    free(path);
+    path = strdup("chibicc-tmp-XXXXXX");
+    fd = mkstemp(path);
+  }
 
   if (fd == -1)
     error("mkstemp failed: %s", strerror(errno));
@@ -570,13 +586,10 @@ static char *create_tmpfile(void)
   return path;
 }
 
+#ifndef _MSC_VER
+int spawnvp(int mode, const char *file, char *const argv[]);
 #endif
 
-#ifdef _WIN32
-// Windows Subprocess implementation.
-bool run_subprocess(char **argv);
-#else
-// POSIX version of run_subprocess() for Linux and macOS.
 static void run_subprocess(char **argv) {
   // If -### is given, dump the subprocess's command line.
   if (opt_hash_hash_hash) {
@@ -586,20 +599,25 @@ static void run_subprocess(char **argv) {
     fprintf(stderr, "\n");
   }
 
-  if (fork() == 0) {
+  int pid = fork();
+  if (pid == 0) {
     // Child process. Run a new command.
     execvp(argv[0], argv);
     fprintf(stderr, "exec failed: %s: %s\n", argv[0], strerror(errno));
     _exit(1);
+  } else if (pid > 0) {
+    // Wait for the child process to finish.
+    int status;
+    while (wait(&status) > 0);
+    if (status != 0)
+      exit(1);
+  } else {
+    // Environments without fork support
+    int status = (int)spawnvp(0, argv[0], (void *)argv);
+    if (status != 0)
+      exit(1);
   }
-
-  // Wait for the child process to finish.
-  int status;
-  while (wait(&status) > 0);
-  if (status != 0)
-    exit(1);
 }
-#endif
 
 static void run_cc1(int argc, char **argv, char *input, char *output) {
   char **args = calloc(argc + 10, sizeof(char *));
@@ -748,60 +766,10 @@ static void cc1(void) {
 
   Obj *prog = parse(tok);
 
-  // Open a temporary output buffer.
-  char *buf;
-  size_t buflen;
-
-#ifdef _WIN32
-  FILE *output_buf = tmpfile();
-#else
-  FILE *output_buf = open_memstream(&buf, &buflen);
-#endif
-
-  if (!output_buf)
-    error("failed to create temporary output buffer");
-
-  // Traverse the AST to emit assembly.
-  codegen(prog, output_buf);
-
-#ifdef _WIN32
-  // tmpfile() doesn't give us a memory buffer, so read the file back.
-  fflush(output_buf);
-
-  if (fseek(output_buf, 0, SEEK_END) != 0)
-    error("failed to seek temporary output buffer");
-
-  const long file_size = ftell(output_buf);
-  if (file_size < 0)
-    error("failed to determine temporary output buffer size");
-
-  buflen = (size_t)file_size;
-
-  if (fseek(output_buf, 0, SEEK_SET) != 0)
-    error("failed to rewind temporary output buffer");
-
-  buf = malloc(buflen + 1);
-  if (!buf)
-    error("out of memory");
-
-  if (fread(buf, 1, buflen, output_buf) != buflen)
-    error("failed to read temporary output buffer");
-
-  buf[buflen] = '\0';
-
-  fclose(output_buf);
-#else
-  fclose(output_buf);
-#endif
-
-  // Write the assembly text to a file.
+  // Write the assembly text directly to the output file.
   FILE *out = open_file(cc1_output_file);
-  fwrite(buf, buflen, 1, out);
+  codegen(prog, out);
   fclose(out);
-
-#ifdef _WIN32
-  free(buf);
-#endif
 }
 
 static void assemble(char *input, char *output) {
@@ -849,6 +817,38 @@ static char *find_gcc_libpath(void) {
   error("gcc library path is not found");
 }
 
+#ifdef _WIN32
+static void run_linker(const StringArray *inputs, char *output) {
+  StringArray arr = {};
+
+  strarray_push(&arr, "gcc");
+  strarray_push(&arr, "-o");
+  strarray_push(&arr, output);
+
+  if (opt_shared) {
+    strarray_push(&arr, "-shared");
+  }
+
+  strarray_push(&arr, "-Wl,--allow-multiple-definition");
+
+  for (int i = 0; i < ld_extra_args.len; i++)
+    strarray_push(&arr, ld_extra_args.data[i]);
+
+  for (int i = 0; i < inputs->len; i++)
+    strarray_push(&arr, inputs->data[i]);
+
+  if (file_exists("sdk/lib/libc.dll.a")) {
+    strarray_push(&arr, "sdk/lib/libc.dll.a");
+  } else if (file_exists("libc.dll.a")) {
+    strarray_push(&arr, "libc.dll.a");
+  } else if (file_exists("libc.dll")) {
+    strarray_push(&arr, "libc.dll");
+  }
+
+  strarray_push(&arr, NULL);
+  run_subprocess(arr.data);
+}
+#else
 static void run_linker(const StringArray *inputs, char *output) {
   StringArray arr = {};
 
@@ -915,14 +915,15 @@ static void run_linker(const StringArray *inputs, char *output) {
 
   run_subprocess(arr.data);
 }
+#endif
 
 static FileType get_file_type(char *filename) {
   if (opt_x != FILE_NONE)
     return opt_x;
 
-  if (endswith(filename, ".a"))
+  if (endswith(filename, ".a") || endswith(filename, ".lib"))
     return FILE_AR;
-  if (endswith(filename, ".so"))
+  if (endswith(filename, ".so") || endswith(filename, ".dll"))
     return FILE_DSO;
   if (endswith(filename, ".o"))
     return FILE_OBJ;
@@ -936,9 +937,6 @@ static FileType get_file_type(char *filename) {
 
 int main(const int argc, char **argv)
 {
-#ifdef _WIN32
-  // SetUnhandledExceptionFilter(crash_handler);
-#endif
   atexit(cleanup);
   init_all_targets_and_abis();
   init_macros();
@@ -1016,6 +1014,7 @@ int main(const int argc, char **argv)
       char *tmp = create_tmpfile();
       run_cc1(argc, argv, input, tmp);
       assemble(tmp, output);
+      remove(tmp);
       continue;
     }
 
@@ -1024,10 +1023,12 @@ int main(const int argc, char **argv)
     char *tmp2 = create_tmpfile();
     run_cc1(argc, argv, input, tmp1);
     assemble(tmp1, tmp2);
+    remove(tmp1);
     strarray_push(&ld_args, tmp2);
- }
+  }
 
   if (ld_args.len > 0)
     run_linker(&ld_args, opt_o ? opt_o : "a.out");
+  cleanup();
   return 0;
 }

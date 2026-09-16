@@ -1265,7 +1265,7 @@ bool hlir_opt_inlining(HLIRProg *prog) {
           ret_count++;
           last_ret = ci;
         }
-        if (ci->kind == HLIR_ASM || ci->kind == HLIR_ALLOCA) {
+        if (ci->kind == HLIR_ASM || ci->kind == HLIR_ALLOCA || ci->kind == HLIR_CALL) {
           ret_count = 999;
           break;
         }
@@ -1274,16 +1274,30 @@ bool hlir_opt_inlining(HLIRProg *prog) {
       if (ret_count != 1 || !last_ret || last_ret != callee->tail)
         continue;
 
+      // Check if callee has locals; if so, skip inlining to preserve frame layout
+      if (callee->locals)
+        continue;
+
       HLIRVal **val_map = calloc(callee->num_vals, sizeof(HLIRVal *));
       for (int v = 0; v < callee->num_vals; v++) {
         val_map[v] = hlir_new_val(caller, callee->vals[v]->ty);
         val_map[v]->var = callee->vals[v]->var;
       }
 
+      // Allocate new local variables for each parameter in the caller
       Obj *param = callee->params;
       for (int a = 0; a < insn->num_args && param; a++, param = param->next) {
+        Obj *local_param = calloc(1, sizeof(Obj));
+        local_param->name = param->name;
+        local_param->ty = param->ty;
+        local_param->is_local = true;
+        local_param->align = param->ty->align;
+        if (caller->fn_obj) {
+          local_param->next = caller->fn_obj->locals;
+          caller->fn_obj->locals = local_param;
+        }
         HLIRInsn *param_store = hlir_new_insn(HLIR_STORE_VAR);
-        param_store->var = param;
+        param_store->var = local_param;
         param_store->src1 = insn->args[a];
         param_store->ty = param->ty;
         hlir_insert_before(caller, insn, param_store);
@@ -1335,61 +1349,25 @@ bool hlir_opt_inlining(HLIRProg *prog) {
 // ==============================================================================
 
 void hlir_optimize(HLIRProg *prog, int opt_level) {
-  if (!prog)
+  if (!prog || opt_level <= 0)
     return;
 
   ir_init_pass_registry();
 
-  int max_iter = (opt_level > 0) ? opt_max_passes : 1;
-
   if (opt_level >= 2) {
     hlir_opt_inlining(prog);
   }
+
+  int max_iter = (opt_max_passes > 0) ? opt_max_passes : 2;
 
   for (int i = 0; i < prog->num_fns; i++)
   {
     HLIRFunction *fn = prog->fns[i];
     if (!fn) continue;
 
-    bool changed = true;
-
-
-    // On higher performance machines, we can just do this indefinitely (although might be worth say stop at a certain number of iterations)
-
-    const int total_max_iters = 500; // if we get this many iterations and are still changing, we are probably in some loop
-    int iterCount = 0;
-    do
+    for (int iter = 0; iter < max_iter; iter++)
     {
-      changed = false;
-
-      if (iterCount == total_max_iters)
-        break;
-
-      iterCount++;
-
-      if (pass_hlir_const_fold.enabled)
-        changed |= hlir_opt_const_fold(fn);
-      if (pass_hlir_algebraic.enabled)
-        changed |= hlir_opt_algebraic(fn);
-      if (pass_hlir_copy_prop.enabled)
-        changed |= hlir_opt_copy_prop(fn);
-      if (pass_hlir_local_cse.enabled)
-        changed |= hlir_opt_local_cse(fn);
-      if (pass_hlir_load_store.enabled)
-        changed |= hlir_opt_load_store(fn);
-      if (pass_hlir_control_flow.enabled)
-        changed |= hlir_opt_control_flow(fn);
-      if (pass_hlir_dead_code.enabled) {
-        changed |= hlir_opt_dead_code(fn);
-        changed |= hlir_opt_dce(fn);
-      }
-    } while (changed);
-
-
-    /*
-    //for (int iter = 0; iter < max_iter; iter++)
-    {
-
+      bool changed = false;
       if (pass_hlir_const_fold.enabled)
         changed |= hlir_opt_const_fold(fn);
       if (pass_hlir_algebraic.enabled)
@@ -1410,12 +1388,5 @@ void hlir_optimize(HLIRProg *prog, int opt_level) {
       if (!changed)
         break;
     }
-
-    if (changed) {
-      printf("May be worth increasing optimization iteration count for function %s\n", fn->name);
-      fflush(stdout);
-    }
-    */
-
   }
 }

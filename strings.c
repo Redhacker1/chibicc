@@ -17,41 +17,25 @@ void strarray_push(StringArray *arr, char *s) {
 }
 
 // Takes a printf-style format string and returns a formatted string.
-#ifdef _WIN32
-char *format(char *fmt, ...)
-{
-    va_list ap;
-
-    // Determine required buffer size.
-    va_start(ap, fmt);
-    int len = vsnprintf(NULL, 0, fmt, ap);
-    va_end(ap);
-
-    if (len < 0)
-        return NULL;
-
-    char *buf = malloc((size_t)len + 1);
-    if (!buf)
-        return NULL;
-
-    // Format the string into the allocated buffer.
-    va_start(ap, fmt);
-    vsnprintf(buf, (size_t)len + 1, fmt, ap);
-    va_end(ap);
-
-    return buf;
-}
-#else
 char *format(char *fmt, ...) {
-  char *buf;
-  size_t buflen;
-  FILE *out = open_memstream(&buf, &buflen);
-
+#if defined(_MSC_VER)
   va_list ap;
   va_start(ap, fmt);
-  vfprintf(out, fmt, ap);
+  int len = _vscprintf(fmt, ap);
   va_end(ap);
-  fclose(out);
+  if (len < 0) return NULL;
+  char *buf = malloc((size_t)len + 1);
+  if (!buf) return NULL;
+  va_start(ap, fmt);
+  vsprintf_s(buf, (size_t)len + 1, fmt, ap);
+  va_end(ap);
   return buf;
-}
+#else
+  char *buf = NULL;
+  va_list ap;
+  va_start(ap, fmt);
+  vasprintf(&buf, fmt, ap);
+  va_end(ap);
+  return buf;
 #endif
+}

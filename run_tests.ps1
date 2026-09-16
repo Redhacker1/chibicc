@@ -2,7 +2,7 @@
 param(
     [string]$Compiler = "",
     [string]$OptLevel = "",
-    [string]$MinGWInclude = "C:\Users\donov\Documents\MinGW64\x86_64-w64-mingw32\include"
+    [string]$LibcInclude = ""
 )
 
 $ErrorActionPreference = "Continue"
@@ -54,10 +54,27 @@ if (-not $Compiler) {
 $Compiler = (Resolve-Path $Compiler).Path
 
 $RootDir = (Resolve-Path ".").Path
-$IncludeFlags = @("-I$RootDir", "-I$RootDir\include", "-I$RootDir\compiler_include", "-I$RootDir\tests")
-if (Test-Path $MinGWInclude) {
-    $IncludeFlags += "-I$MinGWInclude"
+$IncludeFlags = @("-I$RootDir\win_includes", "-I$RootDir", "-I$RootDir\sdk\include", "-I$RootDir\libc\libc\include", "-I$RootDir\include", "-I$RootDir\compiler_include", "-I$RootDir\tests")
+if ($LibcInclude -and (Test-Path $LibcInclude)) {
+    $IncludeFlags = @("-I$RootDir\win_includes", "-I$RootDir", "-I$LibcInclude", "-I$RootDir\libc\libc\include", "-I$RootDir\include", "-I$RootDir\compiler_include", "-I$RootDir\tests")
 }
+
+# Setup Custom libc
+$LibcFlags = @()
+$LibcImplib = "$RootDir\sdk\lib\libc.dll.a"
+$LibcDll = "$RootDir\sdk\lib\libc.dll"
+if (Test-Path $LibcImplib) {
+    $LibcFlags = @($LibcImplib, "-Wl,--allow-multiple-definition")
+} elseif (Test-Path "$RootDir\libc.dll") {
+    $LibcFlags = @("$RootDir\libc.dll", "-Wl,--allow-multiple-definition")
+}
+
+if (Test-Path $LibcDll) {
+    Copy-Item -Force $LibcDll "$RootDir\libc.dll" -ErrorAction SilentlyContinue
+    Copy-Item -Force $LibcDll "$RootDir\tests\libc.dll" -ErrorAction SilentlyContinue
+    Copy-Item -Force $LibcDll "$RootDir\tests\optimizations\libc.dll" -ErrorAction SilentlyContinue
+}
+$env:PATH = "$RootDir;$RootDir\sdk\bin;$RootDir\sdk\lib;$env:PATH"
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "       chibicc Test Suite Runner        " -ForegroundColor Cyan
@@ -75,7 +92,7 @@ $FailedTests = @()
 # 1. Unit Tests (in tests/*.c)
 # ==============================================================================
 Write-Host "`n[Setup] Compiling tests/common helper..." -ForegroundColor Yellow
-gcc -x c -c "tests/common" -o "tests/common.o"
+gcc -x c -c "tests/common" -I"$RootDir\win_includes" -I"$RootDir\sdk\include" -I"$RootDir\libc\libc\include" -I"$RootDir\include" -o "tests/common.o"
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Failed to compile tests/common helper object"
     exit 1
@@ -119,7 +136,7 @@ foreach ($file in $unit_tests) {
         $extraLinkFlags += "-lkernel32"
     }
 
-    $linkOutput = gcc $oFile "tests/common.o" -o $exeFile $extraLinkFlags 2>&1
+    $linkOutput = gcc $oFile "tests/common.o" -o $exeFile $extraLinkFlags @LibcFlags 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  [FAIL] $name.c (Link failed)" -ForegroundColor Red
         if ($linkOutput) {
@@ -166,7 +183,7 @@ foreach ($file in $abi_tests) {
     $exeFile = "tests\$name.exe"
 
     $optArgs = if ($OptFlag) { @($OptFlag) } else { @() }
-    $ccOutput = & $Compiler -c $cFile -o $oFile -I"$RootDir\include" $optArgs -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>&1
+    $ccOutput = & $Compiler -c $cFile -o $oFile $IncludeFlags $optArgs -target x86_64-win64 -D_WIN32 -D__GNUC__ 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  [FAIL] $name.c (Compilation failed)" -ForegroundColor Red
         if ($ccOutput) {
@@ -179,7 +196,7 @@ foreach ($file in $abi_tests) {
         $ccOutput | ForEach-Object { Write-Host "         $_" -ForegroundColor DarkGray }
     }
 
-    $linkOutput = gcc -o $exeFile $oFile 2>&1
+    $linkOutput = gcc -o $exeFile $oFile @LibcFlags 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  [FAIL] $name.c (Link failed)" -ForegroundColor Red
         if ($linkOutput) {
@@ -245,7 +262,7 @@ if (Test-Path $confDir) {
                 $extraLinkFlags += "-lpthread"
             }
 
-            $linkOutput = gcc $oFile -o $exeFile $extraLinkFlags 2>&1
+            $linkOutput = gcc $oFile -o $exeFile $extraLinkFlags @LibcFlags 2>&1
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "  [FAIL] $testName (Link failed)" -ForegroundColor Red
                 if ($linkOutput) {
@@ -310,7 +327,7 @@ if (Test-Path $optDir) {
     Write-Host "========================================" -ForegroundColor Cyan
 
     Write-Host "`n[Setup] Compiling tests/common helper for optimizations..." -ForegroundColor Yellow
-    gcc -x c -c "tests/common" -o "tests/common.o"
+    gcc -x c -c "tests/common" -I"$RootDir\win_includes" -I"$RootDir\sdk\include" -I"$RootDir\libc\libc\include" -I"$RootDir\include" -o "tests/common.o"
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Failed to compile tests/common helper object"
         exit 1
@@ -342,7 +359,7 @@ if (Test-Path $optDir) {
             }
 
             # Link with GCC
-            $linkOutput = gcc $oFile "tests/common.o" -o $exeFile 2>&1
+            $linkOutput = gcc $oFile "tests/common.o" -o $exeFile @LibcFlags 2>&1
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "  [FAIL] $testLabel (Link failed)" -ForegroundColor Red
                 if ($linkOutput) {

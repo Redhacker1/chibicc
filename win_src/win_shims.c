@@ -1,122 +1,151 @@
 
-#include "Windows.h"
+#include "windows_lite.h"
 #include "stdbool.h"
 
 #include "chibicc.h"
 
 #ifdef _WIN32
-void error(char *fmt, ...);
+#if defined(_MSC_VER)
+#include <process.h>
+#include <io.h>
+#include <fcntl.h>
 
-char *create_tmpfile(void)
-{
-#ifdef _WIN32
-  char temp_path[MAX_PATH];
-  char temp_file[MAX_PATH];
+char *strndup(const char *s, size_t n) {
+    size_t len = strlen(s);
+    if (len > n) len = n;
+    char *p = malloc(len + 1);
+    if (!p) return NULL;
+    memcpy(p, s, len);
+    p[len] = '\0';
+    return p;
+}
 
-  DWORD len = GetTempPathA(sizeof(temp_path), temp_path);
-  if (len == 0 || len >= sizeof(temp_path))
-    error("GetTempPath failed");
+int mkstemp(char *tmpl) {
+    char *p = strstr(tmpl, "XXXXXX");
+    if (!p) return -1;
+    static unsigned long counter = 0;
+    counter++;
+    snprintf(p, 7, "%06lx", (unsigned long)(GetTickCount64() ^ (counter << 12)));
+    return _open(tmpl, _O_RDWR | _O_CREAT | _O_EXCL | _O_BINARY, _S_IREAD | _S_IWRITE);
+}
 
-  if (GetTempFileNameA(temp_path, "cc", 0, temp_file) == 0)
-    error("GetTempFileName failed");
+int fork(void) {
+    return -1;
+}
 
-  char *path = strdup(temp_file);
-  if (!path)
-    error("out of memory");
-
-  strarray_push(&tmpfiles, path);
-  return path;
-
-#else
-  char *path = strdup("/tmp/chibicc-XXXXXX");
-
-  int fd = mkstemp(path);
-
-  if (fd == -1)
-    error("mkstemp failed: %s", strerror(errno));
-
-  close(fd);
-
-  strarray_push(&tmpfiles, path);
-  return path;
+int wait(int *status) {
+    (void)status;
+    return -1;
+}
 #endif
+
+#if !defined(_MSC_VER)
+__asm__(
+".global ___chkstk_ms\n"
+"___chkstk_ms:\n"
+"  pushq %rcx\n"
+"  pushq %rax\n"
+"  cmpq $0x1000, %rax\n"
+"  lea 24(%rsp), %rcx\n"
+"  jb 2f\n"
+"1:\n"
+"  subq $0x1000, %rcx\n"
+"  orl $0, (%rcx)\n"
+"  subq $0x1000, %rax\n"
+"  cmpq $0x1000, %rax\n"
+"  ja 1b\n"
+"2:\n"
+"  subq %rax, %rcx\n"
+"  orl $0, (%rcx)\n"
+"  popq %rax\n"
+"  popq %rcx\n"
+"  ret\n"
+);
+#endif
+
+#if !defined(_MSC_VER)
+int main(const int argc, char **argv);
+void exit(int status);
+
+void mainCRTStartup(void) {
+  char *cmd = GetCommandLineA();
+  int argc = 0;
+  int cap = 16;
+  char **argv = malloc(sizeof(char *) * cap);
+
+  char *p = cmd;
+  while (*p) {
+    while (*p == ' ' || *p == '\t') p++;
+    if (!*p) break;
+
+    char *arg_buf = malloc(strlen(p) + 1);
+    int len = 0;
+    bool in_quotes = false;
+
+    while (*p) {
+      if (*p == '"') {
+        in_quotes = !in_quotes;
+        p++;
+      } else if (!in_quotes && (*p == ' ' || *p == '\t')) {
+        break;
+      } else if (*p == '\\' && *(p + 1) == '"') {
+        arg_buf[len++] = '"';
+        p += 2;
+      } else {
+        arg_buf[len++] = *p++;
+      }
+    }
+    arg_buf[len] = '\0';
+
+    if (argc + 1 >= cap) {
+      cap *= 2;
+      argv = realloc(argv, sizeof(char *) * cap);
+    }
+    argv[argc++] = arg_buf;
+  }
+  argv[argc] = NULL;
+
+  int ret = main(argc, argv);
+  exit(ret);
 }
+#endif
 
-// Windows Subprocess implementation.
-bool run_subprocess(char **argv)
-{
-    STARTUPINFOA si = {0};
-    PROCESS_INFORMATION pi = {0};
-
-    si.cb = sizeof(si);
-
-    // Calculate the required command-line length.
-    size_t len = 0;
-
-    for (int i = 0; argv[i]; i++) {
-        if (i > 0)
-            len++; // Space
-
-        // Leave room for quotes around every argument.
-        len += strlen(argv[i]) + 2;
-    }
-
-    char *command_line = calloc(1, len + 1);
-    if (!command_line)
-        error("out of memory");
-
-    // Build the command line.
-    char *p = command_line;
-
-    for (int i = 0; argv[i]; i++) {
-        if (i > 0)
-            *p++ = ' ';
-
-        *p++ = '"';
-
-        size_t arglen = strlen(argv[i]);
-        memcpy(p, argv[i], arglen);
-        p += arglen;
-
-        *p++ = '"';
-    }
-
-    *p = '\0';
-
-    BOOL ok = CreateProcessA(
-        NULL,
-        command_line,
-        NULL,
-        NULL,
-        TRUE,
-        0,
-        NULL,
-        NULL,
-        &si,
-        &pi
-    );
-
-    if (!ok) {
-        fprintf(stderr, "CreateProcess failed: %lu for command: %s\n", GetLastError(), command_line);
-        free(command_line);
-        return false;
-    }
-
-    free(command_line);
-
-    WaitForSingleObject(pi.hProcess, INFINITE);
-
-    DWORD exit_code;
-    if (!GetExitCodeProcess(pi.hProcess, &exit_code))
-        exit_code = 1;
-
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-
-    if (exit_code != 0)
-        exit(exit_code);
-
-    return true;
+#if !defined(_MSC_VER)
+int stat(const char *path, struct stat *st) {
+  WIN32_FIND_DATAA fd;
+  HANDLE h = FindFirstFileA(path, &fd);
+  if (h == INVALID_HANDLE_VALUE)
+    return -1;
+  FindClose(h);
+  if (st) {
+    memset(st, 0, sizeof(*st));
+    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+      st->st_mode = S_IFDIR | 0777;
+    else
+      st->st_mode = S_IFREG | 0777;
+    st->st_size = ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+  }
+  return 0;
 }
+#endif
+
+#if !defined(_MSC_VER)
+time_t time(time_t *t) {
+  FILETIME ft;
+  GetSystemTimeAsFileTime(&ft);
+  unsigned long long t64 = ((unsigned long long)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+  time_t res = (time_t)((t64 - 116444736000000000ULL) / 10000000ULL);
+  if (t) *t = res;
+  return res;
+}
+#endif
+
+#if !defined(_MSC_VER)
+char *_fullpath(char *absPath, const char *relPath, size_t maxLength) {
+  if (GetFullPathNameA(relPath, (DWORD)maxLength, absPath, NULL))
+    return absPath;
+  return NULL;
+}
+#endif
 
 #endif

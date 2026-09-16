@@ -32,6 +32,7 @@ char *basename(char *path) {
     return p ? p + 1 : path;
 }
 
+#ifdef _MSC_VER
 char *ctime_r(const time_t *timer, char *buf) {
     if (ctime_s(buf, 26, timer) != 0)
         return NULL;
@@ -41,3 +42,4 @@ char *ctime_r(const time_t *timer, char *buf) {
 int strncasecmp(const char *a, const char *b, size_t n) {
     return _strnicmp(a, b, n);
 }
+#endif

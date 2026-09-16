@@ -3,7 +3,7 @@
 
 #ifdef _WIN32
 
-#include <windows.h>
+#include "windows_lite.h"
 #include <sys/wait.h>
 
 /*

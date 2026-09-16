@@ -432,6 +432,10 @@ static void gen_stmt(Node *node, FILE *out) {
 static void m68k_emit_data(Obj *prog, FILE *out) {
   (void)out;
   for (Obj *var = prog; var; var = var->next) {
+    if (var->is_asm) {
+      println("  %s", var->asm_str ? var->asm_str : "");
+      continue;
+    }
     if (var->is_function || !var->is_definition)
       continue;
 

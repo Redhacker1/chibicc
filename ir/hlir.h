@@ -70,6 +70,9 @@ struct HLIRVal {
   int id;
   Type *ty;
   Obj *var;
+  bool is_struct_val;
+  int struct_size;
+  Type *struct_ty;
 };
 
 struct HLIRInsn {
@@ -90,13 +93,21 @@ struct HLIRInsn {
   Type *ty;
   int num_args;
   HLIRVal **args;
+  ABI *call_abi;
   char *asm_str;
+  AsmOperand *asm_outputs;
+  AsmOperand *asm_inputs;
+  AsmClobber *asm_clobbers;
+  AsmOperand *asm_labels;
+  bool asm_is_volatile;
+  bool asm_is_goto;
 };
 
 struct HLIRFunction {
   Obj *fn_obj;
   char *name;
   Type *func_ty;
+  ABI *abi;
 
   HLIRInsn *head;
   HLIRInsn *tail;

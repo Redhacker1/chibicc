@@ -25,10 +25,20 @@ for arg in "$@"; do
 done
 
 if [ -z "$COMPILER" ]; then
-    COMPILER="../chibicc"
+    COMPILER="../../chibicc"
 fi
-ROOT_DIR="$(cd .. && pwd)"
-INCLUDE_FLAGS="-I$ROOT_DIR -I$ROOT_DIR/include -I$ROOT_DIR/compiler_include"
+ROOT_DIR="$(cd ../.. && pwd)"
+INCLUDE_FLAGS="-I$ROOT_DIR/win_includes -I$ROOT_DIR -I$ROOT_DIR/sdk/include -I$ROOT_DIR/libc/libc/include -I$ROOT_DIR/include -I$ROOT_DIR/compiler_include"
+
+# Setup Custom libc flags
+LIBC_FLAGS=""
+if [ -f "$ROOT_DIR/sdk/lib/libc.dll.a" ]; then
+    LIBC_FLAGS="$ROOT_DIR/sdk/lib/libc.dll.a -Wl,--allow-multiple-definition"
+    cp -f "$ROOT_DIR/sdk/lib/libc.dll" "./libc.dll" 2>/dev/null || true
+elif [ -f "$ROOT_DIR/libc.dll" ]; then
+    LIBC_FLAGS="$ROOT_DIR/libc.dll -Wl,--allow-multiple-definition"
+fi
+export PATH="$ROOT_DIR:$ROOT_DIR/sdk/bin:$ROOT_DIR/sdk/lib:$PATH"
 
 echo "=========================================="
 echo "       C11 Conformance Test Suite         "
@@ -57,8 +67,8 @@ for cat_dir in $(find . -maxdepth 1 -mindepth 1 -type d ! -name "negative" | sor
             EXTRA_LINK_FLAGS="-lpthread"
         fi
 
-        if "$COMPILER" -c "$test_file" -o "$obj_file" $INCLUDE_FLAGS $OPT_FLAG 2>/dev/null; then
-            if gcc "$obj_file" -o "$exe_file" $EXTRA_LINK_FLAGS 2>/dev/null; then
+        if "$COMPILER" -c "$test_file" -o "$obj_file" $INCLUDE_FLAGS $OPT_FLAG -D_WIN32 -D__GNUC__ 2>/dev/null; then
+            if gcc "$obj_file" -o "$exe_file" $EXTRA_LINK_FLAGS $LIBC_FLAGS 2>/dev/null; then
                 if "$exe_file" >/dev/null 2>&1; then
                     echo "  [PASS] $test_name"
                     PASSED=$((PASSED + 1))
@@ -87,7 +97,7 @@ echo "[negative (compile rejection tests)]"
 for test_file in $(find negative -maxdepth 1 -name "*.c" | sort); do
     test_name="negative/$(basename "$test_file")"
     obj_file="${test_file%.c}.o"
-    if "$COMPILER" -c "$test_file" -o "$obj_file" $INCLUDE_FLAGS $OPT_FLAG 2>/dev/null; then
+    if "$COMPILER" -c "$test_file" -o "$obj_file" $INCLUDE_FLAGS $OPT_FLAG -D_WIN32 -D__GNUC__ 2>/dev/null; then
         echo "  [FAIL] $test_name (Incorrectly accepted invalid C11 code)"
         FAILED=$((FAILED + 1))
         FAILED_LIST+=("$test_name (should fail compile)")

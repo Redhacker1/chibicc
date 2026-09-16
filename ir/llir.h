@@ -104,9 +104,23 @@ struct LLIRInsn {
   char *label_true;
   char *label_false;
   char *asm_str;
+  AsmOperand *asm_outputs;
+  AsmOperand *asm_inputs;
+  AsmClobber *asm_clobbers;
+  AsmOperand *asm_labels;
+  bool asm_is_volatile;
+  bool asm_is_goto;
   Obj *var;
   Type *ty;
   ABI *call_abi;
+
+  // Addressing mode & immediate constraint fields
+  bool has_mem_op;
+  LLIRVReg *base_reg;
+  LLIRVReg *index_reg;
+  int scale;           // 1, 2, 4, 8
+  int64_t disp;
+  bool is_imm_op;
 
   int num_args;
   LLIRVReg **args;

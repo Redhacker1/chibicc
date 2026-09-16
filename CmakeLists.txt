@@ -1,11 +1,29 @@
-cmake_policy(SET CMP0076 NEW)
 cmake_minimum_required( VERSION 3.10 )
+cmake_policy(SET CMP0076 NEW)
 project( chibicc C )
 set( CMAKE_C_STANDARD 11 )
 
-add_executable(hlir-opt-test
-    tests/optimizations/hlir_opt_handcrafted.c
+if(NOT MSVC)
+    set(CHIBICC_INCLUDES
+        ${CMAKE_CURRENT_SOURCE_DIR}/win_includes
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/sdk/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/libc/libc/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/compiler_include
+    )
+else()
+    set(CHIBICC_INCLUDES
+        ${CMAKE_CURRENT_SOURCE_DIR}/win_includes
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/compiler_include
+    )
+endif()
+
+set(CHIBICC_SOURCES
+    main.c
     hashmap.c
+    compiler_src/ds_impl.c
     parse.c
     preprocess.c
     strings.c
@@ -31,61 +49,93 @@ add_executable(hlir-opt-test
     abi/z80/z80.c
 )
 
-target_include_directories(hlir-opt-test PRIVATE compiler_include ${CMAKE_CURRENT_LIST_DIR})
-if(WIN32)
-    target_sources(hlir-opt-test PUBLIC win_src/glob.c win_src/wait.c win_src/win_shims.c win_src/unistd.c)
-    target_include_directories(hlir-opt-test PRIVATE win_includes)
-endif()
+add_executable(chibicc-cli ${CHIBICC_SOURCES})
+target_include_directories(chibicc-cli PRIVATE ${CHIBICC_INCLUDES})
 
-add_executable(chibicc-cli
-	main.c
-	hashmap.c
-	parse.c
-	preprocess.c
-	strings.c
-	tokenize.c
-	type.c
-	unicode.c
-	ir/hlir.c
-	ir/hlir_opt.c
-	ir/ir.c
-	ir/opt.c
-	ir/regalloc.c
-	codegen/codegen.c
-	codegen/common/common.c
-	codegen/x86_64/x86_64.c
-	codegen/m68k/m68k.c
-	codegen/z80/z80.c
-	abi/abi.c
-	abi/objfmt.c
-	abi/sysV64/sysv64.c
-	abi/win64/win64.c
-	abi/win32/win32.c
-	abi/sys6/sys6.c
-	abi/z80/z80.c
+add_executable(hlir-opt-test
+    tests/optimizations/hlir_opt_handcrafted.c
+    hashmap.c
+    compiler_src/ds_impl.c
+    parse.c
+    preprocess.c
+    strings.c
+    tokenize.c
+    type.c
+    unicode.c
+    ir/hlir.c
+    ir/hlir_opt.c
+    ir/ir.c
+    ir/opt.c
+    ir/regalloc.c
+    codegen/codegen.c
+    codegen/common/common.c
+    codegen/x86_64/x86_64.c
+    codegen/m68k/m68k.c
+    codegen/z80/z80.c
+    abi/abi.c
+    abi/objfmt.c
+    abi/sysV64/sysv64.c
+    abi/win64/win64.c
+    abi/win32/win32.c
+    abi/sys6/sys6.c
+    abi/z80/z80.c
+)
+target_include_directories(hlir-opt-test PRIVATE ${CHIBICC_INCLUDES})
+
+set(LIBC_SEARCH_PATHS
+    "${CMAKE_CURRENT_SOURCE_DIR}/sdk/lib"
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_BINARY_DIR}/sdk/lib"
+    "${CMAKE_BINARY_DIR}"
 )
 
-target_include_directories(chibicc-cli PRIVATE compiler_include ${CMAKE_CURRENT_LIST_DIR})
+find_library(CHIBICC_LIBC
+    NAMES libc.dll.a libc.lib libc.a libc
+    PATHS ${LIBC_SEARCH_PATHS}
+    NO_DEFAULT_PATH
+)
+
+if(NOT MSVC)
+    if(CHIBICC_LIBC)
+        target_link_libraries(chibicc-cli PRIVATE ${CHIBICC_LIBC})
+        target_link_libraries(hlir-opt-test PRIVATE ${CHIBICC_LIBC})
+    endif()
+endif()
 
 if(WIN32)
-
-target_sources(chibicc-cli PUBLIC win_src/glob.c win_src/wait.c win_src/win_shims.c win_src/unistd.c)
-
-target_include_directories(chibicc-cli PRIVATE win_includes)
-
-if(MSVC)
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SUBSYSTEM:CONSOLE /DYNAMICBASE /NXCOMPAT")
-    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /OPT:REF /OPT:ICF /INCREMENTAL:NO")
-    set(CMAKE_EXE_LINKER_FLAGS_DEBUG "${CMAKE_EXE_LINKER_FLAGS_DEBUG} /INCREMENTAL")
-endif()
+    if(MSVC)
+        target_sources(chibicc-cli PUBLIC win_src/glob.c win_src/wait.c win_src/win_shims.c win_src/unistd.c)
+        target_sources(hlir-opt-test PUBLIC win_src/glob.c win_src/wait.c win_src/win_shims.c win_src/unistd.c)
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SUBSYSTEM:CONSOLE /FORCE:MULTIPLE")
+    elseif(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_link_options(chibicc-cli PRIVATE "-Wl,--allow-multiple-definition")
+        target_link_options(hlir-opt-test PRIVATE "-Wl,--allow-multiple-definition")
+    endif()
 endif()
 
 add_custom_target(copy_headers ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/libc/libc/include
         ${CMAKE_BINARY_DIR}/sdk/include
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_BINARY_DIR}/include
+        ${CMAKE_BINARY_DIR}/sdk/include
 )
 add_dependencies(chibicc-cli copy_headers)
+add_dependencies(hlir-opt-test copy_headers)
+
+if(WIN32)
+    add_custom_target(libc
+        COMMAND powershell.exe -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/build_libc.ps1" -Compiler "$<TARGET_FILE:chibicc-cli>" -OutputDir "${CMAKE_BINARY_DIR}/sdk"
+        DEPENDS chibicc-cli copy_headers
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        COMMENT "Building libc dynamic library with chibicc"
+    )
+else()
+    add_custom_target(libc
+        COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/build_libc.sh" --compiler "$<TARGET_FILE:chibicc-cli>" --output-dir "${CMAKE_BINARY_DIR}/sdk"
+        DEPENDS chibicc-cli copy_headers
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        COMMENT "Building libc dynamic library with chibicc"
+    )
+endif()

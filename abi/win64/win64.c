@@ -390,31 +390,21 @@ static void win64_assign_lvar_offsets(Obj *fn) {
   }
 
   /*
-   * After:
+   * We reserve 56 bytes for callee-saved registers:
+   * %rbx, %r12, %r13, %r14, %r15, %rdi, %rsi (-8 through -56).
    *
-   *   push rbp
-   *   push rdi
-   *   push rsi
-   *
-   * RSP is at rbp - 16, which is 16-byte aligned (0 mod 16).
-   *
-   * Since bottom includes the 16 bytes for rdi/rsi below rbp,
-   * the additional stack allocation must be align_to(bottom, 16) - 16
-   * so that RSP remains 16-byte aligned after the prologue.
-   *
-   * We don't reserve shadow space here; it is allocated by the
-   * caller around each call.
+   * Stack allocation must be aligned to 16 bytes.
    */
-  fn->stack_size = align_to(bottom, 16) - 16;
+  fn->stack_size = align_to(bottom, 16);
 }
 
 static int win64_get_spill_base(Obj *fn) {
-  return fn ? (fn->stack_size + 16) : 16;
+  return fn ? fn->stack_size : 0;
 }
 
 static void win64_finalize_stack(Obj *fn, const int spill_offset) {
   if (fn)
-    fn->stack_size = align_to(spill_offset, 16) - 16;
+    fn->stack_size = align_to(spill_offset, 16);
 }
 
 static int win64_push_args(Node *node, FILE *out, int *depth) {
@@ -736,13 +726,6 @@ static void win64_emit_prologue(Obj *fn, FILE *out) {
   println_abi(out, "  push %%rbp");
   println_abi(out, "  mov %%rsp, %%rbp");
 
-  /*
-   * RDI and RSI are nonvolatile on Win64 and are used by the generic
-   * x86 backend.
-   */
-  println_abi(out, "  push %%rdi");
-  println_abi(out, "  push %%rsi");
-
   if (fn->stack_size >= 4096) {
     /*
      * MinGW's __chkstk_ms expects the allocation size in RAX.
@@ -761,10 +744,10 @@ static void win64_emit_prologue(Obj *fn, FILE *out) {
         fn->stack_size);
   }
 
-  static const char *x86_callee_gp[] = { "%rbx", "%r12", "%r13", "%r14", "%r15" };
-  for (int i = 0; i < 5; i++) {
+  static const char *x86_callee_gp[] = { "%rbx", "%r12", "%r13", "%r14", "%r15", "%rdi", "%rsi" };
+  for (int i = 0; i < 7; i++) {
     if (fn->callee_saved_mask & (1 << i))
-      println_abi(out, "  movq %s, %d(%%rbp)", x86_callee_gp[i], -24 - i * 8);
+      println_abi(out, "  movq %s, %d(%%rbp)", x86_callee_gp[i], -8 - i * 8);
   }
 
   /*
@@ -867,20 +850,13 @@ static void win64_emit_prologue(Obj *fn, FILE *out) {
 static void win64_emit_epilogue(Obj *fn, FILE *out) {
   println_abi(out, ".L.return.%s:", fn->name);
 
-  static const char *x86_callee_gp[] = { "%rbx", "%r12", "%r13", "%r14", "%r15" };
-  for (int i = 0; i < 5; i++) {
+  static const char *x86_callee_gp[] = { "%rbx", "%r12", "%r13", "%r14", "%r15", "%rdi", "%rsi" };
+  for (int i = 0; i < 7; i++) {
     if (fn->callee_saved_mask & (1 << i))
-      println_abi(out, "  movq %d(%%rbp), %s", -24 - i * 8, x86_callee_gp[i]);
+      println_abi(out, "  movq %d(%%rbp), %s", -8 - i * 8, x86_callee_gp[i]);
   }
 
-  /*
-   * Locals/fixed allocation are discarded without needing the exact
-   * allocation size.
-   */
-  println_abi(out, "  lea -16(%%rbp), %%rsp");
-
-  println_abi(out, "  pop %%rsi");
-  println_abi(out, "  pop %%rdi");
+  println_abi(out, "  mov %%rbp, %%rsp");
   println_abi(out, "  pop %%rbp");
   println_abi(out, "  ret");
 }
@@ -1044,7 +1020,11 @@ static void win64_define_macros(void) {
   define_macro("__UINTMAX_TYPE__", "unsigned long long");
 
   define_macro("__WCHAR_TYPE__", "unsigned short");
+  define_macro("__SIZEOF_WCHAR_T__", "2");
+  define_macro("__WCHAR_WIDTH__", "16");
   define_macro("__WINT_TYPE__", "unsigned short");
+  define_macro("__SIZEOF_WINT_T__", "2");
+  define_macro("__WINT_WIDTH__", "16");
 }
 
 static void win64_init_types(void) {

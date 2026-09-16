@@ -1,7 +1,7 @@
 ﻿param(
     [string]$Compiler = "..\cmake-build-debug\chibicc-cli.exe",
     [string]$OptLevel = "",
-    [string]$MinGWInclude = "C:\Users\donov\Documents\MinGW64\x86_64-w64-mingw32\include"
+    [string]$LibcInclude = ""
 )
 
 # Normalize optimization level flag
@@ -16,12 +16,16 @@ if ($OptLevel) {
 
 # Resolve compiler path
 if (-not (Test-Path $Compiler)) {
-    if (Test-Path "..\chibicc.exe") {
-        $Compiler = "..\chibicc.exe"
-    } elseif (Test-Path "cmake-build-debug\chibicc-cli.exe") {
-        $Compiler = "cmake-build-debug\chibicc-cli.exe"
-    } elseif (Test-Path "chibicc.exe") {
-        $Compiler = "chibicc.exe"
+    if (Test-Path "..\..\cmake-build-debug\chibicc-cli.exe") {
+        $Compiler = "..\..\cmake-build-debug\chibicc-cli.exe"
+    } elseif (Test-Path "..\..\chibicc.exe") {
+        $Compiler = "..\..\chibicc.exe"
+    }
+} elseif (-not (Test-Path $Compiler)) {
+    if (Test-Path "..\..\chibicc.exe") {
+        $Compiler = "..\..\chibicc.exe"
+    } elseif (Test-Path "..\..\cmake-build-debug\chibicc-cli.exe") {
+        $Compiler = "..\..\cmake-build-debug\chibicc-cli.exe"
     }
 }
 $Compiler = (Resolve-Path $Compiler).Path
@@ -30,11 +34,25 @@ $OrigDir = Get-Location
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ScriptDir
 
-$RootDir = (Resolve-Path "..").Path
-$IncludeFlags = @("-I$RootDir", "-I$RootDir\include", "-I$RootDir\compiler_include")
-if (Test-Path $MinGWInclude) {
-    $IncludeFlags += "-I$MinGWInclude"
+$RootDir = (Resolve-Path "..\..").Path
+$IncludeFlags = @("-I$RootDir\win_includes", "-I$RootDir", "-I$RootDir\sdk\include", "-I$RootDir\libc\libc\include", "-I$RootDir\include", "-I$RootDir\compiler_include")
+if ($LibcInclude -and (Test-Path $LibcInclude)) {
+    $IncludeFlags = @("-I$RootDir\win_includes", "-I$RootDir", "-I$LibcInclude", "-I$RootDir\libc\libc\include", "-I$RootDir\include", "-I$RootDir\compiler_include")
 }
+
+# Setup Custom libc
+$LibcFlags = @()
+$LibcImplib = "$RootDir\sdk\lib\libc.dll.a"
+$LibcDll = "$RootDir\sdk\lib\libc.dll"
+if (Test-Path $LibcImplib) {
+    $LibcFlags = @($LibcImplib, "-Wl,--allow-multiple-definition")
+} elseif (Test-Path "$RootDir\libc.dll") {
+    $LibcFlags = @("$RootDir\libc.dll", "-Wl,--allow-multiple-definition")
+}
+if (Test-Path $LibcDll) {
+    Copy-Item -Force $LibcDll "$ScriptDir\libc.dll" -ErrorAction SilentlyContinue
+}
+$env:PATH = "$RootDir;$RootDir\sdk\bin;$RootDir\sdk\lib;$env:PATH"
 
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "       C11 Conformance Test Suite         " -ForegroundColor Cyan
@@ -75,7 +93,7 @@ foreach ($cat in $categories) {
             $extraLinkFlags += "-lpthread"
         }
 
-        gcc $oFile -o $exeFile $extraLinkFlags 2>$null
+        gcc $oFile -o $exeFile $extraLinkFlags @LibcFlags 2>$null
         if ($LASTEXITCODE -ne 0) {
             Write-Host "  [FAIL] $name (Link failed)" -ForegroundColor Red
             $Failed++

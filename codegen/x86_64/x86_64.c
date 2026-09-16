@@ -107,71 +107,19 @@ static void compute_materialization(LLIRFunction *fn) {
         }
       }
 
-      // 1. Foldable ADD / SUB offset calculations
-      if (def->kind == LLIR_ADD && def->src1 && def->src2) {
-        LLIRInsn *d1 = def->src1->def_insn;
-        LLIRInsn *d2 = def->src2->def_insn;
-        LLIRVReg *base = NULL;
-        LLIRVReg *imm_vreg = NULL;
-        if (d2 && d2->kind == LLIR_IMM) {
-          base = def->src1;
-          imm_vreg = def->src2;
-        } else if (d1 && d1->kind == LLIR_IMM) {
-          base = def->src2;
-          imm_vreg = def->src1;
-        }
-
-        if (base && imm_vreg) {
-          bool all_uses_mem = true;
-          for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
-            if (insn->src1 == v) {
-              if (insn->kind != LLIR_LOAD && insn->kind != LLIR_STORE) {
-                all_uses_mem = false;
-                break;
-              }
-            }
-            if (insn->src2 == v || insn->src3 == v) {
-              all_uses_mem = false;
-              break;
-            }
-            for (int a = 0; a < insn->num_args; a++) {
-              if (insn->args[a] == v) {
-                all_uses_mem = false;
-                break;
-              }
-            }
-          }
-
-          if (all_uses_mem) {
-            current_needs_mat[v->id] = false;
-            changed = true;
-          }
-        }
-      }
-
-      // 2. Foldable LEA of variables or labels
+      // 1. Foldable LEA of variables or labels
       if (def->kind == LLIR_LEA && (def->var || def->label)) {
         bool all_uses_foldable = true;
         for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
           if (insn->src1 == v) {
             if (insn->kind == LLIR_LOAD || insn->kind == LLIR_STORE) {
               // Direct memory load/store operand
-            } else if (insn->kind == LLIR_ADD && insn->dst && !current_needs_mat[insn->dst->id]) {
-              // Foldable base in an address calculation
             } else {
               all_uses_foldable = false;
               break;
             }
           }
-          if (insn->src2 == v) {
-            if (insn->kind == LLIR_ADD && insn->dst && !current_needs_mat[insn->dst->id]) {
-              // Foldable base in an address calculation
-            } else {
-              all_uses_foldable = false;
-              break;
-            }
-          }
-          if (insn->src3 == v) {
+          if (insn->src2 == v || insn->src3 == v) {
             all_uses_foldable = false;
             break;
           }
@@ -189,18 +137,16 @@ static void compute_materialization(LLIRFunction *fn) {
         }
       }
 
-      // 3. Foldable IMM used in foldable immediate operations or address calculations
+      // 2. Foldable IMM used in foldable immediate operations
       if (def->kind == LLIR_IMM) {
         int64_t imm = def->imm;
         bool imm32 = ((int32_t)imm == imm);
         bool all_uses_folded = true;
         for (LLIRInsn *insn = fn->head; insn; insn = insn->next) {
           if (insn->src1 == v) {
-            if (insn->kind == LLIR_ADD && insn->dst && !current_needs_mat[insn->dst->id]) {
-              // address ADD
-            } else if (imm32 && (insn->kind == LLIR_ADD || insn->kind == LLIR_MUL ||
-                                 insn->kind == LLIR_AND || insn->kind == LLIR_OR ||
-                                 insn->kind == LLIR_XOR) && (!insn->ty || !is_flonum(insn->ty))) {
+            if (imm32 && (insn->kind == LLIR_ADD || insn->kind == LLIR_MUL ||
+                          insn->kind == LLIR_AND || insn->kind == LLIR_OR ||
+                          insn->kind == LLIR_XOR) && (!insn->ty || !is_flonum(insn->ty))) {
               if (insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM) {
                 all_uses_folded = false;
                 break;
@@ -211,11 +157,9 @@ static void compute_materialization(LLIRFunction *fn) {
             }
           }
           if (insn->src2 == v) {
-            if (insn->kind == LLIR_ADD && insn->dst && !current_needs_mat[insn->dst->id]) {
-              // address ADD
-            } else if (imm32 && (insn->kind == LLIR_ADD || insn->kind == LLIR_SUB ||
-                                 insn->kind == LLIR_MUL || insn->kind == LLIR_AND ||
-                                 insn->kind == LLIR_OR || insn->kind == LLIR_XOR) && (!insn->ty || !is_flonum(insn->ty))) {
+            if (imm32 && (insn->kind == LLIR_ADD || insn->kind == LLIR_SUB ||
+                          insn->kind == LLIR_MUL || insn->kind == LLIR_AND ||
+                          insn->kind == LLIR_OR || insn->kind == LLIR_XOR) && (!insn->ty || !is_flonum(insn->ty))) {
               // binop with imm
             } else if (insn->kind == LLIR_SHL || insn->kind == LLIR_SHR) {
               // shift with imm
@@ -368,6 +312,11 @@ static void emit_data(Obj *prog, FILE *out) {
   (void)out;
 
   for (Obj *var = prog; var; var = var->next) {
+    if (var->is_asm) {
+      println("  .text");
+      println("  %s", var->asm_str ? var->asm_str : "");
+      continue;
+    }
     if (var->is_function || !var->is_definition)
       continue;
 
@@ -627,7 +576,67 @@ typedef struct {
   char buf[64];
 } X86Addr;
 
-static void x86_get_addr(LLIRVReg *addr_vreg, X86Addr *addr) {
+static void x86_get_insn_addr(LLIRInsn *insn, LLIRVReg *fallback_vreg, X86Addr *addr) {
+  if (insn && insn->has_mem_op) {
+    if (insn->var) {
+      if (insn->var->is_local) {
+        int total_off = insn->var->offset + (int)insn->disp;
+        addr->base_reg = "%rbp";
+        addr->offset = total_off;
+        sprintf(addr->buf, "%d(%%rbp)", total_off);
+        return;
+      } else {
+        addr->base_reg = "%rip";
+        addr->offset = (int)insn->disp;
+        if (insn->disp == 0)
+          sprintf(addr->buf, "%s(%%rip)", insn->var->name);
+        else
+          sprintf(addr->buf, "%s%+d(%%rip)", insn->var->name, (int)insn->disp);
+        return;
+      }
+    } else if (insn->label) {
+      addr->base_reg = "%rip";
+      addr->offset = (int)insn->disp;
+      if (insn->disp == 0)
+        sprintf(addr->buf, "%s(%%rip)", insn->label);
+      else
+        sprintf(addr->buf, "%s%+d(%%rip)", insn->label, (int)insn->disp);
+      return;
+    } else if (insn->base_reg) {
+      const char *breg = "%rax";
+      if (insn->base_reg->phys_reg >= 0 && insn->base_reg->phys_reg < NUM_X86_64_GP_REGS && !insn->base_reg->is_float) {
+        breg = x86_64_gp_regs[insn->base_reg->phys_reg];
+      } else {
+        load_vreg(insn->base_reg, "%rax");
+      }
+      if (insn->index_reg) {
+        const char *ireg = "%rcx";
+        if (insn->index_reg->phys_reg >= 0 && insn->index_reg->phys_reg < NUM_X86_64_GP_REGS && !insn->index_reg->is_float) {
+          ireg = x86_64_gp_regs[insn->index_reg->phys_reg];
+        } else {
+          load_vreg(insn->index_reg, "%rcx");
+        }
+        int sc = insn->scale > 0 ? insn->scale : 1;
+        if (insn->disp == 0)
+          sprintf(addr->buf, "(%s,%s,%d)", breg, ireg, sc);
+        else
+          sprintf(addr->buf, "%d(%s,%s,%d)", (int)insn->disp, breg, ireg, sc);
+        addr->base_reg = breg;
+        addr->offset = (int)insn->disp;
+        return;
+      } else {
+        if (insn->disp == 0)
+          sprintf(addr->buf, "(%s)", breg);
+        else
+          sprintf(addr->buf, "%d(%s)", (int)insn->disp, breg);
+        addr->base_reg = breg;
+        addr->offset = (int)insn->disp;
+        return;
+      }
+    }
+  }
+
+  LLIRVReg *addr_vreg = fallback_vreg;
   if (!addr_vreg) {
     addr->base_reg = "%rax";
     addr->offset = 0;
@@ -635,107 +644,7 @@ static void x86_get_addr(LLIRVReg *addr_vreg, X86Addr *addr) {
     return;
   }
 
-  // Case 1: addr_vreg is LEA of a local or global variable
-  LLIRInsn *def = addr_vreg->def_insn;
-  if (def && def->kind == LLIR_LEA) {
-    if (def->var) {
-      if (def->var->is_local) {
-        int total_off = def->var->offset + (int)def->imm;
-        addr->base_reg = "%rbp";
-        addr->offset = total_off;
-        sprintf(addr->buf, "%d(%%rbp)", total_off);
-        return;
-      } else {
-        addr->base_reg = "%rip";
-        addr->offset = (int)def->imm;
-        if (def->imm == 0)
-          sprintf(addr->buf, "%s(%%rip)", def->var->name);
-        else
-          sprintf(addr->buf, "%s%+d(%%rip)", def->var->name, (int)def->imm);
-        return;
-      }
-    } else if (def->label) {
-      addr->base_reg = "%rip";
-      addr->offset = (int)def->imm;
-      if (def->imm == 0)
-        sprintf(addr->buf, "%s(%%rip)", def->label);
-      else
-        sprintf(addr->buf, "%s%+d(%%rip)", def->label, (int)def->imm);
-      return;
-    }
-  }
-
-  // Case 2: addr_vreg is ADD(base, IMM) or ADD(IMM, base)
-  if (def && def->kind == LLIR_ADD && def->src1 && def->src2) {
-    LLIRInsn *def1 = def->src1->def_insn;
-    LLIRInsn *def2 = def->src2->def_insn;
-    LLIRVReg *base = NULL;
-    int64_t imm = 0;
-    bool has_imm = false;
-
-    if (def2 && def2->kind == LLIR_IMM) {
-      base = def->src1;
-      imm = def2->imm;
-      has_imm = true;
-    } else if (def1 && def1->kind == LLIR_IMM) {
-      base = def->src2;
-      imm = def1->imm;
-      has_imm = true;
-    }
-
-    if (has_imm) {
-      LLIRInsn *base_def = base->def_insn;
-      if (base_def && base_def->kind == LLIR_LEA) {
-        if (base_def->var) {
-          if (base_def->var->is_local) {
-            int total_off = base_def->var->offset + (int)base_def->imm + (int)imm;
-            addr->base_reg = "%rbp";
-            addr->offset = total_off;
-            sprintf(addr->buf, "%d(%%rbp)", total_off);
-            return;
-          } else {
-            int total_off = (int)base_def->imm + (int)imm;
-            addr->base_reg = "%rip";
-            addr->offset = total_off;
-            if (total_off == 0)
-              sprintf(addr->buf, "%s(%%rip)", base_def->var->name);
-            else
-              sprintf(addr->buf, "%s%+d(%%rip)", base_def->var->name, total_off);
-            return;
-          }
-        } else if (base_def->label) {
-          int total_off = (int)base_def->imm + (int)imm;
-          addr->base_reg = "%rip";
-          addr->offset = total_off;
-          if (total_off == 0)
-            sprintf(addr->buf, "%s(%%rip)", base_def->label);
-          else
-            sprintf(addr->buf, "%s%+d(%%rip)", base_def->label, total_off);
-          return;
-        }
-      }
-      if (base->phys_reg >= 0 && base->phys_reg < NUM_X86_64_GP_REGS && !base->is_float) {
-        const char *breg = x86_64_gp_regs[base->phys_reg];
-        addr->base_reg = breg;
-        addr->offset = (int)imm;
-        if (imm == 0)
-          sprintf(addr->buf, "(%s)", breg);
-        else
-          sprintf(addr->buf, "%d(%s)", (int)imm, breg);
-        return;
-      }
-      load_vreg(base, "%rax");
-      addr->base_reg = "%rax";
-      addr->offset = (int)imm;
-      if (imm == 0)
-        sprintf(addr->buf, "(%%rax)");
-      else
-        sprintf(addr->buf, "%d(%%rax)", (int)imm);
-      return;
-    }
-  }
-
-  // Case 3: addr_vreg is directly in a physical register
+  // Fallback: addr_vreg is directly in a physical register
   if (addr_vreg->phys_reg >= 0 && addr_vreg->phys_reg < NUM_X86_64_GP_REGS && !addr_vreg->is_float) {
     const char *breg = x86_64_gp_regs[addr_vreg->phys_reg];
     addr->base_reg = breg;
@@ -749,6 +658,10 @@ static void x86_get_addr(LLIRVReg *addr_vreg, X86Addr *addr) {
   addr->base_reg = "%rax";
   addr->offset = 0;
   sprintf(addr->buf, "(%%rax)");
+}
+
+static void x86_get_addr(LLIRVReg *addr_vreg, X86Addr *addr) {
+  x86_get_insn_addr(NULL, addr_vreg, addr);
 }
 
 // ============================================================================
@@ -840,17 +753,22 @@ static void x86_64_emit_binop_imm(LLIRInsn *insn,
     return;
   }
 
-  bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
-  bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
-  LLIRVReg *imm_v = NULL;
-  LLIRVReg *base = NULL;
+  bool is_imm = insn->is_imm_op;
+  int64_t imm = insn->imm;
+  LLIRVReg *base = insn->src1;
 
-  if (s2_imm) {
-    imm_v = insn->src2;
-    base = insn->src1;
-  } else if (is_commutative && s1_imm) {
-    imm_v = insn->src1;
-    base = insn->src2;
+  if (!is_imm) {
+    bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
+    bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
+    if (s2_imm && (int32_t)insn->src2->def_insn->imm == insn->src2->def_insn->imm) {
+      is_imm = true;
+      imm = insn->src2->def_insn->imm;
+      base = insn->src1;
+    } else if (is_commutative && s1_imm && (int32_t)insn->src1->def_insn->imm == insn->src1->def_insn->imm) {
+      is_imm = true;
+      imm = insn->src1->def_insn->imm;
+      base = insn->src2;
+    }
   }
 
   int sz = x86_int_size(insn->ty);
@@ -860,8 +778,7 @@ static void x86_64_emit_binop_imm(LLIRInsn *insn,
     const char *dreg = x86_64_gp_regs[insn->dst->phys_reg];
     const char *dreg_sz = (sz <= 4) ? x86_reg32(dreg) : dreg;
 
-    if (imm_v && base && (int32_t)imm_v->def_insn->imm == imm_v->def_insn->imm) {
-      int64_t imm = imm_v->def_insn->imm;
+    if (is_imm && base) {
       load_vreg(base, dreg);
       if (!strcmp(iop, "add")) {
         if (imm == 1) println("  inc %s", dreg_sz);
@@ -912,8 +829,7 @@ static void x86_64_emit_binop_imm(LLIRInsn *insn,
     return;
   }
 
-  if (imm_v && base && (int32_t)imm_v->def_insn->imm == imm_v->def_insn->imm) {
-    int64_t imm = imm_v->def_insn->imm;
+  if (is_imm && base) {
     load_vreg(base, "%rax");
     if (!strcmp(iop, "add")) {
       if (imm == 1) println(sz <= 4 ? "  inc %%eax" : "  inc %%rax");
@@ -1033,6 +949,8 @@ static void x86_emit_int_compare(LLIRInsn *insn, const char **out_cc, const char
   int sz1 = insn->src1 && insn->src1->ty ? insn->src1->ty->size : 8;
   int sz2 = insn->src2 && insn->src2->ty ? insn->src2->ty->size : 8;
   int cmp_sz = MAX(sz1, sz2);
+  bool is_imm = insn->is_imm_op;
+  int64_t imm = insn->imm;
   bool s1_imm = insn->src1 && insn->src1->def_insn && insn->src1->def_insn->kind == LLIR_IMM;
   bool s2_imm = insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM;
   bool uns = insn->src1 && insn->src1->ty && insn->src1->ty->is_unsigned;
@@ -1040,7 +958,7 @@ static void x86_emit_int_compare(LLIRInsn *insn, const char **out_cc, const char
   const char *cc = "e";
   const char *inv_cc = "ne";
 
-  if (s1_imm && s2_imm) {
+  if (!is_imm && s1_imm && s2_imm) {
     int64_t v1 = insn->src1->def_insn->imm;
     int64_t v2 = insn->src2->def_insn->imm;
     if (v1 == 0)
@@ -1068,8 +986,9 @@ static void x86_emit_int_compare(LLIRInsn *insn, const char **out_cc, const char
     case LLIR_CMP_GE: cc = uns ? "ae" : "ge"; inv_cc = uns ? "b" : "l";   break;
     default: break;
     }
-  } else if (s2_imm && (int32_t)insn->src2->def_insn->imm == insn->src2->def_insn->imm) {
-    int64_t imm = insn->src2->def_insn->imm;
+  } else if (is_imm || (s2_imm && (int32_t)insn->src2->def_insn->imm == insn->src2->def_insn->imm)) {
+    if (!is_imm)
+      imm = insn->src2->def_insn->imm;
     const char *r1 = "%rax";
     if (insn->src1 && insn->src1->phys_reg >= 0 && insn->src1->phys_reg < NUM_X86_64_GP_REGS && !insn->src1->is_float)
       r1 = x86_64_gp_regs[insn->src1->phys_reg];
@@ -1202,6 +1121,16 @@ static void x86_64_emit_cast(LLIRInsn *insn) {
       load_vreg(insn->src1, "%xmm0");
       store_vreg("%xmm0", insn->dst);
     } else {
+      if (insn->src1 && insn->dst && insn->src1 == insn->dst)
+        return;
+      if (insn->src1 && insn->dst &&
+          insn->src1->phys_reg >= 0 && insn->src1->phys_reg < NUM_X86_64_GP_REGS &&
+          insn->dst->phys_reg >= 0 && insn->dst->phys_reg < NUM_X86_64_GP_REGS &&
+          !insn->src1->is_float && !insn->dst->is_float) {
+        if (insn->src1->phys_reg != insn->dst->phys_reg)
+          println("  movq %s, %s", x86_64_gp_regs[insn->src1->phys_reg], x86_64_gp_regs[insn->dst->phys_reg]);
+        return;
+      }
       load_vreg(insn->src1, "%rax");
       store_vreg("%rax", insn->dst);
     }
@@ -1209,6 +1138,19 @@ static void x86_64_emit_cast(LLIRInsn *insn) {
   }
 
   if (to->kind == TY_BOOL) {
+    if (insn->dst && insn->dst->phys_reg >= 0 && insn->dst->phys_reg < NUM_X86_64_GP_REGS && !insn->dst->is_float) {
+      const char *dreg = x86_64_gp_regs[insn->dst->phys_reg];
+      const char *sreg = "%rax";
+      if (insn->src1 && insn->src1->phys_reg >= 0 && insn->src1->phys_reg < NUM_X86_64_GP_REGS && !insn->src1->is_float)
+        sreg = x86_64_gp_regs[insn->src1->phys_reg];
+      else
+        load_vreg(insn->src1, "%rax");
+      int sz = insn->src1 && insn->src1->ty ? insn->src1->ty->size : 8;
+      println(sz <= 4 ? "  test %s, %s" : "  test %s, %s", (sz <= 4) ? x86_reg32(sreg) : sreg, (sz <= 4) ? x86_reg32(sreg) : sreg);
+      println("  setne %s", x86_reg8(dreg));
+      println("  movzbl %s, %s", x86_reg8(dreg), x86_reg32(dreg));
+      return;
+    }
     load_vreg(insn->src1, "%rax");
     println("  test %%rax, %%rax");
     x86_64_emit_cmp_result("ne");
@@ -1246,36 +1188,61 @@ static void x86_64_emit_cast(LLIRInsn *insn) {
     return;
   }
 
-  load_vreg(insn->src1, "%rax");
+  const char *dst_reg = "%rax";
+  bool direct_dst = false;
+  if (insn->dst && insn->dst->phys_reg >= 0 && insn->dst->phys_reg < NUM_X86_64_GP_REGS && !insn->dst->is_float) {
+    dst_reg = x86_64_gp_regs[insn->dst->phys_reg];
+    direct_dst = true;
+  }
+
+  const char *src_reg = "%rax";
+  if (insn->src1 && insn->src1->phys_reg >= 0 && insn->src1->phys_reg < NUM_X86_64_GP_REGS && !insn->src1->is_float) {
+    src_reg = x86_64_gp_regs[insn->src1->phys_reg];
+  } else {
+    load_vreg(insn->src1, "%rax");
+    src_reg = "%rax";
+  }
+
   switch (to->size) {
   case 1:
     if (to->is_unsigned)
-      println("  movzbl %%al, %%eax");
+      println("  movzbl %s, %s", x86_reg8(src_reg), x86_reg32(dst_reg));
     else
-      println("  movsbl %%al, %%eax");
+      println("  movsbl %s, %s", x86_reg8(src_reg), x86_reg32(dst_reg));
     break;
   case 2:
     if (to->is_unsigned)
-      println("  movzwl %%ax, %%eax");
+      println("  movzwl %s, %s", x86_reg16(src_reg), x86_reg32(dst_reg));
     else
-      println("  movswl %%ax, %%eax");
+      println("  movswl %s, %s", x86_reg16(src_reg), x86_reg32(dst_reg));
     break;
   case 4:
-    if (to->is_unsigned)
-      println("  movl %%eax, %%eax");
-    else
-      println("  cdqe");
+    if (to->is_unsigned) {
+      println("  movl %s, %s", x86_reg32(src_reg), x86_reg32(dst_reg));
+    } else {
+      if (src_reg != dst_reg)
+        println("  movslq %s, %s", x86_reg32(src_reg), dst_reg);
+      else
+        println("  cltq");
+    }
     break;
   default:
+    if (src_reg != dst_reg)
+      println("  movq %s, %s", src_reg, dst_reg);
     break;
   }
 
-  store_vreg("%rax", insn->dst);
+  if (!direct_dst)
+    store_vreg("%rax", insn->dst);
+  else if (!strcmp(dst_reg, "%rax"))
+    cached_rax_vreg = insn->dst;
+  else
+    cached_rax_vreg = NULL;
 }
 
 static void x86_64_emit_load(LLIRInsn *insn) {
   X86Addr addr;
-  x86_get_addr(insn->src1, &addr);
+  x86_get_insn_addr(insn, insn->src1, &addr);
 
   Type *ty = insn->ty;
   int sz = ty ? ty->size : 8;
@@ -1328,7 +1295,7 @@ static void x86_64_emit_store(LLIRInsn *insn) {
     int src2_offset = insn->src2 ? (insn->src2->spill_offset ? insn->src2->spill_offset : -((insn->src2->id + 1) * 8)) : 0;
     if (insn->ty->size <= 8) {
       load_vreg(insn->src2, "%rcx");
-      x86_get_addr(insn->src1, &addr);
+      x86_get_insn_addr(insn, insn->src1, &addr);
       switch (insn->ty->size) {
       case 1: println("  movb %%cl, %s", addr.buf); break;
       case 2: println("  movw %%cx, %s", addr.buf); break;
@@ -1337,7 +1304,7 @@ static void x86_64_emit_store(LLIRInsn *insn) {
       }
       return;
     } else if (insn->ty->size <= 16) {
-      x86_get_addr(insn->src1, &addr);
+      x86_get_insn_addr(insn, insn->src1, &addr);
       println("  movq %d(%%rbp), %%rcx", src2_offset);
       println("  movq %%rcx, %s", addr.buf);
       if (!strcmp(addr.base_reg, "%rbp")) {
@@ -1351,10 +1318,10 @@ static void x86_64_emit_store(LLIRInsn *insn) {
     }
   }
 
-  if (insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM &&
-      (int32_t)insn->src2->def_insn->imm == insn->src2->def_insn->imm) {
-    int64_t imm = insn->src2->def_insn->imm;
-    x86_get_addr(insn->src1, &addr);
+  if (insn->is_imm_op || (insn->src2 && insn->src2->def_insn && insn->src2->def_insn->kind == LLIR_IMM &&
+      (int32_t)insn->src2->def_insn->imm == insn->src2->def_insn->imm)) {
+    int64_t imm = insn->is_imm_op ? insn->imm : insn->src2->def_insn->imm;
+    x86_get_insn_addr(insn, insn->src1, &addr);
     switch (insn->ty ? insn->ty->size : 8) {
     case 1:
       println("  movb $%lld, %s", (long long)imm, addr.buf);
@@ -1373,7 +1340,7 @@ static void x86_64_emit_store(LLIRInsn *insn) {
 
   if (insn->src2 && insn->src2->phys_reg >= 0 && insn->src2->phys_reg < NUM_X86_64_GP_REGS && !insn->src2->is_float) {
     const char *sreg = x86_64_gp_regs[insn->src2->phys_reg];
-    x86_get_addr(insn->src1, &addr);
+    x86_get_insn_addr(insn, insn->src1, &addr);
     switch (insn->ty ? insn->ty->size : 8) {
     case 1:
       println("  movb %s, %s", x86_reg8(sreg), addr.buf);
@@ -1391,7 +1358,7 @@ static void x86_64_emit_store(LLIRInsn *insn) {
   }
 
   load_vreg(insn->src2, "%rdx");
-  x86_get_addr(insn->src1, &addr);
+  x86_get_insn_addr(insn, insn->src1, &addr);
 
   switch (insn->ty ? insn->ty->size : 8) {
   case 1:
@@ -1591,6 +1558,367 @@ static void x86_64_emit_memzero(LLIRInsn *insn) {
 // ============================================================================
 // Instruction Dispatcher
 // ============================================================================
+static bool str_case_eq(const char *s1, const char *s2) {
+  if (!s1 || !s2) return false;
+  while (*s1 && *s2) {
+    if (tolower((unsigned char)*s1) != tolower((unsigned char)*s2))
+      return false;
+    s1++;
+    s2++;
+  }
+  return *s1 == *s2;
+}
+
+static void mark_callee_saved(const char *reg) {
+  if (!current_fn) return;
+  if (!strcmp(reg, "%rbx")) current_fn->callee_saved_mask |= (1 << 0);
+  else if (!strcmp(reg, "%r12")) current_fn->callee_saved_mask |= (1 << 1);
+  else if (!strcmp(reg, "%r13")) current_fn->callee_saved_mask |= (1 << 2);
+  else if (!strcmp(reg, "%r14")) current_fn->callee_saved_mask |= (1 << 3);
+  else if (!strcmp(reg, "%r15")) current_fn->callee_saved_mask |= (1 << 4);
+  else if (!strcmp(reg, "%rdi")) current_fn->callee_saved_mask |= (1 << 5);
+  else if (!strcmp(reg, "%rsi")) current_fn->callee_saved_mask |= (1 << 6);
+}
+
+static void x86_64_gen_asm(LLIRInsn *insn) {
+  invalidate_cached_regs();
+
+  if (!insn->asm_outputs && !insn->asm_inputs && !insn->asm_clobbers && !insn->asm_labels) {
+    if (insn->asm_str && *insn->asm_str) {
+      char *p = insn->asm_str;
+      while (*p) {
+        char *next = strchr(p, '\n');
+        if (next) {
+          *next = '\0';
+          println("  %s", p);
+          *next = '\n';
+          p = next + 1;
+        } else {
+          println("  %s", p);
+          break;
+        }
+      }
+    }
+    return;
+  }
+
+#define MAX_ASM_OPERANDS 64
+  AsmOperand *ops[MAX_ASM_OPERANDS];
+  int num_ops = 0;
+  int num_outputs = 0;
+  int num_inputs = 0;
+  int num_labels = 0;
+
+  for (AsmOperand *op = insn->asm_outputs; op && num_ops < MAX_ASM_OPERANDS; op = op->next) {
+    ops[num_ops++] = op;
+    num_outputs++;
+  }
+  for (AsmOperand *op = insn->asm_inputs; op && num_ops < MAX_ASM_OPERANDS; op = op->next) {
+    ops[num_ops++] = op;
+    num_inputs++;
+  }
+  for (AsmOperand *op = insn->asm_labels; op && num_ops < MAX_ASM_OPERANDS; op = op->next) {
+    ops[num_ops++] = op;
+    num_labels++;
+  }
+
+  static const char *asm_gp_regs[] = {
+    "%rax", "%rcx", "%rdx", "%rsi", "%rdi", "%r8", "%r9", "%r10", "%r11", "%rbx", "%r12", "%r13", "%r14", "%r15"
+  };
+#define NUM_ASM_GP 14
+  bool reg_used[NUM_ASM_GP] = {0};
+  const char *assigned_reg[MAX_ASM_OPERANDS] = {0};
+  char assigned_mem[MAX_ASM_OPERANDS][128] = {{0}};
+
+  // 1. Mark clobbered registers
+  for (AsmClobber *c = insn->asm_clobbers; c; c = c->next) {
+    char *clob = c->clobber;
+    if (*clob == '%') clob++;
+    for (int r = 0; r < NUM_ASM_GP; r++) {
+      const char *rname = asm_gp_regs[r] + 1;
+      const char *r32 = x86_reg32(asm_gp_regs[r]) + 1;
+      const char *r16 = x86_reg16(asm_gp_regs[r]) + 1;
+      const char *r8 = x86_reg8(asm_gp_regs[r]) + 1;
+      if (str_case_eq(clob, rname) || str_case_eq(clob, r32) ||
+          str_case_eq(clob, r16) || str_case_eq(clob, r8)) {
+        reg_used[r] = true;
+        mark_callee_saved(asm_gp_regs[r]);
+        break;
+      }
+    }
+  }
+
+  // 2. Fixed register constraints
+  for (int i = 0; i < num_outputs + num_inputs; i++) {
+    char *c = ops[i]->constraint;
+    if (!c) continue;
+    if (strchr(c, 'a')) { assigned_reg[i] = "%rax"; }
+    else if (strchr(c, 'b')) { assigned_reg[i] = "%rbx"; mark_callee_saved("%rbx"); }
+    else if (strchr(c, 'c')) { assigned_reg[i] = "%rcx"; }
+    else if (strchr(c, 'd')) { assigned_reg[i] = "%rdx"; }
+    else if (strchr(c, 'S')) { assigned_reg[i] = "%rsi"; mark_callee_saved("%rsi"); }
+    else if (strchr(c, 'D')) { assigned_reg[i] = "%rdi"; mark_callee_saved("%rdi"); }
+
+    if (assigned_reg[i]) {
+      for (int r = 0; r < NUM_ASM_GP; r++) {
+        if (!strcmp(assigned_reg[i], asm_gp_regs[r]))
+          reg_used[r] = true;
+      }
+    }
+  }
+
+  // 3. Matching constraints ("0".."9")
+  for (int i = num_outputs; i < num_outputs + num_inputs; i++) {
+    char *c = ops[i]->constraint;
+    if (c) {
+      for (char *p = c; *p; p++) {
+        if (isdigit((unsigned char)*p)) {
+          int match_idx = *p - '0';
+          if (match_idx < num_outputs) {
+            if (assigned_reg[match_idx]) {
+              assigned_reg[i] = assigned_reg[match_idx];
+            } else if (assigned_mem[match_idx][0]) {
+              strcpy(assigned_mem[i], assigned_mem[match_idx]);
+            }
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  // 4. Memory constraints ("m", "o", "v" without register alternatives)
+  for (int i = 0; i < num_outputs + num_inputs; i++) {
+    if (assigned_reg[i] || assigned_mem[i][0]) continue;
+    char *c = ops[i]->constraint;
+    bool is_pure_mem = c && (strchr(c, 'm') || strchr(c, 'o') || strchr(c, 'v')) &&
+                       !strchr(c, 'r') && !strchr(c, 'g') && !strchr(c, 'q') && !strchr(c, 'Q') &&
+                       !strchr(c, 'a') && !strchr(c, 'b') && !strchr(c, 'c') && !strchr(c, 'd') &&
+                       !strchr(c, 'S') && !strchr(c, 'D');
+    if (is_pure_mem) {
+      if (ops[i]->var) {
+        if (ops[i]->var->is_local)
+          snprintf(assigned_mem[i], sizeof(assigned_mem[i]), "%d(%%rbp)", ops[i]->var->offset);
+        else
+          snprintf(assigned_mem[i], sizeof(assigned_mem[i]), "%s(%%rip)", ops[i]->var->name);
+      } else if (ops[i]->addr_vreg) {
+        const char *areg = "%rax";
+        for (int r = 0; r < NUM_ASM_GP; r++) {
+          if (!reg_used[r]) {
+            areg = asm_gp_regs[r];
+            reg_used[r] = true;
+            mark_callee_saved(areg);
+            break;
+          }
+        }
+        load_vreg(ops[i]->addr_vreg, areg);
+        snprintf(assigned_mem[i], sizeof(assigned_mem[i]), "(%s)", areg);
+      }
+    }
+  }
+
+  // 5. Immediate constraints
+  for (int i = num_outputs; i < num_outputs + num_inputs; i++) {
+    if (assigned_reg[i] || assigned_mem[i][0]) continue;
+    char *c = ops[i]->constraint;
+    if (c && (strchr(c, 'i') || strchr(c, 'n')) && ops[i]->is_imm_val) {
+      snprintf(assigned_mem[i], sizeof(assigned_mem[i]), "$%lld", (long long)ops[i]->imm_val);
+    }
+  }
+
+  // 6. General register constraints ("r", "g", "q", "Q")
+  for (int i = 0; i < num_outputs; i++) {
+    if (!assigned_reg[i] && !assigned_mem[i][0]) {
+      for (int r = 0; r < NUM_ASM_GP; r++) {
+        if (!reg_used[r]) {
+          assigned_reg[i] = asm_gp_regs[r];
+          reg_used[r] = true;
+          mark_callee_saved(assigned_reg[i]);
+          break;
+        }
+      }
+    }
+  }
+  for (int i = num_outputs; i < num_outputs + num_inputs; i++) {
+    if (!assigned_reg[i] && !assigned_mem[i][0]) {
+      char *c = ops[i]->constraint;
+      bool matched = false;
+      if (c) {
+        for (char *p = c; *p; p++) {
+          if (isdigit((unsigned char)*p)) {
+            int match_idx = *p - '0';
+            if (match_idx < num_outputs && assigned_reg[match_idx]) {
+              assigned_reg[i] = assigned_reg[match_idx];
+              matched = true;
+            }
+            break;
+          }
+        }
+      }
+      if (!matched) {
+        for (int r = 0; r < NUM_ASM_GP; r++) {
+          if (!reg_used[r]) {
+            assigned_reg[i] = asm_gp_regs[r];
+            reg_used[r] = true;
+            mark_callee_saved(assigned_reg[i]);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  // Fallback
+  for (int i = 0; i < num_outputs + num_inputs; i++) {
+    if (!assigned_reg[i] && !assigned_mem[i][0]) {
+      assigned_reg[i] = "%rax";
+    }
+  }
+
+  // 7. Load inputs and read-write outputs into assigned registers
+  for (int i = num_outputs; i < num_outputs + num_inputs; i++) {
+    if (assigned_reg[i] && ops[i]->vreg) {
+      load_vreg(ops[i]->vreg, assigned_reg[i]);
+    }
+  }
+  for (int i = 0; i < num_outputs; i++) {
+    if (assigned_reg[i] && ops[i]->vreg && ops[i]->constraint && strchr(ops[i]->constraint, '+')) {
+      load_vreg(ops[i]->vreg, assigned_reg[i]);
+    }
+  }
+
+  // 8. Format the template string
+  char out_buf[8192];
+  char *dst = out_buf;
+  char *dst_end = out_buf + sizeof(out_buf) - 1;
+  const char *src = insn->asm_str ? insn->asm_str : "";
+
+  while (*src && dst < dst_end) {
+    if (*src == '%') {
+      src++;
+      if (*src == '%') {
+        *dst++ = '%';
+        src++;
+        continue;
+      }
+
+      char mod = 0;
+      if (*src == 'b' || *src == 'h' || *src == 'w' || *src == 'k' ||
+          *src == 'q' || *src == 'P' || *src == 'c' || *src == 'l' || *src == 'z') {
+        mod = *src++;
+      }
+
+      int target_idx = -1;
+      if (mod == 'l' && isdigit((unsigned char)*src)) {
+        int idx = 0;
+        while (isdigit((unsigned char)*src)) {
+          idx = idx * 10 + (*src++ - '0');
+        }
+        if (idx < num_labels)
+          target_idx = num_outputs + num_inputs + idx;
+        else if (idx < num_ops)
+          target_idx = idx;
+      } else if (*src == '[') {
+        src++;
+        const char *name_start = src;
+        while (*src && *src != ']') src++;
+        int name_len = (int)(src - name_start);
+        if (*src == ']') src++;
+
+        for (int i = 0; i < num_ops; i++) {
+          if (ops[i]->name && strlen(ops[i]->name) == name_len &&
+              !strncmp(ops[i]->name, name_start, name_len)) {
+            target_idx = i;
+            break;
+          }
+        }
+      } else if (isdigit((unsigned char)*src)) {
+        target_idx = 0;
+        while (isdigit((unsigned char)*src)) {
+          target_idx = target_idx * 10 + (*src++ - '0');
+        }
+      }
+
+      if (target_idx >= 0 && target_idx < num_ops) {
+        AsmOperand *op = ops[target_idx];
+        if (op->is_output == 2 || mod == 'l') {
+          const char *lbl = op->unique_label ? op->unique_label : (op->label_name ? op->label_name : "");
+          dst += snprintf(dst, dst_end - dst, "%s", lbl);
+        } else if (mod == 'P' || mod == 'c') {
+          if (op->is_imm_val)
+            dst += snprintf(dst, dst_end - dst, "%lld", (long long)op->imm_val);
+          else if (assigned_mem[target_idx][0])
+            dst += snprintf(dst, dst_end - dst, "%s", assigned_mem[target_idx]);
+          else if (assigned_reg[target_idx]) {
+            const char *r = assigned_reg[target_idx];
+            if (*r == '%') r++;
+            dst += snprintf(dst, dst_end - dst, "%s", r);
+          }
+        } else if (mod == 'z') {
+          int sz = (op->expr && op->expr->ty) ? op->expr->ty->size : 8;
+          char sc = (sz == 1) ? 'b' : (sz == 2) ? 'w' : (sz == 4) ? 'l' : 'q';
+          *dst++ = sc;
+        } else if (assigned_mem[target_idx][0]) {
+          dst += snprintf(dst, dst_end - dst, "%s", assigned_mem[target_idx]);
+        } else if (assigned_reg[target_idx]) {
+          const char *r64 = assigned_reg[target_idx];
+          int sz = (op->expr && op->expr->ty) ? op->expr->ty->size : 8;
+          if (mod == 'b') sz = 1;
+          else if (mod == 'w') sz = 2;
+          else if (mod == 'k') sz = 4;
+          else if (mod == 'q') sz = 8;
+
+          if (mod == 'h') {
+            if (!strcmp(r64, "%rax")) dst += snprintf(dst, dst_end - dst, "%%ah");
+            else if (!strcmp(r64, "%rbx")) dst += snprintf(dst, dst_end - dst, "%%bh");
+            else if (!strcmp(r64, "%rcx")) dst += snprintf(dst, dst_end - dst, "%%ch");
+            else if (!strcmp(r64, "%rdx")) dst += snprintf(dst, dst_end - dst, "%%dh");
+            else dst += snprintf(dst, dst_end - dst, "%s", x86_reg8(r64));
+          } else if (sz == 1) {
+            dst += snprintf(dst, dst_end - dst, "%s", x86_reg8(r64));
+          } else if (sz == 2) {
+            dst += snprintf(dst, dst_end - dst, "%s", x86_reg16(r64));
+          } else if (sz == 4) {
+            dst += snprintf(dst, dst_end - dst, "%s", x86_reg32(r64));
+          } else {
+            dst += snprintf(dst, dst_end - dst, "%s", r64);
+          }
+        }
+      } else {
+        *dst++ = '%';
+        if (mod) *dst++ = mod;
+      }
+    } else {
+      *dst++ = *src++;
+    }
+  }
+  *dst = '\0';
+
+  // 9. Output formatted lines
+  char *line = out_buf;
+  while (*line) {
+    char *nl = strchr(line, '\n');
+    if (nl) {
+      *nl = '\0';
+      println("  %s", line);
+      *nl = '\n';
+      line = nl + 1;
+    } else {
+      println("  %s", line);
+      break;
+    }
+  }
+
+  // 10. Store outputs into destination vregs
+  for (int i = 0; i < num_outputs; i++) {
+    if (assigned_reg[i] && ops[i]->vreg) {
+      store_vreg(assigned_reg[i], ops[i]->vreg);
+    }
+  }
+
+  invalidate_cached_regs();
+}
+
 static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
   if (!insn)
     return;
@@ -1821,6 +2149,19 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
     break;
 
   case LLIR_LOGNOT:
+    if (insn->dst && insn->dst->phys_reg >= 0 && insn->dst->phys_reg < NUM_X86_64_GP_REGS && !insn->dst->is_float) {
+      const char *dreg = x86_64_gp_regs[insn->dst->phys_reg];
+      const char *sreg = "%rax";
+      if (insn->src1 && insn->src1->phys_reg >= 0 && insn->src1->phys_reg < NUM_X86_64_GP_REGS && !insn->src1->is_float)
+        sreg = x86_64_gp_regs[insn->src1->phys_reg];
+      else
+        load_vreg(insn->src1, "%rax");
+      int sz = insn->src1 && insn->src1->ty ? insn->src1->ty->size : 8;
+      println(sz <= 4 ? "  test %s, %s" : "  test %s, %s", (sz <= 4) ? x86_reg32(sreg) : sreg, (sz <= 4) ? x86_reg32(sreg) : sreg);
+      println("  sete %s", x86_reg8(dreg));
+      println("  movzbl %s, %s", x86_reg8(dreg), x86_reg32(dreg));
+      break;
+    }
     load_vreg(insn->src1, "%rax");
     println("  test %%rax, %%rax");
     x86_64_emit_cmp_result("e");
@@ -1888,8 +2229,7 @@ static void x86_64_gen_insn(LLIRInsn *insn, FILE *out) {
   }
 
   case LLIR_ASM:
-    invalidate_cached_regs();
-    println("  %s", insn->asm_str ? insn->asm_str : "");
+    x86_64_gen_asm(insn);
     break;
 
   case LLIR_ALLOCA:

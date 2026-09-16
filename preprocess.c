@@ -24,48 +24,8 @@
 
 #include "chibicc.h"
 
-typedef struct MacroParam MacroParam;
-struct MacroParam {
-  MacroParam *next;
-  char *name;
-};
-
-typedef struct MacroArg MacroArg;
-struct MacroArg {
-  MacroArg *next;
-  char *name;
-  bool is_va_args;
-  Token *tok;
-};
-
-typedef Token *macro_handler_fn(Token *);
-
-typedef struct Macro Macro;
-struct Macro {
-  char *name;
-  bool is_objlike; // Object-like or function-like
-  MacroParam *params;
-  char *va_args_name;
-  Token *body;
-  macro_handler_fn *handler;
-};
-
-// `#if` can be nested, so we use a stack to manage nested `#if`s.
-typedef struct CondIncl CondIncl;
-struct CondIncl {
-  CondIncl *next;
-  enum { IN_THEN, IN_ELIF, IN_ELSE } ctx;
-  Token *tok;
-  bool included;
-};
-
-typedef struct Hideset Hideset;
-struct Hideset {
-  Hideset *next;
-  char *name;
-};
-
 static HashMap macros;
+static HashMap macro_stacks;
 static CondIncl *cond_incl;
 static HashMap pragma_once;
 static int include_next_idx;
@@ -290,7 +250,7 @@ static Token *preprocess_const_expr(Token *tok) {
 
       if (!is_ident(tok))
         error_tok(start, "macro name must be an identifier");
-      Macro *m = find_macro(tok);
+      const Macro *m = find_macro(tok);
       tok = tok->next;
 
       if (has_paren)
@@ -395,7 +355,7 @@ static long eval_const_expr(Token **rest, Token *tok) {
   convert_pp_tokens(expr);
 
   Token *rest2;
-  long val = const_expr(&rest2, expr);
+  const long val = const_expr(&rest2, expr);
   if (rest2->kind != TK_EOF)
     error_tok(rest2, "extra token");
   return val;
@@ -473,7 +433,8 @@ static void read_macro_definition(Token **rest, Token *tok) {
     Macro *m = add_macro(name, false, copy_line(rest, tok));
     m->params = params;
     m->va_args_name = va_args_name;
-  } else {
+  } else
+  {
     // Object-like macro
     add_macro(name, true, copy_line(rest, tok));
   }
@@ -484,9 +445,8 @@ static MacroArg *read_macro_arg_one(Token **rest, Token *tok, bool read_rest) {
   Token *cur = &head;
   int level = 0;
 
-  for (;;) {
-    if (level == 0 && equal(tok, ")"))
-      break;
+  while (!(level == 0 && equal(tok, ")")))
+  {
     if (level == 0 && !read_rest && equal(tok, ","))
       break;
 
@@ -518,7 +478,7 @@ read_macro_args(Token **rest, Token *tok, MacroParam *params, char *va_args_name
   MacroArg head = {};
   MacroArg *cur = &head;
 
-  MacroParam *pp = params;
+  const MacroParam *pp = params;
   for (; pp; pp = pp->next) {
     if (cur != &head)
       tok = skip(tok, ",");
@@ -628,7 +588,7 @@ static Token *subst(Token *tok, MacroArg *args) {
     // to the empty token list. Otherwise, its expaned to `,` and
     // __VA_ARGS__.
     if (equal(tok, ",") && equal(tok->next, "##")) {
-      MacroArg *arg = find_arg(args, tok->next->next);
+      const MacroArg *arg = find_arg(args, tok->next->next);
       if (arg && arg->is_va_args) {
         if (arg->tok->kind == TK_EOF) {
           tok = tok->next->next->next;
@@ -647,7 +607,7 @@ static Token *subst(Token *tok, MacroArg *args) {
       if (tok->next->kind == TK_EOF)
         error_tok(tok, "'##' cannot appear at end of macro expansion");
 
-      MacroArg *arg = find_arg(args, tok->next);
+      const MacroArg *arg = find_arg(args, tok->next);
       if (arg) {
         if (arg->tok->kind != TK_EOF) {
           *cur = *paste(cur, arg->tok);
@@ -712,7 +672,6 @@ static Token *subst(Token *tok, MacroArg *args) {
     // Handle a non-macro token.
     cur = cur->next = copy_token(tok);
     tok = tok->next;
-    continue;
   }
 
   cur->next = tok;
@@ -1479,19 +1438,81 @@ static Token *handle_pragma(Token *start, Token *tok) {
     return skip_line(tok->next->next);
   }
 
+  if (equal(tok->next, "push_macro") || equal(tok->next, "pop_macro")) {
+    bool is_push = equal(tok->next, "push_macro");
+    Token *t = tok->next->next;
+    t = skip(t, "(");
+    if (t->kind != TK_STR)
+      error_tok(t, "expected string literal in #pragma %s", is_push ? "push_macro" : "pop_macro");
+
+    char *name = t->str;
+    t = skip(t->next, ")");
+
+    if (is_push) {
+      Macro *cur = hashmap_get(&macros, name);
+      MacroStack *ms = calloc(1, sizeof(MacroStack));
+      ms->macro = cur;
+      ms->next = hashmap_get(&macro_stacks, name);
+      hashmap_put(&macro_stacks, name, ms);
+    } else {
+      MacroStack *ms = hashmap_get(&macro_stacks, name);
+      if (ms) {
+        hashmap_put(&macro_stacks, name, ms->next);
+        if (ms->macro)
+          hashmap_put(&macros, name, ms->macro);
+        else
+          hashmap_delete(&macros, name);
+      }
+    }
+    return skip_line(t);
+  }
+
+  if (equal(tok->next, "message")) {
+    Token *t = tok->next->next;
+    if (equal(t, "(")) {
+      t = t->next;
+      Token *start_msg = t;
+      while (!equal(t, ")") && !t->at_bol && t->kind != TK_EOF)
+        t = t->next;
+      char *msg = join_tokens(start_msg, t);
+      warn_tok(tok, "%s", msg);
+      if (equal(t, ")"))
+        t = t->next;
+      return skip_line(t);
+    }
+    Token *end = skip_to_bol(t);
+    char *msg = join_tokens(t, end);
+    warn_tok(tok, "%s", msg);
+    return end;
+  }
+
   do {
     tok = tok->next;
-  } while (!tok->at_bol);
+  } while (!tok->at_bol && tok->kind != TK_EOF);
   return tok;
 }
 
 static Token *handle_error(Token *start, Token *tok) {
-  error_tok(tok, "error");
-  return tok;
+  Token *end = skip_to_bol(tok->next);
+  char *msg = join_tokens(tok->next, end);
+  if (!msg || !*msg)
+    error_tok(tok, "error");
+  else
+    error_tok(tok, "%s", msg);
+  return end;
 }
 
 static Token *handle_warning(Token *start, Token *tok) {
-  warn_tok(tok, "warning directive");
+  Token *end = skip_to_bol(tok->next);
+  char *msg = join_tokens(tok->next, end);
+  if (!msg || !*msg)
+    warn_tok(tok, "warning directive");
+  else
+    warn_tok(tok, "%s", msg);
+  return end;
+}
+
+static Token *handle_ident(Token *start, Token *tok) {
   return skip_to_bol(tok->next);
 }
 
@@ -1513,6 +1534,8 @@ static const Directive directives[] = {
   {"pragma", handle_pragma},
   {"error", handle_error},
   {"warning", handle_warning},
+  {"ident", handle_ident},
+  {"sccs", handle_ident},
   {NULL, NULL}
 };
 
@@ -1536,6 +1559,44 @@ static Token *preprocess2(Token *tok) {
     // If it is a macro, expand it.
     if (expand_macro(&tok, tok))
       continue;
+
+    // _Pragma("...") and __pragma(...)
+    if (equal(tok, "_Pragma")) {
+      Token *start = tok;
+      tok = skip(tok->next, "(");
+      if (tok->kind != TK_STR)
+        error_tok(tok, "_Pragma takes a string literal");
+      char *s = tok->str;
+      tok = skip(tok->next, ")");
+
+      char *buf = format("#pragma %s\n", s);
+      Token *pragma_toks = tokenize(new_file(start->file->name, start->file->file_no, buf));
+      preprocess2(pragma_toks);
+      continue;
+    }
+
+    if (equal(tok, "__pragma")) {
+      Token *start = tok;
+      tok = skip(tok->next, "(");
+      Token *body_start = tok;
+      int depth = 1;
+      while (tok->kind != TK_EOF) {
+        if (equal(tok, "("))
+          depth++;
+        else if (equal(tok, ")")) {
+          depth--;
+          if (depth == 0)
+            break;
+        }
+        tok = tok->next;
+      }
+      char *s = join_tokens(body_start, tok);
+      tok = skip(tok, ")");
+      char *buf = format("#pragma %s\n", s);
+      Token *pragma_toks = tokenize(new_file(start->file->name, start->file->file_no, buf));
+      preprocess2(pragma_toks);
+      continue;
+    }
 
     // Pass through if it is not a "#".
     if (!is_hash(tok)) {
@@ -1630,11 +1691,15 @@ static char *format_date(struct tm *tm) {
     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
   };
 
+  if (!tm)
+    return "\"Jan  1 1970\"";
   return format("\"%s %2d %d\"", mon[tm->tm_mon], tm->tm_mday, tm->tm_year + 1900);
 }
 
 // __TIME__ is expanded to the current time, e.g. "13:34:03".
 static char *format_time(struct tm *tm) {
+  if (!tm)
+    return "\"00:00:00\"";
   return format("\"%02d:%02d:%02d\"", tm->tm_hour, tm->tm_min, tm->tm_sec);
 }
 
@@ -1651,6 +1716,19 @@ void init_macros(void) {
   define_macro("__SIZEOF_PTRDIFF_T__", "8");
   define_macro("__SIZEOF_SHORT__", "2");
   define_macro("__SIZEOF_SIZE_T__", "8");
+  define_macro("__SCHAR_MAX__", "127");
+  define_macro("__SHRT_MAX__", "32767");
+  define_macro("__INT_MAX__", "2147483647");
+  define_macro("__LONG_MAX__", "9223372036854775807L");
+  define_macro("__LONG_LONG_MAX__", "9223372036854775807LL");
+  define_macro("__INT8_TYPE__", "signed char");
+  define_macro("__UINT8_TYPE__", "unsigned char");
+  define_macro("__INT16_TYPE__", "short");
+  define_macro("__UINT16_TYPE__", "unsigned short");
+  define_macro("__INT32_TYPE__", "int");
+  define_macro("__UINT32_TYPE__", "unsigned int");
+  define_macro("__INT64_TYPE__", "long long");
+  define_macro("__UINT64_TYPE__", "unsigned long long");
   define_macro("__SIZE_TYPE__", "unsigned long");
   define_macro("__PTRDIFF_TYPE__", "long");
   define_macro("__INTPTR_TYPE__", "long");
@@ -1658,7 +1736,45 @@ void init_macros(void) {
   define_macro("__INTMAX_TYPE__", "long long");
   define_macro("__UINTMAX_TYPE__", "unsigned long long");
   define_macro("__WCHAR_TYPE__", "int");
+  define_macro("__SIZEOF_WCHAR_T__", "4");
+  define_macro("__WCHAR_WIDTH__", "32");
   define_macro("__WINT_TYPE__", "unsigned int");
+  define_macro("__SIZEOF_WINT_T__", "4");
+  define_macro("__WINT_WIDTH__", "32");
+
+  define_macro("__FLT_MIN__", "1.17549435082228750796873653722224568e-38F");
+  define_macro("__FLT_MAX__", "3.40282346638528859811704183484516925e+38F");
+  define_macro("__FLT_EPSILON__", "1.19209289550781250000000000000000000e-7F");
+  define_macro("__FLT_DENORM_MIN__", "1.40129846432481707092372958328991613e-45F");
+  define_macro("__FLT_MANT_DIG__", "24");
+  define_macro("__FLT_DIG__", "6");
+  define_macro("__FLT_RADIX__", "2");
+  define_macro("__FLT_MIN_EXP__", "(-125)");
+  define_macro("__FLT_MIN_10_EXP__", "(-37)");
+  define_macro("__FLT_MAX_EXP__", "128");
+  define_macro("__FLT_MAX_10_EXP__", "38");
+
+  define_macro("__DBL_MIN__", "2.22507385850720138309023271733240406e-308");
+  define_macro("__DBL_MAX__", "1.79769313486231570814527423731704357e+308");
+  define_macro("__DBL_EPSILON__", "2.22044604925031308084726333618164062e-16");
+  define_macro("__DBL_DENORM_MIN__", "4.94065645841246544176568792868221372e-324");
+  define_macro("__DBL_MANT_DIG__", "53");
+  define_macro("__DBL_DIG__", "15");
+  define_macro("__DBL_MIN_EXP__", "(-1021)");
+  define_macro("__DBL_MIN_10_EXP__", "(-307)");
+  define_macro("__DBL_MAX_EXP__", "1024");
+  define_macro("__DBL_MAX_10_EXP__", "308");
+
+  define_macro("__LDBL_MIN__", "2.22507385850720138309023271733240406e-308L");
+  define_macro("__LDBL_MAX__", "1.79769313486231570814527423731704357e+308L");
+  define_macro("__LDBL_EPSILON__", "2.22044604925031308084726333618164062e-16L");
+  define_macro("__LDBL_DENORM_MIN__", "4.94065645841246544176568792868221372e-324L");
+  define_macro("__LDBL_MANT_DIG__", "53");
+  define_macro("__LDBL_DIG__", "15");
+  define_macro("__LDBL_MIN_EXP__", "(-1021)");
+  define_macro("__LDBL_MIN_10_EXP__", "(-307)");
+  define_macro("__LDBL_MAX_EXP__", "1024");
+  define_macro("__LDBL_MAX_10_EXP__", "308");
   define_macro("__STDC_HOSTED__", "1");
   define_macro("__STDC_NO_COMPLEX__", "1");
   define_macro("__STDC_UTF_16__", "1");
@@ -1678,6 +1794,8 @@ void init_macros(void) {
   define_macro("__signed__", "signed");
   define_macro("__typeof__", "typeof");
   define_macro("__volatile__", "volatile");
+  define_macro("__extension__", "");
+  define_macro("__extension", "");
   define_macro("__x86_64", "1");
   define_macro("__x86_64__", "1");
 

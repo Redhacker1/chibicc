@@ -2,12 +2,12 @@
     [string]$Compiler = "cmake-build-debug\chibicc-cli.exe",
     [string]$Output = "chibicc-stage2.exe",
     [string]$OptLevel = "",
-    [string]$MinGWPath = "C:\Users\donov\Documents\MinGW64\x86_64-w64-mingw32\include",
+    [string]$LibcInclude = "sdk\include",
     [switch]$RunTests,
     [switch]$Stage3
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 
 # Normalize optimization level flag
 $OptFlag = ""
@@ -33,6 +33,8 @@ if (-not (Test-Path $Compiler)) {
         $Compiler = "cmake-build-debug\chibicc-cli.exe"
     } elseif (Test-Path "chibicc.exe") {
         $Compiler = "chibicc.exe"
+    } elseif (Test-Path "chibicc-stage2.exe") {
+        $Compiler = "chibicc-stage2.exe"
     } else {
         Write-Host "No compiler found. Building with CMake first..." -ForegroundColor Yellow
         cmd /c "call ""C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\VsDevCmd.bat"" -arch=x64 && cmake --build cmake-build-debug"
@@ -77,15 +79,12 @@ $srcs = @(
     "abi/win32/win32.c",
     "abi/sys6/sys6.c",
     "abi/z80/z80.c",
-    "win_src/glob.c",
-    "win_src/wait.c",
-    "win_src/win_shims.c",
-    "win_src/unistd.c"
+    "compiler_src/ds_impl.c"
 )
 
-$IncludeFlags = @("-I.", "-Icompiler_include", "-Iwin_includes")
-if (Test-Path $MinGWPath) {
-    $IncludeFlags += "-I$MinGWPath"
+$IncludeFlags = @("-Iwin_includes", "-I.", "-Isdk\include", "-Ilibc\libc\include", "-Iinclude", "-Icompiler_include")
+if (Test-Path $LibcInclude) {
+    $IncludeFlags = @("-Iwin_includes", "-I.", "-I$LibcInclude", "-Ilibc\libc\include", "-Iinclude", "-Icompiler_include")
 }
 
 function Build-Stage([string]$StageCompiler, [string]$BuildDir, [string]$TargetExeName) {
@@ -93,6 +92,13 @@ function Build-Stage([string]$StageCompiler, [string]$BuildDir, [string]$TargetE
     New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
     if (Test-Path "include") {
         Copy-Item -Recurse -Force "include" "$BuildDir\include"
+    }
+    if (Test-Path "sdk\include") {
+        Copy-Item -Recurse -Force "sdk\include" "$BuildDir\sdk\include"
+    }
+    if (Test-Path "sdk\lib\libc.dll") {
+        Copy-Item -Force "sdk\lib\libc.dll" "$BuildDir\libc.dll"
+        Copy-Item -Force "sdk\lib\libc.dll" ".\libc.dll"
     }
 
     $objFiles = @()
@@ -124,7 +130,13 @@ function Build-Stage([string]$StageCompiler, [string]$BuildDir, [string]$TargetE
 
     $outPath = "$BuildDir\$TargetExeName"
     Write-Host "`n--- Linking $outPath ---" -ForegroundColor Cyan
-    $linkOutput = gcc "-Wl,--start-group" $objFiles "-Wl,--end-group" -s "-Wl,--stack,16777216" "-Wl,--subsystem,console" "-Wl,--dynamicbase" "-Wl,--nxcompat" "-Wl,--high-entropy-va" "-Wl,--gc-sections" -o $outPath 2>&1
+    $libcArgs = @()
+    if (Test-Path "sdk\lib\libc.dll.a") {
+        $libcArgs = @("sdk\lib\libc.dll.a", "-Wl,--allow-multiple-definition")
+    } elseif (Test-Path "libc.dll") {
+        $libcArgs = @("libc.dll", "-Wl,--allow-multiple-definition")
+    }
+    $linkOutput = gcc -nostdlib "-Wl,-e,mainCRTStartup" "-Wl,--start-group" $objFiles @libcArgs "-Wl,--end-group" "-Wl,--stack,16777216" "-Wl,--subsystem,console" "-Wl,--image-base,0x140000000" "-Wl,--disable-dynamicbase" "-Wl,--disable-high-entropy-va" -lkernel32 -o $outPath 2>&1
     if ($linkOutput) {
         $linkOutput | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
     }
