@@ -20,8 +20,7 @@ else()
     )
 endif()
 
-set(CHIBICC_SOURCES
-    main.c
+set(CHIBICC_CORE_SOURCES
     hashmap.c
     compiler_src/ds_impl.c
     parse.c
@@ -32,8 +31,23 @@ set(CHIBICC_SOURCES
     unicode.c
     ir/hlir.c
     ir/hlir_opt.c
+    ir/hlir_opt_fold.c
+    ir/hlir_opt_algebraic.c
+    ir/hlir_opt_copy_prop.c
+    ir/hlir_opt_cse.c
+    ir/hlir_opt_load_store.c
+    ir/hlir_opt_control_flow.c
+    ir/hlir_opt_dce.c
+    ir/hlir_opt_inlining.c
     ir/ir.c
+    ir/analysis.c
+    ir/pass_manager.c
     ir/opt.c
+    ir/opt_copy_prop.c
+    ir/opt_dce.c
+    ir/opt_cfg.c
+    ir/opt_peephole.c
+    ir/opt_legalize.c
     ir/regalloc.c
     codegen/codegen.c
     codegen/common/common.c
@@ -49,38 +63,14 @@ set(CHIBICC_SOURCES
     abi/z80/z80.c
 )
 
-add_executable(chibicc-cli ${CHIBICC_SOURCES})
+add_executable(chibicc-cli main.c ${CHIBICC_CORE_SOURCES})
 target_include_directories(chibicc-cli PRIVATE ${CHIBICC_INCLUDES})
 
-add_executable(hlir-opt-test
-    tests/optimizations/hlir_opt_handcrafted.c
-    hashmap.c
-    compiler_src/ds_impl.c
-    parse.c
-    preprocess.c
-    strings.c
-    tokenize.c
-    type.c
-    unicode.c
-    ir/hlir.c
-    ir/hlir_opt.c
-    ir/ir.c
-    ir/opt.c
-    ir/regalloc.c
-    codegen/codegen.c
-    codegen/common/common.c
-    codegen/x86_64/x86_64.c
-    codegen/m68k/m68k.c
-    codegen/z80/z80.c
-    abi/abi.c
-    abi/objfmt.c
-    abi/sysV64/sysv64.c
-    abi/win64/win64.c
-    abi/win32/win32.c
-    abi/sys6/sys6.c
-    abi/z80/z80.c
-)
+add_executable(hlir-opt-test tests/optimizations/hlir_opt_handcrafted.c ${CHIBICC_CORE_SOURCES})
 target_include_directories(hlir-opt-test PRIVATE ${CHIBICC_INCLUDES})
+
+add_executable(ir-opt-test tests/optimizations/ir_opt_unit_test.c ${CHIBICC_CORE_SOURCES})
+target_include_directories(ir-opt-test PRIVATE ${CHIBICC_INCLUDES})
 
 set(LIBC_SEARCH_PATHS
     "${CMAKE_CURRENT_SOURCE_DIR}/sdk/lib"
@@ -99,6 +89,7 @@ if(NOT MSVC)
     if(CHIBICC_LIBC)
         target_link_libraries(chibicc-cli PRIVATE ${CHIBICC_LIBC})
         target_link_libraries(hlir-opt-test PRIVATE ${CHIBICC_LIBC})
+        target_link_libraries(ir-opt-test PRIVATE ${CHIBICC_LIBC})
     endif()
 endif()
 
@@ -106,10 +97,13 @@ if(WIN32)
     if(MSVC)
         target_sources(chibicc-cli PUBLIC win_src/glob.c win_src/wait.c win_src/win_shims.c win_src/unistd.c)
         target_sources(hlir-opt-test PUBLIC win_src/glob.c win_src/wait.c win_src/win_shims.c win_src/unistd.c)
+        target_sources(ir-opt-test PUBLIC win_src/glob.c win_src/wait.c win_src/win_shims.c win_src/unistd.c)
+        target_compile_options(chibicc-cli PUBLIC /D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_WARNINGS)
         set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SUBSYSTEM:CONSOLE /FORCE:MULTIPLE")
     elseif(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         target_link_options(chibicc-cli PRIVATE "-Wl,--allow-multiple-definition")
         target_link_options(hlir-opt-test PRIVATE "-Wl,--allow-multiple-definition")
+        target_link_options(ir-opt-test PRIVATE "-Wl,--allow-multiple-definition")
     endif()
 endif()
 
@@ -123,6 +117,11 @@ add_custom_target(copy_headers ALL
 )
 add_dependencies(chibicc-cli copy_headers)
 add_dependencies(hlir-opt-test copy_headers)
+add_dependencies(ir-opt-test copy_headers)
+
+enable_testing()
+add_test(NAME hlir-opt-test COMMAND hlir-opt-test)
+add_test(NAME ir-opt-test COMMAND ir-opt-test)
 
 if(WIN32)
     add_custom_target(libc

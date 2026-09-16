@@ -215,7 +215,7 @@ static HLIRVal *gen_addr_hlir(HLIRFunction *fn, Node *node) {
       return gen_expr_hlir(fn, node);
     if (node->ty && (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION)) {
       HLIRVal *val = gen_expr_hlir(fn, node);
-      Obj *tmp = calloc(1, sizeof(Obj));
+      Obj2 *tmp = calloc(1, sizeof(Obj2));
       tmp->name = "";
       tmp->ty = node->ty;
       tmp->is_local = true;
@@ -1153,12 +1153,12 @@ static void gen_stmt_hlir(HLIRFunction *fn, Node *node) {
   }
 }
 
-HLIRProg *ast_to_hlir(Obj *prog) {
+HLIRProg *ast_to_hlir(Obj2 *prog) {
   HLIRProg *hlir_prog = calloc(1, sizeof(HLIRProg));
   hlir_prog->globals = prog;
 
   int fn_count = 0;
-  for (const Obj *fn = prog; fn; fn = fn->next)
+  for (const Obj2 *fn = prog; fn; fn = fn->next)
     if (fn->is_function && fn->is_definition && fn->is_live)
       fn_count++;
 
@@ -1166,7 +1166,7 @@ HLIRProg *ast_to_hlir(Obj *prog) {
   hlir_prog->num_fns = fn_count;
 
   int idx = 0;
-  for (Obj *fn = prog; fn; fn = fn->next) {
+  for (Obj2 *fn = prog; fn; fn = fn->next) {
     if (!fn->is_function || !fn->is_definition || !fn->is_live)
       continue;
 

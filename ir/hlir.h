@@ -69,8 +69,8 @@ typedef struct HLIRProg HLIRProg;
 struct HLIRVal {
   int id;
   Type *ty;
-  Obj *var;
-  bool is_struct_val;
+  Obj2 *var;
+  uint32_t is_struct_val : 1;
   int struct_size;
   Type *struct_ty;
 };
@@ -89,22 +89,32 @@ struct HLIRInsn {
   int64_t imm;
   double fimm;
   char *label;
-  Obj *var;
+  Obj2 *var;
   Type *ty;
-  int num_args;
-  HLIRVal **args;
-  ABI *call_abi;
-  char *asm_str;
-  AsmOperand *asm_outputs;
-  AsmOperand *asm_inputs;
-  AsmClobber *asm_clobbers;
-  AsmOperand *asm_labels;
-  bool asm_is_volatile;
-  bool asm_is_goto;
+
+  uint32_t asm_is_volatile : 1;
+  uint32_t asm_is_goto : 1;
+
+  union {
+    // Call
+    struct {
+      int num_args;
+      HLIRVal **args;
+      ABI *call_abi;
+    };
+    // Asm
+    struct {
+      char *asm_str;
+      AsmOperand *asm_outputs;
+      AsmOperand *asm_inputs;
+      AsmClobber *asm_clobbers;
+      AsmOperand *asm_labels;
+    };
+  };
 };
 
 struct HLIRFunction {
-  Obj *fn_obj;
+  Obj2 *fn_obj;
   char *name;
   Type *func_ty;
   ABI *abi;
@@ -117,13 +127,13 @@ struct HLIRFunction {
   int num_vals;
   int val_cap;
 
-  Obj *locals;
-  Obj *params;
+  Obj2 *locals;
+  Obj2 *params;
   int stack_size;
 };
 
 struct HLIRProg {
-  Obj *globals;
+  Obj2 *globals;
   HLIRFunction **fns;
   int num_fns;
 };
@@ -138,7 +148,7 @@ void hlir_remove_insn(HLIRFunction *fn, HLIRInsn *insn);
 void hlir_replace_insn(HLIRFunction *fn, HLIRInsn *old_insn, HLIRInsn *new_insn);
 
 // Generation & Printing
-HLIRProg *ast_to_hlir(Obj *prog);
+HLIRProg *ast_to_hlir(Obj2 *prog);
 void hlir_dump_function(FILE *out, HLIRFunction *fn);
 void hlir_dump(FILE *out, HLIRProg *prog);
 

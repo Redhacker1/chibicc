@@ -348,7 +348,7 @@ static int win64_count_params(Type *ty) {
  *
  * We save RDI and RSI because the generic x86 backend may use them.
  */
-static void win64_assign_lvar_offsets(Obj *fn) {
+static void win64_assign_lvar_offsets(Obj2 *fn) {
   if (!fn->is_function)
     return;
 
@@ -356,7 +356,7 @@ static void win64_assign_lvar_offsets(Obj *fn) {
   int bottom = 56;
   int param_idx = 0;
 
-  for (Obj *var = fn->params; var; var = var->next) {
+  for (Obj2 *var = fn->params; var; var = var->next) {
     /*
      * Large aggregates are passed as pointers, but chibicc's C
      * semantics require the parameter to behave as an actual object.
@@ -380,7 +380,7 @@ static void win64_assign_lvar_offsets(Obj *fn) {
     param_idx++;
   }
 
-  for (Obj *var = fn->locals; var; var = var->next) {
+  for (Obj2 *var = fn->locals; var; var = var->next) {
     if (var->offset)
       continue;
 
@@ -398,11 +398,11 @@ static void win64_assign_lvar_offsets(Obj *fn) {
   fn->stack_size = align_to(bottom, 16);
 }
 
-static int win64_get_spill_base(Obj *fn) {
+static int win64_get_spill_base(Obj2 *fn) {
   return fn ? fn->stack_size : 0;
 }
 
-static void win64_finalize_stack(Obj *fn, const int spill_offset) {
+static void win64_finalize_stack(Obj2 *fn, const int spill_offset) {
   if (fn)
     fn->stack_size = align_to(spill_offset, 16);
 }
@@ -608,7 +608,7 @@ static void win64_copy_ret_buffer(Obj *var, FILE *out) {
  *
  * R10 is volatile.
  */
-static void win64_copy_struct_reg(Obj *fn, FILE *out) {
+static void win64_copy_struct_reg(Obj2 *fn, FILE *out) {
   const Type *ty = fn->ty->return_ty;
 
   switch (ty->size) {
@@ -638,9 +638,9 @@ static void win64_copy_struct_reg(Obj *fn, FILE *out) {
  * generated temporary/result object. Copy it into the caller's
  * supplied return buffer.
  */
-static void win64_copy_struct_mem(Obj *fn, FILE *out) {
+static void win64_copy_struct_mem(Obj2 *fn, FILE *out) {
   const Type *ty = fn->ty->return_ty;
-  const Obj *var = fn->params;
+  const Obj2 *var = fn->params;
 
   println_abi(
       out,
@@ -678,7 +678,7 @@ static void win64_copy_struct_mem(Obj *fn, FILE *out) {
 /*
  * alloca() receives its size in RDI in chibicc's generic x86 backend.
  */
-static void win64_builtin_alloca(Obj *fn, FILE *out) {
+static void win64_builtin_alloca(Obj2 *fn, FILE *out) {
   /*
    * Align size to 16 bytes.
    */
@@ -722,7 +722,7 @@ static void win64_builtin_alloca(Obj *fn, FILE *out) {
               fn->alloca_bottom->offset);
 }
 
-static void win64_emit_prologue(Obj *fn, FILE *out) {
+static void win64_emit_prologue(Obj2 *fn, FILE *out) {
   println_abi(out, "  push %%rbp");
   println_abi(out, "  mov %%rsp, %%rbp");
 
@@ -778,7 +778,7 @@ static void win64_emit_prologue(Obj *fn, FILE *out) {
    * Materialize register parameters and large aggregate parameters passed by reference.
    */
   int idx = 0;
-  for (const Obj *var = fn->params; var; var = var->next, idx++) {
+  for (const Obj2 *var = fn->params; var; var = var->next, idx++) {
     bool is_by_ref = (var->ty->kind == TY_STRUCT || var->ty->kind == TY_UNION) &&
                      win64_returns_by_reference(var->ty);
     if (is_by_ref) {
@@ -817,7 +817,7 @@ static void win64_emit_prologue(Obj *fn, FILE *out) {
   if (fn->va_area) {
     int named = 0;
 
-    for (const Obj *var = fn->params; var; var = var->next)
+    for (const Obj2 *var = fn->params; var; var = var->next)
       named++;
 
     /*
@@ -847,7 +847,7 @@ static void win64_emit_prologue(Obj *fn, FILE *out) {
   }
 }
 
-static void win64_emit_epilogue(Obj *fn, FILE *out) {
+static void win64_emit_epilogue(Obj2 *fn, FILE *out) {
   println_abi(out, ".L.return.%s:", fn->name);
 
   static const char *x86_callee_gp[] = { "%rbx", "%r12", "%r13", "%r14", "%r15", "%rdi", "%rsi" };
@@ -861,7 +861,7 @@ static void win64_emit_epilogue(Obj *fn, FILE *out) {
   println_abi(out, "  ret");
 }
 
-static void win64_emit_return(Obj *fn, Type *return_ty, FILE *out) {
+static void win64_emit_return(Obj2 *fn, Type *return_ty, FILE *out) {
   if (!return_ty && fn && fn->ty)
     return_ty = fn->ty->return_ty;
   if (!return_ty)

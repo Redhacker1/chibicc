@@ -764,7 +764,7 @@ static void cc1(void) {
     return;
   }
 
-  Obj *prog = parse(tok);
+  Obj2 *prog = parse(tok);
 
   // Write the assembly text directly to the output file.
   FILE *out = open_file(cc1_output_file);

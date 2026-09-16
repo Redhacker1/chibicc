@@ -10,26 +10,26 @@
 ObjFmt *current_objfmt = &objfmt_elf;
 
 // ELF object format
-static void elf_emit_var_decl(Obj *var, FILE *out) {
+static void elf_emit_var_decl(Obj2 *var, FILE *out) {
   if (var->is_static)
     println_fmt(out, "  .local %s", var->name);
   else
     println_fmt(out, "  .globl %s", var->name);
 }
 
-static void elf_emit_var_type_size(Obj *var, FILE *out) {
+static void elf_emit_var_type_size(Obj2 *var, FILE *out) {
   println_fmt(out, "  .type %s, @object", var->name);
   println_fmt(out, "  .size %s, %d", var->name, var->ty->size);
 }
 
-static void elf_emit_fn_decl(Obj *fn, FILE *out) {
+static void elf_emit_fn_decl(Obj2 *fn, FILE *out) {
   if (fn->is_static)
     println_fmt(out, "  .local %s", fn->name);
   else
     println_fmt(out, "  .globl %s", fn->name);
 }
 
-static void elf_emit_fn_type(Obj *fn, FILE *out) {
+static void elf_emit_fn_type(Obj2 *fn, FILE *out) {
   println_fmt(out, "  .type %s, @function", fn->name);
 }
 
@@ -43,12 +43,12 @@ ObjFmt objfmt_elf = {
 };
 
 // COFF / Windows PE object format
-static void coff_emit_var_decl(Obj *var, FILE *out) {
+static void coff_emit_var_decl(Obj2 *var, FILE *out) {
   if (!var->is_static)
     println_fmt(out, "  .globl %s", var->name);
 }
 
-static void coff_emit_fn_decl(Obj *fn, FILE *out) {
+static void coff_emit_fn_decl(Obj2 *fn, FILE *out) {
   if (!fn->is_static)
     println_fmt(out, "  .globl %s", fn->name);
 }
@@ -63,12 +63,12 @@ ObjFmt objfmt_coff = {
 };
 
 // Mach-O object format
-static void macho_emit_var_decl(Obj *var, FILE *out) {
+static void macho_emit_var_decl(Obj2 *var, FILE *out) {
   if (!var->is_static)
     println_fmt(out, "  .globl _%s", var->name);
 }
 
-static void macho_emit_fn_decl(Obj *fn, FILE *out) {
+static void macho_emit_fn_decl(Obj2 *fn, FILE *out) {
   if (!fn->is_static)
     println_fmt(out, "  .globl _%s", fn->name);
 }
@@ -83,12 +83,12 @@ ObjFmt objfmt_macho = {
 };
 
 // Flat binary / simple assembly
-static void flat_emit_var_decl(Obj *var, FILE *out) {
+static void flat_emit_var_decl(Obj2 *var, FILE *out) {
   if (!var->is_static)
     println_fmt(out, "  .globl %s", var->name);
 }
 
-static void flat_emit_fn_decl(Obj *fn, FILE *out) {
+static void flat_emit_fn_decl(Obj2 *fn, FILE *out) {
   if (!fn->is_static)
     println_fmt(out, "  .globl %s", fn->name);
 }

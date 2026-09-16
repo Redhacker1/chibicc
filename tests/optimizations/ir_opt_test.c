@@ -175,6 +175,12 @@ static void test_memory_transformations(void) {
   ASSERT(100, p[0]);
   ASSERT(200, p[1]);
 
+  // Dynamic base + index array access across function calls
+  int idx = opaque_int(2);
+  p[idx] = opaque_int(300);
+  opaque_int(999); // function call between definition and use
+  ASSERT(300, p[idx]);
+
   // Aggregate copy and mutation
   struct Large {
     int data[8];

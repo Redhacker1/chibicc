@@ -72,20 +72,20 @@ struct InitDesg {
   InitDesg *next;
   int idx;
   Member *member;
-  Obj *var;
+  Obj2 *var;
 };
 
 // All local variable instances created during parsing are
 // accumulated to this list.
-static Obj *locals;
+static Obj2 *locals;
 
 // Likewise, global variables are accumulated to this list.
-static Obj *globals;
+static Obj2 *globals;
 
 static Scope *scope = &(Scope){};
 
 // Points to the function object the parser is currently parsing.
-static Obj *current_fn;
+static Obj2 *current_fn;
 
 // Lists of all goto statements and labels in the curent function.
 static Node *gotos;
@@ -99,7 +99,7 @@ static char *cont_label;
 // a switch statement. Otherwise, NULL.
 static Node *current_switch;
 
-static Obj *builtin_alloca;
+static Obj2 *builtin_alloca;
 
 int64_t const_expr(Token **rest, Token *tok);
 static bool is_typename(Token *tok);
@@ -115,8 +115,8 @@ static void array_initializer2(Token **rest, Token *tok, Initializer *init, int 
 static void struct_initializer2(Token **rest, Token *tok, Initializer *init, Member *mem);
 static void initializer2(Token **rest, Token *tok, Initializer *init);
 static Initializer *initializer(Token **rest, Token *tok, Type *ty, Type **new_ty);
-static Node *lvar_initializer(Token **rest, Token *tok, Obj *var);
-static void gvar_initializer(Token **rest, Token *tok, Obj *var);
+static Node *lvar_initializer(Token **rest, Token *tok, Obj2 *var);
+static void gvar_initializer(Token **rest, Token *tok, Obj2 *var);
 static Node *compound_stmt(Token **rest, Token *tok);
 static Node *stmt(Token **rest, Token *tok);
 static Node *expr_stmt(Token **rest, Token *tok);
@@ -252,7 +252,7 @@ Node *new_ulong(long val, Token *tok) {
   return node;
 }
 
-Node *new_var_node(Obj *var, Token *tok) {
+Node *new_var_node(Obj2 *var, Token *tok) {
   assert(var != NULL);
   assert(tok != NULL);
   Node *node = new_node(ND_VAR, tok);
@@ -260,7 +260,7 @@ Node *new_var_node(Obj *var, Token *tok) {
   return node;
 }
 
-Node *new_vla_ptr(Obj *var, Token *tok) {
+Node *new_vla_ptr(Obj2 *var, Token *tok) {
   assert(var != NULL);
   assert(tok != NULL);
   Node *node = new_node(ND_VLA_PTR, tok);
@@ -574,8 +574,8 @@ static Initializer *new_initializer(Type *ty, bool is_flexible) {
   return init;
 }
 
-static Obj *new_var(char *name, Type *ty) {
-  Obj *var = calloc(1, sizeof(Obj));
+static Obj2 *new_var(char *name, Type *ty) {
+  Obj2 *var = calloc(1, sizeof(Obj2));
   var->name = name;
   var->ty = ty;
   var->align = ty->align;
@@ -583,16 +583,16 @@ static Obj *new_var(char *name, Type *ty) {
   return var;
 }
 
-Obj *new_lvar(char *name, Type *ty) {
-  Obj *var = new_var(name, ty);
+Obj2 *new_lvar(char *name, Type *ty) {
+  Obj2 *var = new_var(name, ty);
   var->is_local = true;
   var->next = locals;
   locals = var;
   return var;
 }
 
-static Obj *new_gvar(char *name, Type *ty) {
-  Obj *var = new_var(name, ty);
+static Obj2 *new_gvar(char *name, Type *ty) {
+  Obj2 *var = new_var(name, ty);
   var->next = globals;
   var->is_static = true;
   var->is_definition = true;
@@ -605,19 +605,19 @@ static char *new_unique_name(void) {
   return format(".L..%d", id++);
 }
 
-static Obj *new_anon_gvar(Type *ty) {
+static Obj2 *new_anon_gvar(Type *ty) {
   return new_gvar(new_unique_name(), ty);
 }
 
 static HashMap str_pool;
 
-static Obj *new_string_literal(char *p, Type *ty) {
+static Obj2 *new_string_literal(char *p, Type *ty) {
   if (ty && ty->kind == TY_ARRAY && ty->base == ty_char && ty->size > 0 && p) {
-    Obj *cached = hashmap_get2(&str_pool, p, ty->size);
+    Obj2 *cached = hashmap_get2(&str_pool, p, ty->size);
     if (cached)
       return cached;
   }
-  Obj *var = new_anon_gvar(ty);
+  Obj2 *var = new_anon_gvar(ty);
   var->init_data = p;
   var->is_readonly = true;
   if (ty && ty->kind == TY_ARRAY && ty->base == ty_char && ty->size > 0 && p) {
@@ -1441,7 +1441,7 @@ static Node *declaration(Token **rest, Token *tok, Type *basety, VarAttr *attr) 
 
     if (attr && attr->is_static) {
       // static local variable
-      Obj *var = new_anon_gvar(ty);
+      Obj2 *var = new_anon_gvar(ty);
       push_scope(name)->var = var;
       if (equal(tok, "="))
         gvar_initializer(&tok, tok->next, var);
@@ -1460,7 +1460,7 @@ static Node *declaration(Token **rest, Token *tok, Type *basety, VarAttr *attr) 
       // Variable length arrays (VLAs) are translated to alloca() calls.
       // For example, `int x[n+2]` is translated to `tmp = n + 2,
       // x = alloca(tmp)`.
-      Obj *var = new_lvar(name, ty);
+      Obj2 *var = new_lvar(name, ty);
       Token *tok = ty->name;
       Node *expr = new_binary(ND_ASSIGN, new_vla_ptr(var, tok),
                               new_alloca(new_var_node(ty->vla_size, tok)),
@@ -1470,7 +1470,7 @@ static Node *declaration(Token **rest, Token *tok, Type *basety, VarAttr *attr) 
       continue;
     }
 
-    Obj *var = new_lvar(name, ty);
+    Obj2 *var = new_lvar(name, ty);
     if (attr && attr->asm_name)
       var->name = attr->asm_name;
     if (attr && attr->align)
@@ -1976,7 +1976,7 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
 //   x[0][1] = 7;
 //   x[1][0] = 8;
 //   x[1][1] = 9;
-static Node *lvar_initializer(Token **rest, Token *tok, Obj *var) {
+static Node *lvar_initializer(Token **rest, Token *tok, Obj2 *var) {
   Initializer *init = initializer(rest, tok, var->ty, &var->ty);
   InitDesg desg = {NULL, 0, NULL, var};
 
@@ -2030,7 +2030,7 @@ write_gvar_data(Relocation *cur, Initializer *init, Type *ty, char *buf, int off
       if (mem->is_bitfield) {
         Node *expr = init->children[mem->idx]->expr;
         if (!expr)
-          break;
+          continue;
 
         char *loc = buf + offset + mem->offset;
         uint64_t oldval = read_buf(loc, mem->ty->size);
@@ -2086,7 +2086,7 @@ write_gvar_data(Relocation *cur, Initializer *init, Type *ty, char *buf, int off
 // embedded to .data section. This function serializes Initializer
 // objects to a flat byte array. It is a compile error if an
 // initializer list contains a non-constant expression.
-static void gvar_initializer(Token **rest, Token *tok, Obj *var) {
+static void gvar_initializer(Token **rest, Token *tok, Obj2 *var) {
   Initializer *init = initializer(rest, tok, var->ty, &var->ty);
 
   Relocation head = {};
@@ -2844,7 +2844,7 @@ static Node *to_assign(Node *binary) {
 
   // Convert `A.x op= C` to `tmp = &A, (*tmp).x = (*tmp).x op C`.
   if (binary->lhs->kind == ND_MEMBER) {
-    Obj *var = new_lvar("", pointer_to(binary->lhs->lhs->ty));
+    Obj2 *var = new_lvar("", pointer_to(binary->lhs->lhs->ty));
 
     Node *expr1 = new_binary(ND_ASSIGN, new_var_node(var, tok),
                              new_unary(ND_ADDR, binary->lhs->lhs, tok), tok);
@@ -2879,10 +2879,10 @@ static Node *to_assign(Node *binary) {
     Node head = {};
     Node *cur = &head;
 
-    Obj *addr = new_lvar("", pointer_to(binary->lhs->ty));
-    Obj *val = new_lvar("", binary->rhs->ty);
-    Obj *old = new_lvar("", binary->lhs->ty);
-    Obj *new = new_lvar("", binary->lhs->ty);
+    Obj2 *addr = new_lvar("", pointer_to(binary->lhs->ty));
+    Obj2 *val = new_lvar("", binary->rhs->ty);
+    Obj2 *old = new_lvar("", binary->lhs->ty);
+    Obj2 *new = new_lvar("", binary->lhs->ty);
 
     cur = cur->next =
       new_unary(ND_EXPR_STMT,
@@ -2929,7 +2929,7 @@ static Node *to_assign(Node *binary) {
   }
 
   // Convert `A op= B` to ``tmp = &A, *tmp = *tmp op B`.
-  Obj *var = new_lvar("", pointer_to(binary->lhs->ty));
+  Obj2 *var = new_lvar("", pointer_to(binary->lhs->ty));
 
   Node *expr1 = new_binary(ND_ASSIGN, new_var_node(var, tok),
                            new_unary(ND_ADDR, binary->lhs, tok), tok);
@@ -3001,7 +3001,7 @@ static Node *conditional(Token **rest, Token *tok) {
   if (equal(tok->next, ":")) {
     // [GNU] Compile `a ?: b` as `tmp = a, tmp ? tmp : b`.
     add_type(cond);
-    Obj *var = new_lvar("", cond->ty);
+    Obj2 *var = new_lvar("", cond->ty);
     Node *lhs = new_binary(ND_ASSIGN, new_var_node(var, tok), cond, tok);
     Node *rhs = new_node(ND_COND, tok);
     rhs->cond = new_var_node(var, tok);
@@ -3614,12 +3614,12 @@ static Node *postfix(Token **rest, Token *tok) {
     tok = skip(tok, ")");
 
     if (scope->next == NULL) {
-      Obj *var = new_anon_gvar(ty);
+      Obj2 *var = new_anon_gvar(ty);
       gvar_initializer(rest, tok, var);
       return new_var_node(var, start);
     }
 
-    Obj *var = new_lvar("", ty);
+    Obj2 *var = new_lvar("", ty);
     Node *lhs = lvar_initializer(rest, tok, var);
     Node *rhs = new_var_node(var, tok);
     return new_binary(ND_COMMA, lhs, rhs, start);
@@ -4234,7 +4234,7 @@ static Node *primary(Token **rest, Token *tok) {
         char *name = strndup(tok->loc + 10, tok->len - 10);
         Type *ty = func_type(ty_int);
         ty->is_variadic = true;
-        Obj *fn = new_gvar(name, ty);
+        Obj2 *fn = new_gvar(name, ty);
         fn->is_function = true;
         fn->is_definition = false;
         return new_var_node(fn, tok);
@@ -4245,7 +4245,7 @@ static Node *primary(Token **rest, Token *tok) {
   }
 
   if (tok->kind == TK_STR) {
-    Obj *var = new_string_literal(tok->str, tok->ty);
+    Obj2 *var = new_string_literal(tok->str, tok->ty);
     *rest = tok->next;
     return new_var_node(var, tok);
   }
@@ -4329,7 +4329,7 @@ static void resolve_goto_labels(void) {
   asm_gotos = NULL;
 }
 
-static Obj *find_func(char *name) {
+static Obj2 *find_func(char *name) {
   if (!name || !*name)
     return NULL;
 
@@ -4345,13 +4345,13 @@ static Obj *find_func(char *name) {
   return NULL;
 }
 
-static void mark_live(Obj *var) {
+static void mark_live(Obj2 *var) {
   if (!var->is_function || var->is_live)
     return;
   var->is_live = true;
 
   for (int i = 0; i < var->refs.len; i++) {
-    Obj *fn = find_func(var->refs.data[i]);
+    Obj2 *fn = find_func(var->refs.data[i]);
     if (fn)
       mark_live(fn);
   }
@@ -4369,7 +4369,7 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
   ABI *fn_abi = (attr && attr->abi) ? attr->abi : (ty->abi ? ty->abi : current_abi);
   ty->abi = fn_abi;
 
-  Obj *fn = find_func(name_str);
+  Obj2 *fn = find_func(name_str);
   if (fn) {
     // Redeclaration
     if (!fn->is_function)
@@ -4455,7 +4455,7 @@ static Token *global_variable(Token *tok, Type *basety, VarAttr *attr) {
     char *name = get_ident(ty->name);
     VarScope *sc = find_var(ty->name);
     if (sc && sc->var) {
-      Obj *var = sc->var;
+      Obj2 *var = sc->var;
       if (var->is_function)
         error_tok(ty->name, "redeclared as a different kind of symbol");
       if (!is_compatible(var->ty, ty))
@@ -4490,7 +4490,7 @@ static Token *global_variable(Token *tok, Type *basety, VarAttr *attr) {
       continue;
     }
 
-    Obj *var = new_gvar(name, ty);
+    Obj2 *var = new_gvar(name, ty);
     var->is_definition = !attr->is_extern;
     var->is_static = attr->is_static;
     var->is_tls = attr->is_tls;
@@ -4523,17 +4523,17 @@ static bool is_function(Token *tok, Type *basety) {
 
 // Remove redundant tentative definitions.
 static void scan_globals(void) {
-  Obj head;
-  Obj *cur = &head;
+  Obj2 head;
+  Obj2 *cur = &head;
 
-  for (Obj *var = globals; var; var = var->next) {
+  for (Obj2 *var = globals; var; var = var->next) {
     if (!var->is_tentative) {
       cur = cur->next = var;
       continue;
     }
 
     // Find another definition of the same identifier.
-    Obj *var2 = globals;
+    Obj2 *var2 = globals;
     for (; var2; var2 = var2->next)
       if (var != var2 && var2->is_definition && !strcmp(var->name, var2->name))
         break;
@@ -4575,7 +4575,7 @@ static void static_assertion(Token **rest, Token *tok) {
 }
 
 // program = (typedef | function-definition | global-variable)*
-Obj *parse(Token *tok) {
+Obj2 *parse(Token *tok) {
   scope = &(Scope){};
   declare_builtin_functions();
   declare_builtin_types();
@@ -4589,7 +4589,7 @@ Obj *parse(Token *tok) {
 
     if (equal(tok, "asm") || equal(tok, "__asm__") || equal(tok, "__asm")) {
       Node *node = asm_stmt(&tok, tok);
-      Obj *var = new_gvar(new_unique_name(), ty_void);
+      Obj2 *var = new_gvar(new_unique_name(), ty_void);
       var->is_definition = true;
       var->is_live = true;
       var->is_asm = true;
@@ -4621,13 +4621,13 @@ Obj *parse(Token *tok) {
     tok = global_variable(tok, basety, &attr);
   }
 
-  for (Obj *var = globals; var; var = var->next) {
+  for (Obj2 *var = globals; var; var = var->next) {
     if (var->is_root)
       mark_live(var);
     if (!var->is_function) {
       for (Relocation *rel = var->rel; rel; rel = rel->next) {
         if (rel->label && *rel->label && (*rel->label)[0] != '.') {
-          Obj *fn = find_func(*rel->label);
+          Obj2 *fn = find_func(*rel->label);
           if (fn)
             mark_live(fn);
         }

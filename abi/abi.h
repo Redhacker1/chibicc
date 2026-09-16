@@ -8,7 +8,8 @@
 
 typedef struct Type Type;
 typedef struct Node Node;
-typedef struct Obj Obj;
+typedef struct Obj2 Obj2;
+typedef Obj2 Obj;
 typedef struct ABI ABI;
 typedef struct LLIRInsn LLIRInsn;
 
@@ -58,22 +59,22 @@ struct ABI {
   int (*classify_reg)(Type *ty);
 
   // Local variable and parameter layout calculation
-  void (*assign_lvar_offsets)(Obj *prog);
+  void (*assign_lvar_offsets)(Obj2 *prog);
 
   // Stack frame layout and register spilling queries
-  int (*get_spill_base)(Obj *fn);
-  void (*finalize_stack)(Obj *fn, int spill_offset);
+  int (*get_spill_base)(Obj2 *fn);
+  void (*finalize_stack)(Obj2 *fn, int spill_offset);
 
   // Function call parameter pushing / preparation. Returns stack depth words added.
   int (*push_args)(Node *node, FILE *out, int *depth);
 
   // Struct return copy helpers
-  void (*copy_ret_buffer)(Obj *var, FILE *out);
-  void (*copy_struct_reg)(Obj *fn, FILE *out);
-  void (*copy_struct_mem)(Obj *fn, FILE *out);
+  void (*copy_ret_buffer)(Obj2 *var, FILE *out);
+  void (*copy_struct_reg)(Obj2 *fn, FILE *out);
+  void (*copy_struct_mem)(Obj2 *fn, FILE *out);
 
   // Builtins (e.g. alloca)
-  void (*builtin_alloca)(Obj *fn, FILE *out);
+  void (*builtin_alloca)(Obj2 *fn, FILE *out);
 
   // Pre-call hook (e.g. setting %al for SysV variadic calls)
   void (*pre_call)(Node *node, FILE *out);
@@ -85,9 +86,9 @@ struct ABI {
   Node *(*builtin_va_end)(Node *ap, Token *tok);
 
   // Function prologue & epilogue helpers
-  void (*emit_prologue)(Obj *fn, FILE *out);
-  void (*emit_epilogue)(Obj *fn, FILE *out);
-  void (*emit_return)(Obj *fn, Type *return_ty, FILE *out);
+  void (*emit_prologue)(Obj2 *fn, FILE *out);
+  void (*emit_epilogue)(Obj2 *fn, FILE *out);
+  void (*emit_return)(Obj2 *fn, Type *return_ty, FILE *out);
   void (*emit_call)(LLIRInsn *insn, FILE *out);
 
   // Preprocessor macro definitions

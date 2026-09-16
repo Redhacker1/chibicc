@@ -82,7 +82,7 @@ void init_all_targets_and_abis(void) {
 #endif
 }
 
-void codegen(Obj *prog, FILE *out) {
+void codegen(Obj2 *prog, FILE *out) {
   if (!current_codegen)
     init_all_targets_and_abis();
 

@@ -1,9 +1,12 @@
 #ifndef UNISTD_H
 #define UNISTD_H
 
+
+#ifndef __chibicc__
 #include <stddef.h>
 #include <stdint.h>
 #include <time.h>
+#include "stdlib.h"
 #include <sys/types.h>
 
 #ifdef _MSC_VER
@@ -104,11 +107,17 @@ char   *basename(char *path);
 char   *ctime_r(const time_t *timer, char *buf);
 int     strncasecmp(const char *a, const char *b, size_t n);
 char   *strndup(const char *s, size_t n);
-char   *_fullpath(char *absPath, const char *relPath, size_t maxLength);
+//char   *_fullpath(char *absPath, const char *relPath, size_t maxLength);
 char   *realpath(const char *path, char *resolved_path);
 
 #ifdef __cplusplus
 }
+#endif
+
+#else
+#include <sdk/include/unistd.h>
+#include <sdk/include/libgen.h>
+char *_fullpath(char *absPath, const char *relPath, size_t maxLength);
 #endif
 
 #endif /* UNISTD_H */

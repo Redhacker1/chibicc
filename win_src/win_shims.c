@@ -10,6 +10,8 @@
 #include <io.h>
 #include <fcntl.h>
 
+unsigned long long __stdcall GetTickCount64(void);
+
 char *strndup(const char *s, size_t n) {
     size_t len = strlen(s);
     if (len > n) len = n;

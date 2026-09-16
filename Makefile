@@ -2,7 +2,7 @@ CFLAGS=-std=c11 -g -fno-common -Wall -Wno-switch
 INCLUDES=-Iwin_includes -I. -Isdk/include -Ilibc/libc/include -Iinclude -Icompiler_include
 LIBC_FLAGS=$(if $(wildcard sdk/lib/libc.dll.a),sdk/lib/libc.dll.a -Wl,--allow-multiple-definition,$(if $(wildcard libc.dll),libc.dll -Wl,--allow-multiple-definition,))
 
-SRCS=$(filter-out codegen.c, $(wildcard *.c)) $(wildcard codegen/*.c) $(wildcard codegen/*/*.c) $(wildcard abi/*.c) $(wildcard abi/*/*.c)
+SRCS=$(filter-out codegen.c parse_test.c, $(wildcard *.c)) $(wildcard compiler_src/*.c) $(wildcard ir/*.c) $(wildcard codegen/*.c) $(wildcard codegen/*/*.c) $(wildcard abi/*.c) $(wildcard abi/*/*.c)
 OBJS=$(SRCS:.c=.o)
 
 TEST_SRCS=$(wildcard test/*.c)

@@ -5,7 +5,7 @@
 
 static FILE *output_file;
 static int depth;
-static Obj *current_fn;
+static Obj2 *current_fn;
 
 static void gen_expr(Node *node, FILE *out);
 static void gen_stmt(Node *node, FILE *out);
@@ -289,9 +289,9 @@ static void gen_stmt(Node *node, FILE *out) {
   error_tok(node->tok, "invalid statement");
 }
 
-static void z80_emit_data(Obj *prog, FILE *out) {
+static void z80_emit_data(Obj2 *prog, FILE *out) {
   (void)out;
-  for (Obj *var = prog; var; var = var->next) {
+  for (Obj2 *var = prog; var; var = var->next) {
     if (var->is_asm) {
       println("  %s", var->asm_str ? var->asm_str : "");
       continue;
@@ -495,7 +495,7 @@ static void z80_emit_text(LLIRProg *prog, FILE *out) {
   if (prog->fns && prog->num_fns > 0) {
     for (int i = 0; i < prog->num_fns; i++) {
       LLIRFunction *fn = prog->fns[i];
-      Obj *fn_obj = fn->fn_obj;
+      Obj2 *fn_obj = fn->fn_obj;
       if (!fn_obj || !fn_obj->is_function || !fn_obj->is_definition || !fn_obj->is_live)
         continue;
 
@@ -524,7 +524,7 @@ static void z80_emit_text(LLIRProg *prog, FILE *out) {
     return;
   }
 
-  for (Obj *fn = prog->globals; fn; fn = fn->next) {
+  for (Obj2 *fn = prog->globals; fn; fn = fn->next) {
     if (!fn->is_function || !fn->is_definition || !fn->is_live)
       continue;
 

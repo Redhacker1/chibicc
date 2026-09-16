@@ -267,6 +267,12 @@ static void compute_live_intervals(IRFunction *fn) {
     if (insn->src3)
       mark_vreg_use(insn->src3, insn->pos);
 
+    if (insn->base_reg)
+      mark_vreg_use(insn->base_reg, insn->pos);
+
+    if (insn->index_reg)
+      mark_vreg_use(insn->index_reg, insn->pos);
+
     for (int i = 0; i < insn->num_args; i++) {
       if (insn->args[i])
         mark_vreg_use(insn->args[i], insn->pos);
@@ -788,7 +794,7 @@ void regalloc_function(IRFunction *fn, const RegAllocPool *pool) {
    * Determine the starting spill offset using the same ABI hooks as the
    * original implementation.
    */
-  Obj *fn_obj = fn->fn_obj;
+  Obj2 *fn_obj = fn->fn_obj;
   ABI *abi = fn_obj ? get_fn_abi(fn_obj) : current_abi;
 
   int base = 0;

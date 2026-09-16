@@ -5,7 +5,8 @@
 #include <stdio.h>
 #include "abi/abi.h"
 
-typedef struct Obj Obj;
+typedef struct Obj2 Obj2;
+typedef Obj2 Obj;
 typedef struct Node Node;
 typedef struct Codegen Codegen;
 typedef struct LLIRProg LLIRProg;
@@ -23,7 +24,7 @@ struct Codegen {
   void (*codegen_llir)(LLIRProg *prog, FILE *out);
 
   // Sub-phases of code generation
-  void (*emit_data)(Obj *prog, FILE *out);
+  void (*emit_data)(Obj2 *prog, FILE *out);
   void (*emit_text)(LLIRProg *prog, FILE *out);
 
   // Individual instruction / expression code generators working on LLIR

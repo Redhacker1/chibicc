@@ -151,7 +151,7 @@ Node *abi_va_arg_ptr(Node *ap, Type *ty, int slot_size, Token *tok) {
   add_type(ap);
   bool is_ptr = (ap->ty->kind == TY_PTR && (ap->ty->base->kind != TY_STRUCT && ap->ty->base->kind != TY_UNION));
 
-  Obj *old_p = new_lvar("", pointer_to(ty_void));
+  Obj2 *old_p = new_lvar("", pointer_to(ty_void));
   Node head = {};
   Node *cur = &head;
 

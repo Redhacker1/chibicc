@@ -381,7 +381,7 @@ static int sysv64_classify_reg(Type *ty) {
 /*
  * Assign local-variable and stack-parameter offsets.
  */
-static void sysv64_assign_lvar_offsets(Obj *fn) {
+static void sysv64_assign_lvar_offsets(Obj2 *fn) {
   if (!fn->is_function)
     return;
 
@@ -394,7 +394,7 @@ static void sysv64_assign_lvar_offsets(Obj *fn) {
   /*
    * Determine which parameters are passed in registers.
    */
-  for (Obj *var = fn->params; var; var = var->next) {
+  for (Obj2 *var = fn->params; var; var = var->next) {
     Type *ty = var->ty;
 
     bool pass_stack = false;
@@ -456,7 +456,7 @@ static void sysv64_assign_lvar_offsets(Obj *fn) {
    * This is the same downward-growing layout convention used by
    * upstream chibicc.
    */
-  for (Obj *var = fn->locals; var; var = var->next) {
+  for (Obj2 *var = fn->locals; var; var = var->next) {
     if (var->offset)
       continue;
 
@@ -471,11 +471,11 @@ static void sysv64_assign_lvar_offsets(Obj *fn) {
   fn->stack_size = align_to(bottom, 16);
 }
 
-static int sysv64_get_spill_base(Obj *fn) {
+static int sysv64_get_spill_base(Obj2 *fn) {
   return fn ? fn->stack_size : 0;
 }
 
-static void sysv64_finalize_stack(Obj *fn, int spill_offset) {
+static void sysv64_finalize_stack(Obj2 *fn, int spill_offset) {
   if (fn)
     fn->stack_size = align_to(spill_offset, 16);
 }
@@ -809,7 +809,7 @@ static int sysv64_push_args(Node *node, FILE *out, int *depth) {
 /*
  * Copy an aggregate returned in registers into a local return buffer.
  */
-static void sysv64_copy_ret_buffer(Obj *var, FILE *out) {
+static void sysv64_copy_ret_buffer(Obj2 *var, FILE *out) {
   Type *ty = var->ty;
   SysVTypeClass cls = classify_sysv64(ty);
 
@@ -876,7 +876,7 @@ static void sysv64_copy_ret_buffer(Obj *var, FILE *out) {
  * The existing chibicc codegen convention gives us the address of the
  * aggregate in %rax.
  */
-static void sysv64_copy_struct_reg(Obj *fn, FILE *out) {
+static void sysv64_copy_struct_reg(Obj2 *fn, FILE *out) {
   Type *ty = fn->ty->return_ty;
   SysVTypeClass cls = classify_sysv64(ty);
 
@@ -951,9 +951,9 @@ static void sysv64_copy_struct_reg(Obj *fn, FILE *out) {
 /*
  * Copy a memory-returned aggregate into the hidden return buffer.
  */
-static void sysv64_copy_struct_mem(Obj *fn, FILE *out) {
+static void sysv64_copy_struct_mem(Obj2 *fn, FILE *out) {
   Type *ty = fn->ty->return_ty;
-  Obj *var = fn->params;
+  Obj2 *var = fn->params;
 
   /*
    * The hidden return buffer pointer is the first parameter.
@@ -993,7 +993,7 @@ static void sysv64_copy_struct_mem(Obj *fn, FILE *out) {
 /*
  * Builtin alloca.
  */
-static void sysv64_builtin_alloca(Obj *fn, FILE *out) {
+static void sysv64_builtin_alloca(Obj2 *fn, FILE *out) {
   /*
    * Align size to 16 bytes.
    */
@@ -1098,7 +1098,7 @@ static void store_gp(int r, int offset, int sz, FILE *out) {
 /*
  * Emit the SysV AMD64 function prologue.
  */
-static void sysv64_emit_prologue(Obj *fn, FILE *out) {
+static void sysv64_emit_prologue(Obj2 *fn, FILE *out) {
   println_abi(out, "  push %%rbp");
   println_abi(out, "  mov %%rsp, %%rbp");
 
@@ -1127,7 +1127,7 @@ static void sysv64_emit_prologue(Obj *fn, FILE *out) {
     /*
      * Count the registers actually consumed by named parameters.
      */
-    for (Obj *var = fn->params; var; var = var->next) {
+    for (Obj2 *var = fn->params; var; var = var->next) {
       Type *ty = var->ty;
 
       if (var->offset > 0)
@@ -1234,7 +1234,7 @@ static void sysv64_emit_prologue(Obj *fn, FILE *out) {
   int gp = 0;
   int fp = 0;
 
-  for (Obj *var = fn->params; var; var = var->next) {
+  for (Obj2 *var = fn->params; var; var = var->next) {
     if (var->offset > 0)
       continue;
 
@@ -1289,7 +1289,7 @@ static void sysv64_emit_prologue(Obj *fn, FILE *out) {
 }
 
 
-static void sysv64_emit_epilogue(Obj *fn, FILE *out) {
+static void sysv64_emit_epilogue(Obj2 *fn, FILE *out) {
   println_abi(out, ".L.return.%s:", fn->name);
 
   static const char *x86_callee_gp[] = { "%rbx", "%r12", "%r13", "%r14", "%r15" };
@@ -1303,7 +1303,7 @@ static void sysv64_emit_epilogue(Obj *fn, FILE *out) {
   println_abi(out, "  ret");
 }
 
-static void sysv64_emit_return(Obj *fn, Type *return_ty, FILE *out) {
+static void sysv64_emit_return(Obj2 *fn, Type *return_ty, FILE *out) {
   if (!return_ty && fn && fn->ty)
     return_ty = fn->ty->return_ty;
   if (!return_ty)
@@ -1802,7 +1802,7 @@ static Node *sysv64_builtin_va_start(Node *ap, Node *last, Token *tok) {
   return new_binary(ND_ASSIGN, deref_ap, deref_va, tok);
 }
 
-static Node *va_overflow_advance(Obj *res, Node *of_ptr, int sz, Token *tok) {
+static Node *va_overflow_advance(Obj2 *res, Node *of_ptr, int sz, Token *tok) {
   Node head = {};
   Node *cur = &head;
   cur = cur->next = new_unary(ND_EXPR_STMT,
@@ -1819,7 +1819,7 @@ static Node *sysv64_builtin_va_arg(Node *ap, Type *ty, Token *tok) {
   add_type(ap);
   int klass = sysv64_classify_reg(ty);
 
-  Obj *res = new_lvar("", pointer_to(ty_void));
+  Obj2 *res = new_lvar("", pointer_to(ty_void));
   Node head = {};
   Node *cur = &head;
 
@@ -1832,7 +1832,7 @@ static Node *sysv64_builtin_va_arg(Node *ap, Type *ty, Token *tok) {
   if (klass == 0) {
     // INTEGER: gp_offset at offset 0
     Node *gp_ptr = new_cast(ap_char, pointer_to(ty_uint));
-    Obj *gp = new_lvar("", ty_uint);
+    Obj2 *gp = new_lvar("", ty_uint);
     cur = cur->next = new_unary(ND_EXPR_STMT,
       new_binary(ND_ASSIGN, new_var_node(gp, tok), new_unary(ND_DEREF, gp_ptr, tok), tok), tok);
 
@@ -1858,7 +1858,7 @@ static Node *sysv64_builtin_va_arg(Node *ap, Type *ty, Token *tok) {
     // SSE: fp_offset at offset 4
     Node *fp_addr = new_add(ap_char, new_num(4, tok), tok);
     Node *fp_ptr = new_cast(fp_addr, pointer_to(ty_uint));
-    Obj *fp = new_lvar("", ty_uint);
+    Obj2 *fp = new_lvar("", ty_uint);
     cur = cur->next = new_unary(ND_EXPR_STMT,
       new_binary(ND_ASSIGN, new_var_node(fp, tok), new_unary(ND_DEREF, fp_ptr, tok), tok), tok);
 

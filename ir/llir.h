@@ -79,10 +79,10 @@ struct LLIRVReg {
   int last_use_pos;    // Last use position
   int phys_reg;        // Allocated physical register (-1 if none / spilled)
   int spill_offset;    // Stack frame spill slot
-  bool is_float;
-  bool is_pinned;
-  bool is_spilled;
-  bool is_struct_val;
+  uint32_t is_float : 1;
+  uint32_t is_pinned : 1;
+  uint32_t is_spilled : 1;
+  uint32_t is_struct_val : 1;
   int struct_size;
   Type *struct_ty;
 };
@@ -108,19 +108,19 @@ struct LLIRInsn {
   AsmOperand *asm_inputs;
   AsmClobber *asm_clobbers;
   AsmOperand *asm_labels;
-  bool asm_is_volatile;
-  bool asm_is_goto;
-  Obj *var;
+  uint32_t asm_is_volatile : 1;
+  uint32_t asm_is_goto : 1;
+  Obj2 *var;
   Type *ty;
   ABI *call_abi;
 
   // Addressing mode & immediate constraint fields
-  bool has_mem_op;
+  uint32_t has_mem_op : 1;
+  uint32_t is_imm_op : 1;
   LLIRVReg *base_reg;
   LLIRVReg *index_reg;
   int scale;           // 1, 2, 4, 8
   int64_t disp;
-  bool is_imm_op;
 
   int num_args;
   LLIRVReg **args;
@@ -136,11 +136,11 @@ struct LLIRBlock {
   int num_preds;
   LLIRBlock **succs;
   int num_succs;
-  bool reachable;
+  uint32_t reachable : 1;
 };
 
 struct LLIRFunction {
-  Obj *fn_obj;
+  Obj2 *fn_obj;
   char *name;
   Type *func_ty;
   ABI *abi;
@@ -156,21 +156,21 @@ struct LLIRFunction {
   LLIRBlock **blocks;
   int num_blocks;
 
-  Obj *locals;
-  Obj *params;
+  Obj2 *locals;
+  Obj2 *params;
   int stack_size;
   int shadow_space;
 };
 
 struct LLIRProg {
-  Obj *globals;
+  Obj2 *globals;
   LLIRFunction **fns;
   int num_fns;
 };
 
 // LLIR Lowering & Pipeline API
 LLIRProg *hlir_to_llir(HLIRProg *hlir);
-LLIRProg *ast_to_ir(Obj *prog);
+LLIRProg *ast_to_ir(Obj2 *prog);
 void llir_dump(FILE *out, LLIRProg *prog);
 void llir_dump_function(FILE *out, LLIRFunction *fn);
 
@@ -236,7 +236,7 @@ bool ir_insn_is_terminator(LLIRInsn *insn);
 bool ir_insn_is_branch(LLIRInsn *insn);
 bool ir_insn_is_commutative(LLIRKind kind);
 
-LLIRFunction *ir_new_function(Obj *fn_obj);
+LLIRFunction *ir_new_function(Obj2 *fn_obj);
 void ir_dump(FILE *out, LLIRProg *prog);
 void ir_dump_function(FILE *out, LLIRFunction *fn);
 

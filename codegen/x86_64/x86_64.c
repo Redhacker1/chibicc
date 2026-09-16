@@ -6,7 +6,7 @@
 
 static FILE *output_file;
 static int depth;
-Obj *current_fn = NULL;
+Obj2 *current_fn = NULL;
 static bool *current_needs_mat = NULL;
 
 __attribute__((format(printf, 1, 2)))
@@ -68,6 +68,8 @@ static void compute_materialization(LLIRFunction *fn) {
     if (insn->src1) use_count[insn->src1->id]++;
     if (insn->src2) use_count[insn->src2->id]++;
     if (insn->src3) use_count[insn->src3->id]++;
+    if (insn->base_reg) use_count[insn->base_reg->id]++;
+    if (insn->index_reg) use_count[insn->index_reg->id]++;
     for (int a = 0; a < insn->num_args; a++) {
       if (insn->args[a]) use_count[insn->args[a]->id]++;
     }
@@ -102,6 +104,8 @@ static void compute_materialization(LLIRFunction *fn) {
             if (def->src1) use_count[def->src1->id]--;
             if (def->src2) use_count[def->src2->id]--;
             if (def->src3) use_count[def->src3->id]--;
+            if (def->base_reg) use_count[def->base_reg->id]--;
+            if (def->index_reg) use_count[def->index_reg->id]--;
           }
           continue;
         }
@@ -119,7 +123,7 @@ static void compute_materialization(LLIRFunction *fn) {
               break;
             }
           }
-          if (insn->src2 == v || insn->src3 == v) {
+          if (insn->src2 == v || insn->src3 == v || insn->base_reg == v || insn->index_reg == v) {
             all_uses_foldable = false;
             break;
           }
@@ -175,7 +179,7 @@ static void compute_materialization(LLIRFunction *fn) {
               break;
             }
           }
-          if (insn->src3 == v) {
+          if (insn->src3 == v || insn->base_reg == v || insn->index_reg == v) {
             all_uses_folded = false;
             break;
           }
@@ -205,7 +209,7 @@ static void compute_materialization(LLIRFunction *fn) {
               break;
             }
           }
-          if (insn->src2 == v || insn->src3 == v) {
+          if (insn->src2 == v || insn->src3 == v || insn->base_reg == v || insn->index_reg == v) {
             all_uses_br = false;
             break;
           }
@@ -308,10 +312,10 @@ static int x86_int_size(Type *ty) {
 // ============================================================================
 // Data Section Emission
 // ============================================================================
-static void emit_data(Obj *prog, FILE *out) {
+static void emit_data(Obj2 *prog, FILE *out) {
   (void)out;
 
-  for (Obj *var = prog; var; var = var->next) {
+  for (Obj2 *var = prog; var; var = var->next) {
     if (var->is_asm) {
       println("  .text");
       println("  %s", var->asm_str ? var->asm_str : "");
@@ -2277,7 +2281,7 @@ static void emit_text(LLIRProg *prog, FILE *out) {
 
   for (int i = 0; i < prog->num_fns; i++) {
     LLIRFunction *fn = prog->fns[i];
-    Obj *fn_obj = fn->fn_obj;
+    Obj2 *fn_obj = fn->fn_obj;
     if (!fn_obj || !fn_obj->is_function || !fn_obj->is_definition || !fn_obj->is_live)
       continue;
 
@@ -2364,19 +2368,19 @@ static void x86_64_codegen(LLIRProg *prog, FILE *out) {
   }
 
   // Reset local offsets before the ABI assigns them
-  for (Obj *fn = prog->globals; fn; fn = fn->next) {
+  for (Obj2 *fn = prog->globals; fn; fn = fn->next) {
     if (!fn->is_function)
       continue;
 
-    for (Obj *v = fn->locals; v; v = v->next)
+    for (Obj2 *v = fn->locals; v; v = v->next)
       v->offset = 0;
 
-    for (Obj *v = fn->params; v; v = v->next)
+    for (Obj2 *v = fn->params; v; v = v->next)
       v->offset = 0;
   }
 
   // ABI-specific local/parameter layout
-  for (Obj *fn = prog->globals; fn; fn = fn->next) {
+  for (Obj2 *fn = prog->globals; fn; fn = fn->next) {
     if (!fn->is_function || !fn->is_definition)
       continue;
 
@@ -2391,7 +2395,7 @@ static void x86_64_codegen(LLIRProg *prog, FILE *out) {
     if (!fn)
       continue;
 
-    Obj *fn_obj = fn->fn_obj;
+    Obj2 *fn_obj = fn->fn_obj;
     const ABI *fn_abi = fn->abi ? fn->abi : (fn_obj ? get_fn_abi(fn_obj) : NULL);
     RegAllocPool pool = x86_64_reg_pool;
     if (fn_obj && fn_abi && fn_abi->get_spill_base) {

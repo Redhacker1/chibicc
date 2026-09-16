@@ -183,7 +183,7 @@ bool ir_insn_is_commutative(IRKind kind) {
   }
 }
 
-IRFunction *ir_new_function(Obj *fn_obj) {
+IRFunction *ir_new_function(Obj2 *fn_obj) {
   IRFunction *fn = calloc(1, sizeof(IRFunction));
   fn->fn_obj = fn_obj;
   fn->name = fn_obj->name;
@@ -238,7 +238,7 @@ static IRVReg *gen_addr_ir(IRFunction *fn, Node *node) {
       return gen_expr_ir(fn, node);
     if (node->ty && (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION)) {
       IRVReg *val = gen_expr_ir(fn, node);
-      Obj *tmp = calloc(1, sizeof(Obj));
+      Obj2 *tmp = calloc(1, sizeof(Obj2));
       tmp->name = "";
       tmp->ty = node->ty;
       tmp->is_local = true;
@@ -1201,12 +1201,12 @@ static void gen_stmt_ir(IRFunction *fn, Node *node) {
   }
 }
 
-IRProg *ast_to_ir(Obj *prog) {
+IRProg *ast_to_ir(Obj2 *prog) {
   IRProg *ir_prog = calloc(1, sizeof(IRProg));
   ir_prog->globals = prog;
 
   int fn_count = 0;
-  for (const Obj *fn = prog; fn; fn = fn->next)
+  for (const Obj2 *fn = prog; fn; fn = fn->next)
     if (fn->is_function && fn->is_definition && fn->is_live)
       fn_count++;
 
@@ -1214,7 +1214,7 @@ IRProg *ast_to_ir(Obj *prog) {
   ir_prog->num_fns = fn_count;
 
   int idx = 0;
-  for (Obj *fn = prog; fn; fn = fn->next) {
+  for (Obj2 *fn = prog; fn; fn = fn->next) {
     if (!fn->is_function || !fn->is_definition || !fn->is_live)
       continue;
 

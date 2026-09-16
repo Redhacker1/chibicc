@@ -3,17 +3,18 @@
 
 #include <stdio.h>
 
-typedef struct Obj Obj;
+typedef struct Obj2 Obj2;
+typedef Obj2 Obj;
 typedef struct ObjFmt ObjFmt;
 
 struct ObjFmt {
   const char *name;
   const char *description;
 
-  void (*emit_var_decl)(Obj *var, FILE *out);
-  void (*emit_var_type_size)(Obj *var, FILE *out);
-  void (*emit_fn_decl)(Obj *fn, FILE *out);
-  void (*emit_fn_type)(Obj *fn, FILE *out);
+  void (*emit_var_decl)(Obj2 *var, FILE *out);
+  void (*emit_var_type_size)(Obj2 *var, FILE *out);
+  void (*emit_fn_decl)(Obj2 *fn, FILE *out);
+  void (*emit_fn_type)(Obj2 *fn, FILE *out);
 };
 
 extern ObjFmt *current_objfmt;

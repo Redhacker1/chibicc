@@ -118,8 +118,8 @@ struct Token {
   char *filename;   // Filename
   int line_no;      // Line number
   int line_delta;   // Line number
-  bool at_bol;      // True if this token is at beginning of line
-  bool has_space;   // True if this token follows a space character
+  uint32_t at_bol : 1;      // True if this token is at beginning of line
+  uint32_t has_space : 1;   // True if this token follows a space character
   Hideset *hideset; // For macro expansion
   Token *origin;    // If this is expanded from a macro, the original token
 };
@@ -154,49 +154,60 @@ Token *tokenize_file(char *filename);
 typedef struct ABI ABI;
 
 // Variable or function
-typedef struct Obj Obj;
-struct Obj {
-  Obj *next;
+typedef struct Obj2 Obj2;
+typedef Obj2 Obj;
+
+struct Obj2 {
+  Obj2 *next;
   char *name;    // Variable name
   Type *ty;      // Type
   Token *tok;    // representative token
-  bool is_local; // local or global/function
   int align;     // alignment
 
-  // Local variable
-  int offset;
+  // Flags packed as bitfields
+  uint32_t is_local : 1;      // local or global/function
+  uint32_t is_function : 1;   // function or variable
+  uint32_t is_definition : 1; // is definition or forward declaration
+  uint32_t is_static : 1;     // static linkage
+  uint32_t is_tentative : 1;  // tentative definition
+  uint32_t is_tls : 1;        // thread-local storage
+  uint32_t is_readonly : 1;   // const / read-only data
+  uint32_t is_inline : 1;     // inline function
+  uint32_t is_live : 1;       // static inline function reached / referenced
+  uint32_t is_root : 1;       // static inline root
+  uint32_t is_asm : 1;        // top-level asm block
 
-  // Global variable or function
-  bool is_function;
-  bool is_definition;
-  bool is_static;
+  // Union payload partitioned by object kind
+  union {
+    // Local variable
+    struct {
+      int offset;
+    };
 
-  // Global variable
-  bool is_tentative;
-  bool is_tls;
-  bool is_readonly;
-  char *init_data;
-  Relocation *rel;
+    // Global variable
+    struct {
+      char *init_data;
+      Relocation *rel;
+    };
 
-  // Function
-  bool is_inline;
-  Obj *params;
-  Node *body;
-  Obj *locals;
-  Obj *va_area;
-  Obj *alloca_bottom;
-  int stack_size;
-  int callee_saved_mask;
-  ABI *abi; // Specific ABI / calling convention override for this function
+    // Function
+    struct {
+      Obj2 *params;
+      Node *body;
+      Obj2 *locals;
+      Obj2 *va_area;
+      Obj2 *alloca_bottom;
+      int stack_size;
+      int callee_saved_mask;
+      ABI *abi; // Specific ABI / calling convention override for this function
+      StringArray refs; // Static inline function refs
+    };
 
-  // Static inline function
-  bool is_live;
-  bool is_root;
-  StringArray refs;
-
-  // Top-level asm
-  bool is_asm;
-  char *asm_str;
+    // Top-level asm
+    struct {
+      char *asm_str;
+    };
+  };
 };
 
 // Global variable can be initialized either by a constant expression
@@ -271,15 +282,15 @@ struct AsmOperand {
   char *name;         // "[name]" or NULL
   char *constraint;   // e.g. "=r", "+m", "i", "0", etc.
   Node *expr;         // C expression (AST node)
-  int is_output;      // 1: output, 0: input, 2: goto label
+  uint32_t is_output : 2;      // 1: output, 0: input, 2: goto label
+  uint32_t is_imm_val : 1;    // True if imm_val is valid
   char *label_name;   // For asm goto
   char *unique_label; // Resolved unique label for asm goto
   Token *tok;         // Token for error reporting
   IRVReg *vreg;       // Allocated vreg in IR
   IRVReg *addr_vreg;  // Address vreg in IR (for indirect memory operands)
-  Obj *var;           // Direct variable (if local or global variable)
+  Obj2 *var;          // Direct variable (if local or global variable)
   int64_t imm_val;    // Immediate value (if constant)
-  bool is_imm_val;    // True if imm_val is valid
 };
 
 typedef struct AsmClobber AsmClobber;
@@ -299,7 +310,8 @@ struct Node {
   Node *rhs;     // Right-hand side
 
   // Compact union payload to minimize AST memory footprint
-  union {
+  union
+  {
     // Control flow: "if", "for", "while", "do", "switch", "case", "goto", labels, or "?:" conditional
     struct {
       Node *cond;
@@ -332,8 +344,8 @@ struct Node {
     struct {
       Type *func_ty;
       Node *args;
-      Obj *ret_buffer;
-      bool pass_by_stack;
+      Obj2 *ret_buffer;
+      uint32_t pass_by_stack : 1;
     };
 
     // "asm" inline assembly
@@ -343,9 +355,9 @@ struct Node {
       AsmOperand *asm_inputs;
       AsmClobber *asm_clobbers;
       AsmOperand *asm_labels;
-      bool asm_is_volatile;
-      bool asm_is_inline;
-      bool asm_is_goto;
+      uint32_t asm_is_volatile : 1;
+      uint32_t asm_is_inline : 1;
+      uint32_t asm_is_goto : 1;
     };
 
     // Atomic compare-and-swap and atomic op= operators
@@ -353,13 +365,13 @@ struct Node {
       Node *cas_addr;
       Node *cas_old;
       Node *cas_new;
-      Obj *atomic_addr;
+      Obj2 *atomic_addr;
       Node *atomic_expr;
     };
 
     // Variable or VLA designator or memzero
     struct {
-      Obj *var;
+      Obj2 *var;
     };
 
     // Numeric literal
@@ -372,7 +384,7 @@ struct Node {
 
 typedef struct VarScope VarScope;
 struct VarScope {
-  Obj *var;
+  Obj2 *var;
   Type *type_def;
   Type *enum_ty;
   int enum_val;
@@ -386,8 +398,8 @@ Node *new_unary(NodeKind kind, Node *expr, Token *tok);
 Node *new_num(int64_t val, Token *tok);
 Node *new_long(int64_t val, Token *tok);
 Node *new_ulong(long val, Token *tok);
-Node *new_var_node(Obj *var, Token *tok);
-Node *new_vla_ptr(Obj *var, Token *tok);
+Node *new_var_node(Obj2 *var, Token *tok);
+Node *new_vla_ptr(Obj2 *var, Token *tok);
 Node *new_add(Node *lhs, Node *rhs, Token *tok);
 Node *new_sub(Node *lhs, Node *rhs, Token *tok);
 Node *new_if_node(Node *cond, Node *then, Node *els, Token *tok);
@@ -414,11 +426,11 @@ bool node_is_unary(NodeKind kind);
 bool node_is_control_flow(NodeKind kind);
 bool node_is_atomic(NodeKind kind);
 
-Obj *new_lvar(char *name, Type *ty);
+Obj2 *new_lvar(char *name, Type *ty);
 VarScope *find_var(Token *tok);
 VarScope *push_scope(char *name);
 int64_t const_expr(Token **rest, Token *tok);
-Obj *parse(Token *tok);
+Obj2 *parse(Token *tok);
 
 //
 // type.c
@@ -448,42 +460,48 @@ struct Type {
   TypeKind kind;
   int size;           // sizeof() value
   int align;          // alignment
-  bool is_unsigned;   // unsigned or signed
-  bool is_atomic;     // true if _Atomic
+  uint32_t is_unsigned : 1;   // unsigned or signed
+  uint32_t is_atomic : 1;     // true if _Atomic
+  uint32_t is_flexible : 1;   // struct with flexible array member
+  uint32_t is_packed : 1;     // packed struct
+  uint32_t is_variadic : 1;   // variadic function type
   Type *origin;       // for type compatibility check
 
   // Pointer-to or array-of type. We intentionally use the same member
   // to represent pointer/array duality in C.
-  //
-  // In many contexts in which a pointer is expected, we examine this
-  // member instead of "kind" member to determine whether a type is a
-  // pointer or not. That means in many contexts "array of T" is
-  // naturally handled as if it were "pointer to T", as required by
-  // the C spec.
   Type *base;
 
   // Declaration
   Token *name;
   Token *name_pos;
 
-  // Array
-  int array_len;
+  Type *next; // for parameter list / type chaining
 
-  // Variable-length array
-  Node *vla_len; // # of elements
-  Obj *vla_size; // sizeof() value
+  // Union payload partitioned by kind
+  union {
+    // Array
+    struct {
+      int array_len;
+    };
 
-  // Struct
-  Member *members;
-  bool is_flexible;
-  bool is_packed;
+    // Variable-length array
+    struct {
+      Node *vla_len; // # of elements
+      Obj2 *vla_size; // sizeof() value
+    };
 
-  // Function type
-  Type *return_ty;
-  Type *params;
-  bool is_variadic;
-  Type *next;
-  ABI *abi; // Specific ABI / calling convention for this function type
+    // Struct / Union
+    struct {
+      Member *members;
+    };
+
+    // Function type
+    struct {
+      Type *return_ty;
+      Type *params;
+      ABI *abi; // Specific ABI / calling convention for this function type
+    };
+  };
 };
 
 // Struct member
@@ -497,7 +515,7 @@ struct Member {
   int offset;
 
   // Bitfield
-  bool is_bitfield;
+  uint32_t is_bitfield : 1;
   int bit_offset;
   int bit_width;
 };
@@ -542,7 +560,7 @@ void add_type(Node *node);
 #include "codegen/codegen.h"
 #include "codegen/common/common.h"
 
-void codegen(Obj *prog, FILE *out);
+void codegen(Obj2 *prog, FILE *out);
 void init_target(const char *target_name, const char *abi_name);
 void init_all_targets_and_abis(void);
 
@@ -552,7 +570,7 @@ static inline ABI *get_node_abi(Node *node) {
   return current_abi;
 }
 
-static inline ABI *get_fn_abi(Obj *fn) {
+static inline ABI *get_fn_abi(Obj2 *fn) {
   if (fn && fn->abi)
     return fn->abi;
   if (fn && fn->ty && fn->ty->abi)

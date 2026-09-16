@@ -151,6 +151,7 @@ bool ir_opt_copy_prop(IRFunction *fn);
 bool ir_opt_dce(IRFunction *fn);
 bool ir_opt_cfg_simplify(IRFunction *fn);
 bool ir_opt_peephole(IRFunction *fn);
+bool ir_opt_legalize_isel(IRFunction *fn);
 
 // Common IR Predicates & Algebraic Rule Helpers
 static inline int ir_vreg_size(const IRVReg *v) {

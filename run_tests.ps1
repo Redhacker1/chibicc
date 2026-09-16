@@ -321,7 +321,7 @@ if (Test-Path $confDir) {
 $optDir = "$RootDir\tests\optimizations"
 if (Test-Path $optDir) {
     # 4.1 Integration tests compiled with chibicc
-    $integrationTests = Get-ChildItem -Path "$optDir\*.c" | Where-Object { $_.Name -ne "hlir_opt_handcrafted.c" } | Sort-Object Name
+    $integrationTests = Get-ChildItem -Path "$optDir\*.c" | Where-Object { $_.Name -ne "hlir_opt_handcrafted.c" -and $_.Name -ne "ir_opt_unit_test.c" } | Sort-Object Name
     Write-Host "`n========================================" -ForegroundColor Cyan
     Write-Host "Section 4: Optimization Passes Tests ($($integrationTests.Count) suites)" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor Cyan
@@ -411,6 +411,27 @@ if (Test-Path $optDir) {
         }
     } else {
         Write-Host "  [SKIP] hlir-opt-test (Not found at $handcraftedExe)" -ForegroundColor Yellow
+    }
+
+    $irOptExe = ".\cmake-build-debug\ir-opt-test.exe"
+    if (-not (Test-Path $irOptExe)) {
+        $irOptExe = ".\ir-opt-test.exe"
+    }
+    if (Test-Path $irOptExe) {
+        $output = & $irOptExe 2>&1
+        $output | ForEach-Object {
+            Write-Host "  $_" -ForegroundColor DarkGray
+        }
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  [PASS] ir-opt-test" -ForegroundColor Green
+            $Passed++
+        } else {
+            Write-Host "  [FAIL] ir-opt-test (Failed with exit code $LASTEXITCODE)" -ForegroundColor Red
+            $Failed++
+            $FailedTests += "optimizations/ir-opt-test (internal)"
+        }
+    } else {
+        Write-Host "  [SKIP] ir-opt-test (Not found at $irOptExe)" -ForegroundColor Yellow
     }
 
     # Cleanup common helper
